@@ -1,9 +1,9 @@
 import { isRecord, keySetError } from "../shape.ts";
 import { normalizeWhitespace, parseMonthDayYear } from "../text.ts";
-import { callStructuredChat, chatConfig } from "./chat.ts";
+import { callStructuredChat, chatConfig, modelInfo } from "./chat.ts";
 import { excerptTags, DECISION_SYSTEM_PROMPT } from "./prompt.ts";
 import { quoteInText } from "./validate.ts";
-import type { Excerpt, NeedsReviewReason } from "./types.ts";
+import type { Excerpt, NeedsReviewOutcome, NeedsReviewReason } from "./types.ts";
 import type { OpenRouterProviderConfig } from "./openrouter.ts";
 
 const DEFAULT_THRESHOLD = 0.8;
@@ -97,15 +97,7 @@ export type ScheduleOutcome =
       servedBy?: string;
       latencyMs: number;
     }
-  | {
-      status: "needs_review";
-      reason: NeedsReviewReason;
-      detail: string;
-      provider: string;
-      model?: string;
-      modelVersion?: string;
-      servedBy?: string;
-    };
+  | NeedsReviewOutcome;
 
 const AMOUNT_RE = /^\$(\d{1,3}(?:,\d{3})*)(\.\d{2})?$/;
 const PERIOD_RE = /^(\d+)-month$/;
@@ -416,25 +408,18 @@ export class OpenRouterScheduleExtractor {
     });
 
     if (!result.ok) {
-      return failOutcome(result.reason, result.detail, {
-        ...(result.modelVersion !== undefined ? { modelVersion: result.modelVersion } : {}),
-        ...(result.servedBy !== undefined ? { servedBy: result.servedBy } : {}),
-      });
+      return failOutcome(result.reason, result.detail, modelInfo(result));
     }
     const validation = validateScheduleExtraction(result.parsed, question.excerpts, this.threshold);
     if (!validation.ok) {
-      return failOutcome(validation.reason, validation.detail, {
-        modelVersion: result.modelVersion,
-        ...(result.servedBy !== undefined ? { servedBy: result.servedBy } : {}),
-      });
+      return failOutcome(validation.reason, validation.detail, modelInfo(result));
     }
     return {
       status: "extracted",
       schedule: validation.schedule,
       provider: this.name,
       model: this.model,
-      modelVersion: result.modelVersion,
-      ...(result.servedBy !== undefined ? { servedBy: result.servedBy } : {}),
+      ...modelInfo(result),
       latencyMs: result.latencyMs,
     };
   }

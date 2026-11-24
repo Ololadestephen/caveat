@@ -1,4 +1,4 @@
-import { callStructuredChat, chatConfig } from "./chat.ts";
+import { callStructuredChat, chatConfig, modelInfo } from "./chat.ts";
 import { decisionSchema } from "./schema.ts";
 import { validateDecision } from "./validate.ts";
 import { DECISION_SYSTEM_PROMPT, buildDecisionUserPrompt } from "./prompt.ts";
@@ -66,16 +66,10 @@ export class OpenRouterDecisionProvider implements DecisionProvider {
     );
 
     if (!result.ok) {
-      return fail(result.reason, result.detail, {
-        ...(result.modelVersion !== undefined ? { modelVersion: result.modelVersion } : {}),
-        ...(result.servedBy !== undefined ? { servedBy: result.servedBy } : {}),
-      });
+      return fail(result.reason, result.detail, modelInfo(result));
     }
 
-    const context = {
-      modelVersion: result.modelVersion,
-      ...(result.servedBy !== undefined ? { servedBy: result.servedBy } : {}),
-    };
+    const context = modelInfo(result);
     const validation = validateDecision(result.parsed, question, this.threshold);
     if (!validation.ok) {
       return fail(validation.reason, validation.detail, {

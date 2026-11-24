@@ -47,6 +47,18 @@ export type ChatResult =
       servedBy?: string;
     };
 
+// The optional model metadata fields a chat result may carry; spreads cleanly
+// into outcome objects so absent fields stay absent.
+export function modelInfo(result: { modelVersion?: string; servedBy?: string }): {
+  modelVersion?: string;
+  servedBy?: string;
+} {
+  return {
+    ...(result.modelVersion !== undefined ? { modelVersion: result.modelVersion } : {}),
+    ...(result.servedBy !== undefined ? { servedBy: result.servedBy } : {}),
+  };
+}
+
 const ERROR_MESSAGE_MAX = 200;
 
 function truncate(value: string, max = ERROR_MESSAGE_MAX): string {

@@ -62,6 +62,17 @@ export type NeedsReviewReason =
   | "timeout"
   | "network_error";
 
+// The "needs_review" member shared by every provider outcome.
+export type NeedsReviewOutcome = {
+  status: "needs_review";
+  reason: NeedsReviewReason;
+  detail: string;
+  provider: string;
+  model?: string;
+  modelVersion?: string;
+  servedBy?: string;
+};
+
 export type DecisionOutcome =
   | {
       status: "decided";
@@ -72,13 +83,4 @@ export type DecisionOutcome =
       servedBy?: string;
       latencyMs: number;
     }
-  | {
-      status: "needs_review";
-      reason: NeedsReviewReason;
-      detail: string;
-      provider: string;
-      model?: string;
-      modelVersion?: string;
-      servedBy?: string;
-      decision?: Decision;
-    };
+  | (NeedsReviewOutcome & { decision?: Decision });
