@@ -6,7 +6,7 @@
 # (d) checkpoint A -> mutate -> restore -> original content back, post-marker
 #     gone, pre-marker kept, B untouched
 # Writes a sanitized JSON summary to ~/caveat-private/m1/isolation-<ts>.json
-# and exits non-zero if any check fails.
+# and exits 1 if any check fails, 3 if a check was skipped (incomplete).
 set -uo pipefail
 
 SPRITE="${SPRITE_CLI:-$HOME/.local/bin/sprite}"
@@ -142,7 +142,11 @@ fi
 # --- verdict + summary --------------------------------------------------------
 # skipped checks (connector not configured) are reported but do not fail the run
 ALL_PASS=1
-for R in "${CHECK_RESULTS[@]}"; do [ "$R" != fail ] || ALL_PASS=0; done
+ANY_SKIPPED=0
+for R in "${CHECK_RESULTS[@]}"; do
+  [ "$R" != fail ] || ALL_PASS=0
+  [ "$R" != skipped_not_configured ] || ANY_SKIPPED=1
+done
 
 DELETED=false
 if [ "$ALL_PASS" = 1 ] && [ -n "${VER:-}" ]; then
@@ -183,9 +187,10 @@ cat > "$OUT" <<JSON
     "checkpointCreate": $CHECKPOINT_CREATE_MS,
     "restoreUntilReady": $RESTORE_MS
   },
-  "result": "$([ "$ALL_PASS" = 1 ] && echo pass || echo fail)"
+  "result": "$([ "$ALL_PASS" = 0 ] && echo fail || { [ "$ANY_SKIPPED" = 1 ] && echo incomplete || echo pass; })"
 }
 JSON
 
 cat "$OUT"
-[ "$ALL_PASS" = 1 ]
+[ "$ALL_PASS" = 1 ] || exit 1
+[ "$ANY_SKIPPED" = 0 ] || exit 3
