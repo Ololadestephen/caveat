@@ -67,11 +67,11 @@ describe("approveRun", () => {
     const db = openDb(":memory:");
     seedRun(db, "run-1");
     finishRun(db, "run-1", "reviewable", null);
-    const first = approveRun(db, "run-1", "rhash", "dhash", "Ololade Stephen", "t");
+    const first = approveRun(db, { runId: "run-1", receiptHash: "rhash", draftHash: "dhash", approvedBy: "Ololade Stephen", approvedAt: "t" });
     expect(first).toMatchObject({ ok: true, created: true });
     expect(getRun(db, "run-1")?.status).toBe("approved");
 
-    const again = approveRun(db, "run-1", "rhash", "dhash", "Ololade Stephen", "t2");
+    const again = approveRun(db, { runId: "run-1", receiptHash: "rhash", draftHash: "dhash", approvedBy: "Ololade Stephen", approvedAt: "t2" });
     expect(again).toMatchObject({ ok: true, created: false });
     if (again.ok && first.ok) {
       expect(again.approval.id).toBe(first.approval.id);
@@ -85,7 +85,7 @@ describe("approveRun", () => {
     const db = openDb(":memory:");
     seedRun(db, "run-1");
     finishRun(db, "run-1", "reviewable", null);
-    const out = approveRun(db, "run-1", "rhash", "WRONG", "Ololade Stephen", "t");
+    const out = approveRun(db, { runId: "run-1", receiptHash: "rhash", draftHash: "WRONG", approvedBy: "Ololade Stephen", approvedAt: "t" });
     expect(out).toMatchObject({ ok: false, error: "hash_mismatch" });
     expect(getApproval(db, "run-1")).toBeUndefined();
     expect(getRun(db, "run-1")?.status).toBe("reviewable");
@@ -97,7 +97,7 @@ describe("approveRun", () => {
       seedRun(db, `run-${status}`);
       finishRun(db, `run-${status}`, status === "stale" ? "reviewable" : status, null);
       if (status === "stale") markStale(db, `run-${status}`, "{}");
-      const out = approveRun(db, `run-${status}`, "rhash", "dhash", "X", "t");
+      const out = approveRun(db, { runId: `run-${status}`, receiptHash: "rhash", draftHash: "dhash", approvedBy: "X", approvedAt: "t" });
       expect(out).toMatchObject({ ok: false, error: "wrong_status" });
     }
   });
@@ -106,16 +106,16 @@ describe("approveRun", () => {
     const db = openDb(":memory:");
     seedRun(db, "run-1");
     finishRun(db, "run-1", "reviewable", null);
-    approveRun(db, "run-1", "rhash", "dhash", "X", "t");
+    approveRun(db, { runId: "run-1", receiptHash: "rhash", draftHash: "dhash", approvedBy: "X", approvedAt: "t" });
     markStale(db, "run-1", "[{\"kind\":\"version_changed\"}]");
-    const out = approveRun(db, "run-1", "rhash", "dhash", "X", "t2");
+    const out = approveRun(db, { runId: "run-1", receiptHash: "rhash", draftHash: "dhash", approvedBy: "X", approvedAt: "t2" });
     expect(out).toMatchObject({ ok: false, error: "wrong_status", status: "stale" });
     expect(getApproval(db, "run-1")?.approved_at).toBe("t");
   });
 
   it("returns not_found for a missing run", () => {
     const db = openDb(":memory:");
-    expect(approveRun(db, "nope", "r", "d", "X", "t")).toMatchObject({
+    expect(approveRun(db, { runId: "nope", receiptHash: "r", draftHash: "d", approvedBy: "X", approvedAt: "t" })).toMatchObject({
       ok: false,
       error: "not_found",
     });
@@ -127,7 +127,7 @@ describe("exports and staleness", () => {
     const db = openDb(":memory:");
     seedRun(db, "run-1");
     finishRun(db, "run-1", "reviewable", null);
-    approveRun(db, "run-1", "rhash", "dhash", "X", "t");
+    approveRun(db, { runId: "run-1", receiptHash: "rhash", draftHash: "dhash", approvedBy: "X", approvedAt: "t" });
     const approval = getApproval(db, "run-1")!;
     recordExport(db, {
       runId: "run-1",

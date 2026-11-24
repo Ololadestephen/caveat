@@ -230,12 +230,15 @@ export type ApproveOutcome =
 
 export function approveRun(
   db: DatabaseSync,
-  runId: string,
-  receiptHash: string,
-  draftHash: string,
-  approvedBy: string,
-  approvedAt: string,
+  input: {
+    runId: string;
+    receiptHash: string;
+    draftHash: string;
+    approvedBy: string;
+    approvedAt: string;
+  },
 ): ApproveOutcome {
+  const { runId, receiptHash, draftHash, approvedBy, approvedAt } = input;
   const run = getRun(db, runId);
   if (run === undefined) return { ok: false, error: "not_found" };
   if (run.receipt_hash !== receiptHash || run.draft_hash !== draftHash) {

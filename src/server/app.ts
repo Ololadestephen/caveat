@@ -173,14 +173,13 @@ async function handleApprove(
   const body = new URLSearchParams(await readBody(req));
   const rHash = body.get("receiptHash") ?? "";
   const dHash = body.get("draftHash") ?? "";
-  const outcome = approveRun(
-    db,
+  const outcome = approveRun(db, {
     runId,
-    rHash,
-    dHash,
-    deps.approver,
-    new Date().toISOString(),
-  );
+    receiptHash: rHash,
+    draftHash: dHash,
+    approvedBy: deps.approver,
+    approvedAt: new Date().toISOString(),
+  });
   if (!outcome.ok) {
     const status = outcome.error === "not_found" ? 404 : 409;
     const detail =
