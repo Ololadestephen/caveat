@@ -24,6 +24,7 @@ const REVIEW_REASON_LABELS: Record<NeedsReviewReason, string> = {
   blocked: "Provider blocked the response",
   truncated: "Provider output was truncated",
   rate_limited: "Provider rate limit reached",
+  provider_error: "Provider reported an error",
   http_error: "Provider returned an HTTP error",
   timeout: "Provider request timed out",
   network_error: "Provider request failed at the network layer",
@@ -66,6 +67,12 @@ function modelLine(model: string | undefined, modelVersion: string | undefined):
   return `<p class="decision-model">model ${escapeHtml(model)}${resolved}</p>`;
 }
 
+function servedByLine(servedBy: string | undefined): string {
+  return servedBy === undefined
+    ? ""
+    : `<p class="decision-served-by">served by ${escapeHtml(servedBy)}</p>`;
+}
+
 export function renderDecisionCard(
   outcome: DecisionOutcome,
   question?: BillingTriggerQuestion,
@@ -82,6 +89,7 @@ export function renderDecisionCard(
     <cite>${excerptSourceLine(excerpt, decision.cited_clause.excerpt_id)}</cite>
   </blockquote>
   ${modelLine(outcome.model, outcome.modelVersion)}
+  ${servedByLine(outcome.servedBy)}
   <p class="decision-confidence">${formatConfidence(decision.confidence)}</p>
 </section>`;
   }
@@ -103,6 +111,7 @@ export function renderDecisionCard(
   <p class="decision-review-reason">${escapeHtml(REVIEW_REASON_LABELS[outcome.reason])}</p>
   <p class="decision-review-detail">${escapeHtml(outcome.detail)}</p>
   ${modelLine(outcome.model, outcome.modelVersion)}
+  ${servedByLine(outcome.servedBy)}
   ${decisionBlock}
 </section>`;
 }

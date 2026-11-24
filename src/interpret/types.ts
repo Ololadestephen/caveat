@@ -42,6 +42,7 @@ export type NeedsReviewReason =
   | "blocked"
   | "truncated"
   | "rate_limited"
+  | "provider_error"
   | "http_error"
   | "timeout"
   | "network_error";
@@ -53,6 +54,7 @@ export type DecisionOutcome =
       provider: string;
       model: string;
       modelVersion?: string;
+      servedBy?: string;
       latencyMs: number;
     }
   | {
@@ -62,5 +64,6 @@ export type DecisionOutcome =
       provider: string;
       model?: string;
       modelVersion?: string;
+      servedBy?: string;
       decision?: Decision;
     };
