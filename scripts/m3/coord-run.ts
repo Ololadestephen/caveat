@@ -88,6 +88,11 @@ function stepError(step: string, error: unknown): never {
   process.exit(1);
 }
 
+// The typed questions concern the escrow compensation in the operative
+// (second) amendment; the other files' sections are still used for flags and
+// human-review citation verification.
+const OPERATIVE_FILE = process.env.CAVEAT_OPERATIVE_FILE ?? "03-second-amendment.pdf";
+
 const runId =
   process.env.CAVEAT_RUN_ID ??
   `m3-${new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "")}`;
@@ -171,7 +176,11 @@ timed("sections", started, null);
 // --- Shared state ------------------------------------------------------------
 const blockedReasons: { reason: string; detail: string }[] = [];
 const model = process.env.CAVEAT_DECISION_MODEL ?? DEFAULT_MODEL;
-const question: Question = { spec: RELEASE_TIMING, id: RELEASE_TIMING.id, excerpts };
+const decisionExcerpts = excerpts.filter((e) => e.source.fileName === OPERATIVE_FILE);
+if (decisionExcerpts.length === 0) {
+  stepError("sections", new Error(`no sections extracted from ${OPERATIVE_FILE}`));
+}
+const question: Question = { spec: RELEASE_TIMING, id: RELEASE_TIMING.id, excerpts: decisionExcerpts };
 
 // --- Typed decision: release_timing -----------------------------------------
 started = performance.now();
@@ -185,7 +194,10 @@ const extractor = new OpenRouterScheduleExtractor({
   gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
   model,
 });
-const schedule: ScheduleOutcome = await extractor.extract({ id: "escrow_schedule", excerpts });
+const schedule: ScheduleOutcome = await extractor.extract({
+  id: "escrow_schedule",
+  excerpts: decisionExcerpts,
+});
 timed("schedule", started, null);
 
 // --- Flags -------------------------------------------------------------------
@@ -338,7 +350,7 @@ const receipt: RunReceipt = {
   releaseTiming: { outcome: decision, question },
   effectiveAction,
   overrides,
-  schedule: { outcome: schedule, excerpts },
+  schedule: { outcome: schedule, excerpts: decisionExcerpts },
   humanReview,
   flags,
   readings,

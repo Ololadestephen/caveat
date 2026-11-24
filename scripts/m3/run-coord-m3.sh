@@ -26,10 +26,14 @@ for F in package.json package-lock.json; do
 done
 sprite file push -p -s "$SPRITE" -r "$REVIEWS" "$REMOTE_DIR/reviews" >/dev/null
 
-# The coordinator needs pdfjs-dist for PDF text extraction.
-if ! sprite exec --no-stdin -s "$SPRITE" -- sh -c "cd '$REMOTE_DIR' && npm ci --omit=dev --no-audit --no-fund" >/dev/null; then
-  echo "npm ci failed on the coordinator (registry unreachable?); push node_modules and retry" >&2
-  exit 1
+# The coordinator needs pdfjs-dist for PDF text extraction. Prefer a clean
+# lockfile install; if npm ci cannot run on the sprite (registry unreachable or
+# lockfile version drift), push the local package — pdfjs-dist has no runtime
+# dependencies, so the directory alone resolves.
+if ! sprite exec --no-stdin -s "$SPRITE" -- sh -c "cd '$REMOTE_DIR' && npm ci --omit=dev --no-audit --no-fund" >/dev/null 2>&1; then
+  echo "npm ci failed on the coordinator; pushing node_modules/pdfjs-dist instead" >&2
+  sprite file push -p -s "$SPRITE" -r "$REPO_ROOT/node_modules/pdfjs-dist" \
+    "$REMOTE_DIR/node_modules/pdfjs-dist" >/dev/null
 fi
 
 ENV_VARS="CAVEAT_RUN_ID=$RUN_ID"
@@ -48,7 +52,10 @@ sprite exec --no-stdin -s "$SPRITE" --env "$ENV_VARS" \
 RC=${PIPESTATUS[0]}
 set -e
 
-sprite file pull -p -r -s "$SPRITE" "/home/sprite/caveat-runs/$RUN_ID" \
-  "$EVIDENCE_DIR/$RUN_ID" >/dev/null 2>&1 || echo "warning: could not pull run outputs" >&2
+mkdir -p "$EVIDENCE_DIR/$RUN_ID"
+for F in receipt.json review.html; do
+  sprite file pull -s "$SPRITE" "/home/sprite/caveat-runs/$RUN_ID/$F" \
+    "$EVIDENCE_DIR/$RUN_ID/" >/dev/null 2>&1 || echo "warning: could not pull $F" >&2
+done
 
 exit "$RC"
