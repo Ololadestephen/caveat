@@ -124,7 +124,7 @@ export function extractAmountCents(text: string): number | undefined {
 
 type Invalid = Extract<ScheduleValidation, { ok: false }>;
 
-function fail(reason: NeedsReviewReason, detail: string): Invalid {
+function invalid(reason: NeedsReviewReason, detail: string): Invalid {
   return { ok: false, reason, detail };
 }
 
@@ -136,26 +136,26 @@ function checkTextQuote(
   excerptById: Map<string, { index: number; text: string }>,
 ): Invalid | undefined {
   if (typeof field.text !== "string" || field.text.length === 0) {
-    return fail("schema_mismatch", `${fieldPath}.text must be a non-empty string`);
+    return invalid("schema_mismatch", `${fieldPath}.text must be a non-empty string`);
   }
   if (typeof field.excerpt_id !== "string" || field.excerpt_id.length === 0) {
-    return fail("schema_mismatch", `${fieldPath}.excerpt_id must be a non-empty string`);
+    return invalid("schema_mismatch", `${fieldPath}.excerpt_id must be a non-empty string`);
   }
   if (typeof field.quote !== "string" || field.quote.length === 0) {
-    return fail("schema_mismatch", `${fieldPath}.quote must be a non-empty string`);
+    return invalid("schema_mismatch", `${fieldPath}.quote must be a non-empty string`);
   }
   const excerpt = excerptById.get(field.excerpt_id);
   if (excerpt === undefined) {
-    return fail(
+    return invalid(
       "unknown_excerpt",
       `${fieldPath} cites excerpt id ${JSON.stringify(field.excerpt_id)} which was not supplied`,
     );
   }
   if (!quoteInText(field.quote, excerpt.text)) {
-    return fail("quote_not_verbatim", `${fieldPath}.quote is not verbatim in its cited excerpt`);
+    return invalid("quote_not_verbatim", `${fieldPath}.quote is not verbatim in its cited excerpt`);
   }
   if (!quoteInText(field.text, field.quote)) {
-    return fail("quote_not_verbatim", `${fieldPath}.text is not verbatim within its quote`);
+    return invalid("quote_not_verbatim", `${fieldPath}.text is not verbatim within its quote`);
   }
   return undefined;
 }
@@ -169,9 +169,9 @@ function fieldQuote(
   excerptById: ExcerptIndex,
 ): { ok: true; value: TextQuote } | Invalid {
   const field = parent[name];
-  if (!isRecord(field)) return fail("schema_mismatch", `${name} is not a JSON object`);
+  if (!isRecord(field)) return invalid("schema_mismatch", `${name} is not a JSON object`);
   const keys = keySetError(field, ["text", "excerpt_id", "quote"]);
-  if (keys !== undefined) return fail("schema_mismatch", `${name}: ${keys}`);
+  if (keys !== undefined) return invalid("schema_mismatch", `${name}: ${keys}`);
   const quote = field as unknown as TextQuote;
   const bad = checkTextQuote(quote, name, excerptById);
   if (bad !== undefined) return bad;
@@ -192,18 +192,18 @@ function rawReleases(
   excerptById: ExcerptIndex,
 ): { ok: true; value: RawRelease[] } | Invalid {
   if (!Array.isArray(value)) {
-    return fail("schema_mismatch", "releases is not an array");
+    return invalid("schema_mismatch", "releases is not an array");
   }
   if (value.length < 1 || value.length > 8) {
-    return fail("schema_mismatch", "releases must contain between 1 and 8 items");
+    return invalid("schema_mismatch", "releases must contain between 1 and 8 items");
   }
   const RELEASE_KEYS = ["amount_text", "date_text", "condition_text", "excerpt_id", "quote"];
   const releases: RawRelease[] = [];
   for (const [i, item] of value.entries()) {
     const path = `releases[${i}]`;
-    if (!isRecord(item)) return fail("schema_mismatch", `${path} is not a JSON object`);
+    if (!isRecord(item)) return invalid("schema_mismatch", `${path} is not a JSON object`);
     const keys = keySetError(item, RELEASE_KEYS);
-    if (keys !== undefined) return fail("schema_mismatch", `${path}: ${keys}`);
+    if (keys !== undefined) return invalid("schema_mismatch", `${path}: ${keys}`);
     const release = item as unknown as RawRelease;
     const bad = checkTextQuote(
       { text: release.amount_text, excerpt_id: release.excerpt_id, quote: release.quote },
@@ -217,10 +217,10 @@ function rawReleases(
     ] as const) {
       if (fieldValue === null) continue;
       if (typeof fieldValue !== "string" || fieldValue.length === 0) {
-        return fail("schema_mismatch", `${path}.${field} must be a string or null`);
+        return invalid("schema_mismatch", `${path}.${field} must be a string or null`);
       }
       if (!quoteInText(fieldValue, release.quote)) {
-        return fail(
+        return invalid(
           "quote_not_verbatim",
           `${path}.${field} is not verbatim within its quote`,
         );
@@ -246,14 +246,14 @@ function buildRelease(
 ): { ok: true; value: ValidatedRelease } | Invalid {
   const amountCents = parseAmountCents(release.amount_text);
   if (amountCents === undefined) {
-    return fail(
+    return invalid(
       "schema_mismatch",
       `release amount_text ${JSON.stringify(release.amount_text)} is not a dollar amount like "$1,234"`,
     );
   }
   const parsedDate = parseMonthDayYear(release.date_text);
   if (parsedDate === undefined) {
-    return fail(
+    return invalid(
       "schema_mismatch",
       `release date_text ${JSON.stringify(release.date_text)} is not a "Month D, YYYY" date`,
     );
@@ -263,7 +263,7 @@ function buildRelease(
     const until = UNTIL_DATE_RE.exec(release.condition_text ?? "");
     const untilDate = until !== null ? parseMonthDayYear(until[1] ?? "") : undefined;
     if (untilDate === undefined) {
-      return fail(
+      return invalid(
         "schema_mismatch",
         `release condition_text ${JSON.stringify(release.condition_text)} contains no "until <Month D, YYYY>" date`,
       );
@@ -298,10 +298,10 @@ export function validateScheduleExtraction(
   threshold: number,
 ): ScheduleValidation {
   if (!isRecord(parsed)) {
-    return fail("schema_mismatch", "extraction is not a JSON object");
+    return invalid("schema_mismatch", "extraction is not a JSON object");
   }
   const topError = keySetError(parsed, ["monthly_amount", "period", "releases", "confidence"]);
-  if (topError !== undefined) return fail("schema_mismatch", topError);
+  if (topError !== undefined) return invalid("schema_mismatch", topError);
 
   const excerptById = new Map(excerpts.map((e, index) => [e.id, { index, text: e.text }]));
 
@@ -318,19 +318,19 @@ export function validateScheduleExtraction(
 
   const confidence = parsed.confidence;
   if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
-    return fail("schema_mismatch", "confidence must be a number between 0 and 1");
+    return invalid("schema_mismatch", "confidence must be a number between 0 and 1");
   }
 
   const monthlyAmountCents = parseAmountCents(monthly.text);
   if (monthlyAmountCents === undefined) {
-    return fail(
+    return invalid(
       "schema_mismatch",
       `monthly_amount.text ${JSON.stringify(monthly.text)} is not a dollar amount like "$1,234"`,
     );
   }
   const periodMatch = PERIOD_RE.exec(period.text.trim());
   if (periodMatch === null) {
-    return fail(
+    return invalid(
       "schema_mismatch",
       `period.text ${JSON.stringify(period.text)} is not a "<n>-month" period`,
     );
@@ -371,7 +371,7 @@ export function validateScheduleExtraction(
   if (conditionalBad !== undefined) return conditionalBad;
 
   if (confidence < threshold) {
-    return fail(
+    return invalid(
       "low_confidence",
       `self-reported confidence ${confidence} is below threshold ${threshold}`,
     );
@@ -379,7 +379,7 @@ export function validateScheduleExtraction(
 
   const expected = monthlyAmountCents * periodMonths;
   if (expected !== releaseSum) {
-    return fail(
+    return invalid(
       "inconsistent_terms",
       `monthly amount ${monthlyAmountCents} x ${periodMonths} months = ${expected} but the releases sum to ${releaseSum}`,
     );

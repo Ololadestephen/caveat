@@ -222,7 +222,7 @@ async function handleExport(ctx: Ctx, res: ServerResponse, runId: string): Promi
   if (run.status !== "approved" || approval === undefined) {
     return sendHtml(res, 409, pageShell("Export failed", deps.revision, `<h1>Export failed</h1><p>This run is ${escapeHtml(run.status)}; only approved runs can be exported.</p><p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
   }
-  const fail = (status: number, result: "blocked_stale" | "blocked_unavailable", detail: unknown, body: string): void => {
+  const blockExport = (status: number, result: "blocked_stale" | "blocked_unavailable", detail: unknown, body: string): void => {
     recordExport(db, {
       runId,
       approvalId: approval.id,
@@ -240,31 +240,31 @@ async function handleExport(ctx: Ctx, res: ServerResponse, runId: string): Promi
     if (!Array.isArray(parsed)) throw new Error("not an array");
     tuple = parsed as SourceTuple;
   } catch {
-    return fail(503, "blocked_unavailable", "stored source tuple unreadable", "<h1>Export blocked</h1><p>The stored source tuple is unreadable.</p>");
+    return blockExport(503, "blocked_unavailable", "stored source tuple unreadable", "<h1>Export blocked</h1><p>The stored source tuple is unreadable.</p>");
   }
 
   try {
     const conns = await connections();
     const box = conns.find((c) => c.provider === "box");
     if (box === undefined) {
-      return fail(503, "blocked_unavailable", "box connector not configured", "<h1>Export blocked</h1><p>The Box connector is not configured.</p>");
+      return blockExport(503, "blocked_unavailable", "box connector not configured", "<h1>Export blocked</h1><p>The Box connector is not configured.</p>");
     }
     const outcome = await recheck(box.gatewayBaseUrl, "0", deps.boxFolder, tuple, {
       timeoutMs: deps.recheckTimeoutMs,
     });
     if (!outcome.ok) {
-      return fail(503, "blocked_unavailable", outcome.detail, `<h1>Export blocked</h1><p>The source files could not be re-read right now (${escapeHtml(outcome.detail)}). The run stays approved; try again.</p>`);
+      return blockExport(503, "blocked_unavailable", outcome.detail, `<h1>Export blocked</h1><p>The source files could not be re-read right now (${escapeHtml(outcome.detail)}). The run stays approved; try again.</p>`);
     }
     if (outcome.changes.length > 0) {
       markStale(db, runId, JSON.stringify(outcome.changes));
       const items = outcome.changes
         .map((c) => `<li>${escapeHtml(c.fileName)}: ${escapeHtml(c.kind)}</li>`)
         .join("");
-      return fail(409, "blocked_stale", outcome.changes, `<h1>Export blocked</h1><p>The source files changed since approval:</p><ul>${items}</ul>`);
+      return blockExport(409, "blocked_stale", outcome.changes, `<h1>Export blocked</h1><p>The source files changed since approval:</p><ul>${items}</ul>`);
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    return fail(503, "blocked_unavailable", detail, `<h1>Export blocked</h1><p>The recheck failed (${escapeHtml(detail)}). The run stays approved; try again.</p>`);
+    return blockExport(503, "blocked_unavailable", detail, `<h1>Export blocked</h1><p>The recheck failed (${escapeHtml(detail)}). The run stays approved; try again.</p>`);
   }
 
   recordExport(db, {
