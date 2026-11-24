@@ -298,7 +298,8 @@ table{border-collapse:collapse;width:100%;font-size:.85rem}th,td{border:1px soli
 .quote{color:#444}.banner{padding:.6rem .8rem;border-radius:4px;margin:.5rem 0}
 .banner--blocked{background:#fdeaea;border:1px solid #e0a0a0}.banner--ok{background:#eaf6ea;border:1px solid #9ecf9e}
 .banner--warn{background:#fff8e6;border:1px solid #e0b040}
-.flag{background:#fff8e6;padding:.4rem .6rem}code{font-size:.85em;word-break:break-all}`;
+.flag{background:#fff8e6;padding:.4rem .6rem}code{font-size:.85em;word-break:break-all}
+@media (max-width:48rem){table{display:block;overflow-x:auto}}`;
 
 export function renderReviewBody(receipt: RunReceipt): string {
   const blocked = receipt.status === "needs_review";
