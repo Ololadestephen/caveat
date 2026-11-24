@@ -169,7 +169,8 @@ echo "$POLICY" | node -e '
   };
   let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
     const want=canon(JSON.parse(process.argv[1]).access_policy);
-    const got=canon(JSON.parse(d).access_policy);
+    const conn=JSON.parse(d).connection ?? JSON.parse(d);
+    const got=canon(conn.access_policy);
     if(JSON.stringify(got)===JSON.stringify(want)){console.log("ok")}else{console.log("mismatch: "+JSON.stringify(got))}
   });' "$ORIGINAL_POLICY" | grep -q '^ok$' || fail "access policy was not restored to the original"
 note "{\"step\":\"f\",\"policy\":\"restored\"}"
