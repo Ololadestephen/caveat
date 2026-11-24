@@ -50,12 +50,8 @@ const FILE_NAMES = [
   "03-second-amendment.pdf",
 ];
 
-// One escrow section; the quotes below are verbatim substrings of this text.
-const OPERATIVE_TEXT =
-  "3. Transaction Compensation The Consultant shall be paid $6,000 per month " +
-  "for the 6-month period into escrow. (i) $36,000 shall be released to the " +
-  "consultant on January 2, 2027.";
-
+// The canned operative section text lives in cannedPdfLines; the model quotes
+// below are verbatim substrings of it.
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
