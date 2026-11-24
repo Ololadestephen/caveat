@@ -145,6 +145,16 @@ describe("durability invariants", () => {
     expect(getRun(db, "run-1")?.status).toBe("reviewable");
   });
 
+  it("refuses to move a finished run back to running", () => {
+    const db = openDb(":memory:");
+    seedRun(db, "run-1");
+    finishRun(db, "run-1", "reviewable", null, { receiptJson: "{\"real\":true}" });
+    expect(() =>
+      db.prepare("UPDATE runs SET status = 'running' WHERE id = 'run-1'").run(),
+    ).toThrow(/cannot return to running/);
+    expect(getRun(db, "run-1")?.status).toBe("reviewable");
+  });
+
   it("marks an interrupted run failed on open", () => {
     const dir = mkdtempSync(join(tmpdir(), "caveat-db-"));
     try {

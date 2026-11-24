@@ -46,7 +46,7 @@ export type ExportRow = {
   draft_hash: string;
 };
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const MIGRATIONS: string[] = [
   `
@@ -89,6 +89,16 @@ const MIGRATIONS: string[] = [
     WHEN OLD.status <> 'running'
     BEGIN
       SELECT RAISE(ABORT, 'runs receipt fields are immutable');
+    END;
+  `,
+  // A finished run can never return to "running", which would reopen its
+  // receipt fields to writes.
+  `
+  CREATE TRIGGER runs_no_reopen
+    BEFORE UPDATE OF status ON runs
+    WHEN NEW.status = 'running' AND OLD.status <> 'running'
+    BEGIN
+      SELECT RAISE(ABORT, 'a finished run cannot return to running');
     END;
   `,
 ];
