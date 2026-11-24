@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { runFixture } from "./run.ts";
+import { canonicalJson } from "./digest.ts";
 import type { ScenarioResult } from "./types.ts";
 
 function loadJson(path: string): unknown {
@@ -330,5 +331,12 @@ describe("determinism and digests", () => {
     const changed = runFixture(mutated);
     expect(changed.inputDigest).not.toBe(base.inputDigest);
     expect(changed.resultDigest).not.toBe(base.resultDigest);
+  });
+
+  it("canonical JSON matches JSON.stringify semantics for undefined", () => {
+    expect(canonicalJson({ a: 1, b: undefined, c: [undefined, 2] })).toBe(
+      canonicalJson({ a: 1, c: [null, 2] }),
+    );
+    expect(canonicalJson({ b: undefined })).toBe("{}");
   });
 });
