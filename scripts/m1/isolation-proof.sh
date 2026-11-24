@@ -70,9 +70,15 @@ BOX_GW="$(GW_OF box)"
 OLLAMA_GW="$(GW_OF ollama)"
 
 for W in "$WORKER_A" "$WORKER_B"; do
-  CODE=$(remote "$W" "curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://api.sprites.dev/v1/gateway/list" || echo "000")
-  eval "GATEWAY_LIST_CODE_${W#caveat-}=$CODE"
-  check "gateway_list_denied_$W" "$([ "$CODE" = 403 ] && echo pass || echo fail)"
+  # /v1/gateway/list is scoped to the calling sprite: a worker must not see the
+  # restricted "box" connection in its own list.
+  LISTED=$(remote "$W" "curl -s --max-time 15 https://api.sprites.dev/v1/gateway/list" \
+    | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);console.log((j.connections||[]).map(x=>x.provider).join(","))}catch{console.log("")}})')
+  eval "LISTED_PROVIDERS_${W#caveat-}=$LISTED"
+  case ",$LISTED," in
+    *,box,*) check "box_not_listed_on_$W" fail ;;
+    *) check "box_not_listed_on_$W" pass ;;
+  esac
 
   if [ -n "$BOX_GW" ]; then
     CODE=$(remote "$W" "curl -s -o /dev/null -w '%{http_code}' --max-time 15 '$BOX_GW/2.0/folders/0/items'" || echo "000")
@@ -155,8 +161,8 @@ cat > "$OUT" <<JSON
   "bundleSha256": "$LOCAL_SHA",
   "checks": {$CHECKS_JSON},
   "observed": {
-    "gatewayListHttpA": "${GATEWAY_LIST_CODE_wa:-n/a}",
-    "gatewayListHttpB": "${GATEWAY_LIST_CODE_wb:-n/a}",
+    "listedProvidersA": "${LISTED_PROVIDERS_wa:-n/a}",
+    "listedProvidersB": "${LISTED_PROVIDERS_wb:-n/a}",
     "boxHttpA": "${BOX_CODE_wa:-n/a}",
     "boxHttpB": "${BOX_CODE_wb:-n/a}",
     "ollamaHttpA": "${OLLAMA_CODE_wa:-n/a}",
