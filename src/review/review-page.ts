@@ -291,31 +291,23 @@ ${items.join("\n")}
 </section>`;
 }
 
-const PAGE_CSS = `body{font-family:system-ui,sans-serif;max-width:44rem;margin:0 auto;padding:1rem;line-height:1.45;color:#1a1a1a}
+export const REVIEW_PAGE_CSS = `body{font-family:system-ui,sans-serif;max-width:44rem;margin:0 auto;padding:1rem;line-height:1.45;color:#1a1a1a}
 h1{font-size:1.35rem}h2{font-size:1.1rem;margin-top:2rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}h3{font-size:1rem}
 blockquote{margin:.5rem 0;padding:.5rem .8rem;border-left:3px solid #ccc;background:#f7f7f7}
 table{border-collapse:collapse;width:100%;font-size:.85rem}th,td{border:1px solid #ddd;padding:.35rem .5rem;text-align:left}
 .quote{color:#444}.banner{padding:.6rem .8rem;border-radius:4px;margin:.5rem 0}
 .banner--blocked{background:#fdeaea;border:1px solid #e0a0a0}.banner--ok{background:#eaf6ea;border:1px solid #9ecf9e}
+.banner--warn{background:#fff8e6;border:1px solid #e0b040}
 .flag{background:#fff8e6;padding:.4rem .6rem}code{font-size:.85em;word-break:break-all}`;
 
-export function renderReviewPage(receipt: RunReceipt): string {
+export function renderReviewBody(receipt: RunReceipt): string {
   const blocked = receipt.status === "needs_review";
   const banner = blocked
     ? `<div class="banner banner--blocked"><strong>Blocked — this run needs human review.</strong><ul>${receipt.blockedReasons
         .map((r) => `<li>${escapeHtml(r.reason)}: ${escapeHtml(r.detail)}</li>`)
         .join("")}</ul></div>`
     : `<div class="banner banner--ok"><strong>Reviewable.</strong> All checks passed; results below.</div>`;
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Caveat review — ${escapeHtml(receipt.runId)}</title>
-<style>${PAGE_CSS}</style>
-</head>
-<body>
-<h1>Caveat — contract cash review</h1>
+  return `<h1>Caveat — contract cash review</h1>
 <p>Run <code>${escapeHtml(receipt.runId)}</code>. Questions: ${receipt.questionIds.map((q) => escapeHtml(q)).join(", ")}.</p>
 ${banner}
 ${renderSources(receipt)}
@@ -324,7 +316,27 @@ ${renderSchedule(receipt)}
 ${renderHumanReview(receipt)}
 ${renderFlags(receipt)}
 ${renderResults(receipt)}
-${renderPolicyNotes(receipt)}
+${renderPolicyNotes(receipt)}`;
+}
+
+export function renderReviewPage(
+  receipt: RunReceipt,
+  opts: { cssHref?: string } = {},
+): string {
+  const style =
+    opts.cssHref !== undefined
+      ? `<link rel="stylesheet" href="${escapeHtml(opts.cssHref)}">`
+      : `<style>${REVIEW_PAGE_CSS}</style>`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caveat review — ${escapeHtml(receipt.runId)}</title>
+${style}
+</head>
+<body>
+${renderReviewBody(receipt)}
 </body>
 </html>`;
 }

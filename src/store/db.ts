@@ -80,10 +80,13 @@ const MIGRATIONS: string[] = [
     detail_json TEXT,
     draft_hash TEXT NOT NULL
   );
-  -- The receipt and the draft derived from it are immutable once written:
-  -- approvals bind to these exact hashes, so they can never be edited later.
+  -- The receipt and the draft derived from it are immutable once a run has
+  -- finished: approvals bind to these exact hashes, so they can never be
+  -- edited later. A row still "running" keeps its placeholders until the
+  -- pipeline writes the real receipt.
   CREATE TRIGGER runs_immutable
     BEFORE UPDATE OF receipt_json, receipt_hash, draft_text, draft_hash ON runs
+    WHEN OLD.status <> 'running'
     BEGIN
       SELECT RAISE(ABORT, 'runs receipt fields are immutable');
     END;
@@ -163,10 +166,38 @@ export function finishRun(
   id: string,
   status: "reviewable" | "needs_review" | "failed",
   statusReason: string | null,
+  fields?: {
+    sourceTupleJson?: string;
+    receiptJson?: string;
+    receiptHash?: string;
+    draftText?: string;
+    draftHash?: string;
+  },
 ): void {
-  db.prepare("UPDATE runs SET status = ?, status_reason = ? WHERE id = ?").run(
+  if (fields === undefined) {
+    db.prepare("UPDATE runs SET status = ?, status_reason = ? WHERE id = ?").run(
+      status,
+      statusReason,
+      id,
+    );
+    return;
+  }
+  db.prepare(
+    `UPDATE runs SET status = ?, status_reason = ?,
+       source_tuple_json = COALESCE(?, source_tuple_json),
+       receipt_json = COALESCE(?, receipt_json),
+       receipt_hash = COALESCE(?, receipt_hash),
+       draft_text = COALESCE(?, draft_text),
+       draft_hash = COALESCE(?, draft_hash)
+     WHERE id = ?`,
+  ).run(
     status,
     statusReason,
+    fields.sourceTupleJson ?? null,
+    fields.receiptJson ?? null,
+    fields.receiptHash ?? null,
+    fields.draftText ?? null,
+    fields.draftHash ?? null,
     id,
   );
 }

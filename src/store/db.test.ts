@@ -130,16 +130,18 @@ describe("exports and staleness", () => {
 });
 
 describe("durability invariants", () => {
-  it("aborts any update of the receipt or draft fields", () => {
+  it("aborts updates of receipt or draft fields once a run has finished", () => {
     const db = openDb(":memory:");
     seedRun(db, "run-1");
+    // A still-running row may still be written (the pipeline owns it).
+    finishRun(db, "run-1", "reviewable", null, { receiptJson: "{\"real\":true}" });
     for (const col of ["receipt_json", "receipt_hash", "draft_text", "draft_hash"]) {
       expect(() =>
         db.prepare(`UPDATE runs SET ${col} = 'x' WHERE id = 'run-1'`).run(),
       ).toThrow(/immutable/);
     }
+    expect(getRun(db, "run-1")?.receipt_json).toBe("{\"real\":true}");
     // Other fields remain mutable.
-    finishRun(db, "run-1", "reviewable", null);
     expect(getRun(db, "run-1")?.status).toBe("reviewable");
   });
 
