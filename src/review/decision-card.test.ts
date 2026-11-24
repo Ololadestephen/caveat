@@ -21,8 +21,9 @@ const DECIDED: DecisionOutcome = {
     cited_clause: { excerpt_id: "ex-1", quote: "due upon the Client's written acceptance" },
     confidence: 0.92,
   },
-  provider: "ollama",
-  model: "llama3.1:8b",
+  provider: "gemini",
+  model: "gemini-flash-latest",
+  modelVersion: "gemini-3-flash",
   latencyMs: 812,
 };
 
@@ -35,9 +36,9 @@ describe("renderDecisionCard", () => {
     expect(html).toContain("sow.pdf");
     expect(html).toContain("v1");
     expect(html).toContain("page 3");
-    expect(html).toContain("llama3.1:8b");
+    expect(html).toContain("model gemini-flash-latest &rarr; gemini-3-flash");
     expect(html).toContain("self-reported confidence 0.92");
-    expect(html).toContain('data-provider="ollama"');
+    expect(html).toContain('data-provider="gemini"');
   });
 
   it("labels the confidence as self-reported, never as accuracy or probability", () => {
@@ -73,8 +74,9 @@ describe("renderDecisionCard", () => {
       status: "needs_review",
       reason: "low_confidence",
       detail: "self-reported confidence 0.60 is below threshold 0.8",
-      provider: "ollama",
-      model: "llama3.1:8b",
+      provider: "gemini",
+      model: "gemini-flash-latest",
+      modelVersion: "gemini-3-flash",
       decision: {
         action: "acceptance_triggered",
         reason: "Unsure which clause applies.",
@@ -86,7 +88,8 @@ describe("renderDecisionCard", () => {
     expect(html).toContain("Needs human review");
     expect(html).toContain("Self-reported confidence below threshold");
     expect(html).toContain("below threshold 0.8");
-    expect(html).toContain("llama3.1:8b");
+    expect(html).toContain("gemini-flash-latest");
+    expect(html).toContain("gemini-3-flash");
     expect(html).toContain("Unsure which clause applies.");
   });
 
@@ -113,6 +116,10 @@ describe("renderDecisionCard", () => {
       "unknown_excerpt",
       "quote_not_verbatim",
       "model_mismatch",
+      "missing_model_version",
+      "blocked",
+      "truncated",
+      "rate_limited",
       "http_error",
       "timeout",
       "network_error",
@@ -122,7 +129,7 @@ describe("renderDecisionCard", () => {
         status: "needs_review",
         reason,
         detail: `detail for ${reason}`,
-        provider: "ollama",
+        provider: "gemini",
       });
       expect(html).toContain("Needs human review");
       expect(html).toContain(`detail for ${reason}`);

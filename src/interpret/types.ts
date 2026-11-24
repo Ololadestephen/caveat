@@ -38,6 +38,10 @@ export type NeedsReviewReason =
   | "unknown_excerpt"
   | "quote_not_verbatim"
   | "model_mismatch"
+  | "missing_model_version"
+  | "blocked"
+  | "truncated"
+  | "rate_limited"
   | "http_error"
   | "timeout"
   | "network_error";
@@ -48,6 +52,7 @@ export type DecisionOutcome =
       decision: Decision;
       provider: string;
       model: string;
+      modelVersion?: string;
       latencyMs: number;
     }
   | {
@@ -56,5 +61,6 @@ export type DecisionOutcome =
       detail: string;
       provider: string;
       model?: string;
+      modelVersion?: string;
       decision?: Decision;
     };

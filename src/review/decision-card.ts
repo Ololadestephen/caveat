@@ -19,7 +19,11 @@ const REVIEW_REASON_LABELS: Record<NeedsReviewReason, string> = {
   malformed_json: "Provider output was not valid JSON",
   unknown_excerpt: "Cited excerpt was not among the supplied excerpts",
   quote_not_verbatim: "Cited quote is not verbatim in the supplied excerpt",
-  model_mismatch: "Response model did not match the pinned model",
+  model_mismatch: "Resolved model version was not allowed",
+  missing_model_version: "Response did not report a model version",
+  blocked: "Provider blocked the response",
+  truncated: "Provider output was truncated",
+  rate_limited: "Provider rate limit reached",
   http_error: "Provider returned an HTTP error",
   timeout: "Provider request timed out",
   network_error: "Provider request failed at the network layer",
@@ -53,8 +57,13 @@ function excerptSourceLine(excerpt: Excerpt | undefined, excerptId: string): str
   return `excerpt ${escapeHtml(excerptId)} — ${escapeHtml(fileName)}, ${escapeHtml(versionLabel)}, page ${page}`;
 }
 
-function modelLine(model: string | undefined): string {
-  return model === undefined ? "" : `<p class="decision-model">model ${escapeHtml(model)}</p>`;
+function modelLine(model: string | undefined, modelVersion: string | undefined): string {
+  if (model === undefined) return "";
+  const resolved =
+    modelVersion === undefined || modelVersion === model
+      ? ""
+      : ` &rarr; ${escapeHtml(modelVersion)}`;
+  return `<p class="decision-model">model ${escapeHtml(model)}${resolved}</p>`;
 }
 
 export function renderDecisionCard(
@@ -72,7 +81,7 @@ export function renderDecisionCard(
     <p>&ldquo;${escapeHtml(decision.cited_clause.quote)}&rdquo;</p>
     <cite>${excerptSourceLine(excerpt, decision.cited_clause.excerpt_id)}</cite>
   </blockquote>
-  ${modelLine(outcome.model)}
+  ${modelLine(outcome.model, outcome.modelVersion)}
   <p class="decision-confidence">${formatConfidence(decision.confidence)}</p>
 </section>`;
   }
@@ -93,7 +102,7 @@ export function renderDecisionCard(
   <h2 class="decision-heading">Needs human review</h2>
   <p class="decision-review-reason">${escapeHtml(REVIEW_REASON_LABELS[outcome.reason])}</p>
   <p class="decision-review-detail">${escapeHtml(outcome.detail)}</p>
-  ${modelLine(outcome.model)}
+  ${modelLine(outcome.model, outcome.modelVersion)}
   ${decisionBlock}
 </section>`;
 }
