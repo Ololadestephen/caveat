@@ -215,9 +215,7 @@ export function finishRun(
 // Every earlier run is superseded once a newer run exists — the reviewer must
 // always look at the latest evidence.
 export function supersedeOthers(db: DatabaseSync, newRunId: string): void {
-  db.prepare(
-    "UPDATE runs SET superseded_by = ? WHERE id != ? AND superseded_by IS NULL",
-  ).run(newRunId, newRunId);
+  db.prepare("UPDATE runs SET superseded_by = ? WHERE id != ?").run(newRunId, newRunId);
 }
 
 export function getApproval(db: DatabaseSync, runId: string): ApprovalRow | undefined {

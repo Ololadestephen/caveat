@@ -47,6 +47,11 @@ describe("run lifecycle", () => {
     supersedeOthers(db, "run-new");
     expect(getRun(db, "run-old")?.superseded_by).toBe("run-new");
     expect(getRun(db, "run-new")?.superseded_by).toBeNull();
+    // A still-newer run re-points every earlier run at itself.
+    seedRun(db, "run-newest");
+    supersedeOthers(db, "run-newest");
+    expect(getRun(db, "run-old")?.superseded_by).toBe("run-newest");
+    expect(getRun(db, "run-new")?.superseded_by).toBe("run-newest");
   });
 
   it("lists runs newest first", () => {
