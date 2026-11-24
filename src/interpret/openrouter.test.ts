@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { stubChatFetch } from "./stub-fetch.ts";
 import { DEFAULT_OPENROUTER_MODEL, OpenRouterDecisionProvider } from "./openrouter.ts";
 import { decisionSchema } from "./schema.ts";
 import { BILLING_TRIGGER } from "./types.ts";
@@ -71,9 +72,8 @@ function jsonResponse(body: string, status = 200, headers?: Record<string, strin
   });
 }
 
-function stubFetch(response: Response | (() => Promise<Response>)): typeof fetch {
-  return () => Promise.resolve(typeof response === "function" ? response() : response);
-}
+const stubFetch = (response: Response | (() => Promise<Response>)): typeof fetch =>
+  stubChatFetch(response).impl;
 
 function provider(
   fetchImpl: typeof fetch,

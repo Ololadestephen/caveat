@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { stubChatFetch } from "./stub-fetch.ts";
 import { OpenRouterScheduleExtractor, SCHEDULE_JSON_SCHEMA, validateScheduleExtraction } from "./schedule.ts";
 import type { Excerpt } from "./types.ts";
 
@@ -265,22 +266,9 @@ describe("OpenRouterScheduleExtractor", () => {
     ...extra,
   });
 
-  function stubFetch(body: unknown, init: { status?: number } = {}) {
-    const calls: { url: string; init: RequestInit | undefined }[] = [];
-    const impl = ((url: unknown, initObj?: unknown) => {
-      calls.push({ url: String(url), init: initObj as RequestInit | undefined });
-      return Promise.resolve(
-        new Response(typeof body === "string" ? body : JSON.stringify(body), {
-          status: init.status ?? 200,
-          headers: { "content-type": "application/json" },
-        }),
-      );
-    }) as typeof fetch;
-    return { impl, calls };
-  }
 
   it("sends the strict schedule schema and returns a validated schedule", async () => {
-    const { impl, calls } = stubFetch(envelope(validExtraction()));
+    const { impl, calls } = stubChatFetch(envelope(validExtraction()));
     const extractor = new OpenRouterScheduleExtractor({
       gatewayBaseUrl: "http://gw.invalid",
       fetch: impl,
@@ -312,7 +300,7 @@ describe("OpenRouterScheduleExtractor", () => {
   });
 
   it("maps a 429 to rate_limited", async () => {
-    const { impl } = stubFetch({ error: { code: 429, message: "slow down" } }, { status: 429 });
+    const { impl } = stubChatFetch({ error: { code: 429, message: "slow down" } }, { status: 429 });
     const extractor = new OpenRouterScheduleExtractor({
       gatewayBaseUrl: "http://gw.invalid",
       fetch: impl,
@@ -325,7 +313,7 @@ describe("OpenRouterScheduleExtractor", () => {
   it("maps a validation failure to needs_review with the reason", async () => {
     const bad = validExtraction();
     bad.confidence = 0.1;
-    const { impl } = stubFetch(envelope(bad));
+    const { impl } = stubChatFetch(envelope(bad));
     const extractor = new OpenRouterScheduleExtractor({
       gatewayBaseUrl: "http://gw.invalid",
       fetch: impl,

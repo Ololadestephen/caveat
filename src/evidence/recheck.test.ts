@@ -18,7 +18,7 @@ function sha1Of(bytes: string): string {
 
 // A minimal Box gateway: folders/0/items -> folder, folders/F1/items -> files,
 // files/<id> metadata + /content bytes.
-function stubFetch(files: FileState[], fail?: (url: string) => Response | undefined) {
+function stubBoxFetch(files: FileState[], fail?: (url: string) => Response | undefined) {
   return (url: unknown): Promise<Response> => {
     const u = String(url);
     const failed = fail?.(u);
@@ -114,7 +114,7 @@ describe("versionTag", () => {
 describe("recheckFolder", () => {
   it("returns the fresh tuple and no changes when the folder is unchanged", async () => {
     const out = await recheckFolder(BASE, "0", "caveat_TEST", APPROVED, {
-      fetch: stubFetch(SAME_FILES),
+      fetch: stubBoxFetch(SAME_FILES),
     });
     expect(out).toMatchObject({ ok: true, changes: [] });
     if (out.ok) expect(out.tuple.map((f) => f.fileId)).toEqual(["f01", "f03"]);
@@ -125,7 +125,7 @@ describe("recheckFolder", () => {
       f.id === "f03" ? { ...f, versionId: "v2" } : f,
     );
     const out = await recheckFolder(BASE, "0", "caveat_TEST", APPROVED, {
-      fetch: stubFetch(files),
+      fetch: stubBoxFetch(files),
     });
     expect(out.ok).toBe(true);
     if (out.ok) {
@@ -144,7 +144,7 @@ describe("recheckFolder", () => {
 
   it("returns unavailable on a gateway 403", async () => {
     const out = await recheckFolder(BASE, "0", "caveat_TEST", APPROVED, {
-      fetch: stubFetch(SAME_FILES, () => new Response("{}", { status: 403 })),
+      fetch: stubBoxFetch(SAME_FILES, () => new Response("{}", { status: 403 })),
     });
     expect(out.ok).toBe(false);
   });
