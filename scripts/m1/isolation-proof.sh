@@ -67,7 +67,7 @@ GW_OF() {
     });' "$1" 2>/dev/null
 }
 BOX_GW="$(GW_OF box)"
-OLLAMA_GW="$(GW_OF ollama)"
+GEMINI_GW="$(GW_OF gemini)"
 
 for W in "$WORKER_A" "$WORKER_B"; do
   # /v1/gateway/list is scoped to the calling sprite: a worker must not see the
@@ -89,12 +89,13 @@ for W in "$WORKER_A" "$WORKER_B"; do
     check "box_gateway_denied_$W" fail
   fi
 
-  if [ -n "$OLLAMA_GW" ]; then
-    CODE=$(remote "$W" "curl -s -o /dev/null -w '%{http_code}' --max-time 15 '$OLLAMA_GW/api/tags'" || echo "000")
-    eval "OLLAMA_CODE_${W#caveat-}=$CODE"
-    check "ollama_gateway_denied_$W" "$([ "$CODE" = 403 ] && echo pass || echo fail)"
+  if [ -n "$GEMINI_GW" ]; then
+    CODE=$(remote "$W" "curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST '$GEMINI_GW/v1beta/models/gemini-flash-latest:generateContent' -H 'Content-Type: application/json' -d '{\"contents\":[{\"parts\":[{\"text\":\"hi\"}]}]}'" || echo "000")
+    eval "GEMINI_CODE_${W#caveat-}=$CODE"
+    check "gemini_gateway_denied_$W" "$([ "$CODE" = 403 ] && echo pass || echo fail)"
   else
-    eval "OLLAMA_CODE_${W#caveat-}=not_configured"
+    eval "GEMINI_CODE_${W#caveat-}=not_configured"
+    check "gemini_gateway_denied_$W" skipped_not_configured
   fi
 done
 
@@ -139,8 +140,9 @@ else
 fi
 
 # --- verdict + summary --------------------------------------------------------
+# skipped checks (connector not configured) are reported but do not fail the run
 ALL_PASS=1
-for R in "${CHECK_RESULTS[@]}"; do [ "$R" = pass ] || ALL_PASS=0; done
+for R in "${CHECK_RESULTS[@]}"; do [ "$R" != fail ] || ALL_PASS=0; done
 
 DELETED=false
 if [ "$ALL_PASS" = 1 ] && [ -n "${VER:-}" ]; then
@@ -149,7 +151,12 @@ fi
 
 CHECKS_JSON=""
 for i in "${!CHECK_NAMES[@]}"; do
-  CHECKS_JSON+="\"${CHECK_NAMES[$i]}\":$([ "${CHECK_RESULTS[$i]}" = pass ] && echo true || echo false),"
+  case "${CHECK_RESULTS[$i]}" in
+    pass) V=true ;;
+    fail) V=false ;;
+    *) V="\"${CHECK_RESULTS[$i]}\"" ;;
+  esac
+  CHECKS_JSON+="\"${CHECK_NAMES[$i]}\":$V,"
 done
 CHECKS_JSON="${CHECKS_JSON%,}"
 
@@ -165,8 +172,8 @@ cat > "$OUT" <<JSON
     "listedProvidersB": "${LISTED_PROVIDERS_wb:-n/a}",
     "boxHttpA": "${BOX_CODE_wa:-n/a}",
     "boxHttpB": "${BOX_CODE_wb:-n/a}",
-    "ollamaHttpA": "${OLLAMA_CODE_wa:-n/a}",
-    "ollamaHttpB": "${OLLAMA_CODE_wb:-n/a}"
+    "geminiHttpA": "${GEMINI_CODE_wa:-n/a}",
+    "geminiHttpB": "${GEMINI_CODE_wb:-n/a}"
   },
   "checkpoint": {
     "version": "${VER:-none}",

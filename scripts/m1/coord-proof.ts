@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 
 import { BoxError, fetchBoxFile, findFolderByName, listFolder } from "../../src/evidence/box.ts";
-import { OllamaDecisionProvider } from "../../src/interpret/ollama.ts";
+import { GeminiDecisionProvider } from "../../src/interpret/gemini.ts";
+import { renderDecisionCard } from "../../src/review/decision-card.ts";
 import type { BillingTriggerQuestion, DecisionOutcome } from "../../src/interpret/types.ts";
 
 const GATEWAY_LIST_URL = "https://api.sprites.dev/v1/gateway/list";
@@ -23,16 +24,20 @@ type BoxProof =
     }
   | { status: string; connector: "box"; detail?: string };
 
-type OllamaProof = {
+type GeminiProof = {
   status: string;
-  connector: "ollama";
+  connector: "gemini";
   model?: string;
+  modelVersion?: string;
   action?: string;
+  reason?: string;
+  citedClause?: { excerpt_id: string; quote: string };
   confidence?: number;
   outcomeStatus?: string;
   reviewReason?: string;
-  availableModels?: string[];
+  latencyMs?: number;
   detail?: string;
+  decisionCardHtml?: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -100,29 +105,17 @@ async function proveBox(connections: Connection[]): Promise<BoxProof> {
   }
 }
 
-async function listOllamaModels(gatewayBaseUrl: string): Promise<string[]> {
-  const response = await fetch(`${gatewayBaseUrl}/api/tags`);
-  if (!response.ok) {
-    throw new Error(`api/tags returned HTTP ${response.status}`);
-  }
-  const body: unknown = await response.json();
-  if (!isRecord(body) || !Array.isArray(body.models)) {
-    throw new Error("api/tags response lacked models");
-  }
-  const models: string[] = [];
-  for (const entry of body.models) {
-    if (isRecord(entry) && typeof entry.name === "string") models.push(entry.name);
-  }
-  return models;
-}
-
 type FixtureCase = {
   id: string;
   expectedAction: string;
   excerpts: BillingTriggerQuestion["excerpts"];
 };
 
-async function loadProofCase(): Promise<{ question: BillingTriggerQuestion; caseId: string }> {
+async function loadProofCase(): Promise<{
+  question: BillingTriggerQuestion;
+  caseId: string;
+  expectedAction: string;
+}> {
   const fixtureUrl = new URL("../../fixtures/m1/billing-trigger.json", import.meta.url);
   const raw: unknown = JSON.parse(await readFile(fixtureUrl, "utf8"));
   if (!isRecord(raw) || typeof raw.questionId !== "string" || !Array.isArray(raw.cases)) {
@@ -134,58 +127,52 @@ async function loadProofCase(): Promise<{ question: BillingTriggerQuestion; case
   return {
     question: { questionId: `${raw.questionId}/${proofCase.id}`, excerpts: proofCase.excerpts },
     caseId: proofCase.id,
+    expectedAction: proofCase.expectedAction,
   };
 }
 
-async function proveOllama(connections: Connection[]): Promise<OllamaProof> {
-  const conn = connections.find((c) => c.provider === "ollama");
+async function proveGemini(connections: Connection[]): Promise<GeminiProof> {
+  const conn = connections.find((c) => c.provider === "gemini");
   if (conn === undefined) {
-    return { status: "not_configured", connector: "ollama" };
+    return { status: "not_configured", connector: "gemini" };
   }
 
-  let models: string[];
-  try {
-    models = await listOllamaModels(conn.gatewayBaseUrl);
-  } catch (error) {
-    return { status: "error", connector: "ollama", detail: errorDetail(error) };
-  }
-
-  const model = process.env.CAVEAT_OLLAMA_MODEL;
-  if (model === undefined || model.length === 0) {
-    return { status: "model_not_pinned", connector: "ollama", availableModels: models };
-  }
-  if (!models.includes(model)) {
-    return {
-      status: "model_unavailable",
-      connector: "ollama",
-      model,
-      availableModels: models,
-    };
-  }
+  const model = process.env.CAVEAT_GEMINI_MODEL;
+  const provider = new GeminiDecisionProvider({
+    gatewayBaseUrl: conn.gatewayBaseUrl,
+    ...(model !== undefined && model.length > 0 ? { model } : {}),
+  });
 
   try {
-    const { question } = await loadProofCase();
-    const provider = new OllamaDecisionProvider({ gatewayBaseUrl: conn.gatewayBaseUrl, model });
+    const { question, expectedAction } = await loadProofCase();
+    const decideStarted = performance.now();
     const outcome: DecisionOutcome = await provider.decide(question);
-    const proof: OllamaProof = {
-      status: outcome.status === "decided" ? "ok" : "needs_review",
-      connector: "ollama",
-      model: outcome.model ?? model,
+    const latencyMs = Math.round(performance.now() - decideStarted);
+    const decision = outcome.decision;
+    const proof: GeminiProof = {
+      status:
+        outcome.status === "decided"
+          ? outcome.decision.action === expectedAction
+            ? "ok"
+            : "unexpected_action"
+          : "needs_review",
+      connector: "gemini",
+      model: outcome.model ?? model ?? "gemini-flash-latest",
       outcomeStatus: outcome.status,
+      latencyMs,
+      decisionCardHtml: renderDecisionCard(outcome, question),
     };
-    if (outcome.status === "decided") {
-      proof.action = outcome.decision.action;
-      proof.confidence = outcome.decision.confidence;
-    } else {
-      proof.reviewReason = outcome.reason;
-      if (outcome.decision !== undefined) {
-        proof.action = outcome.decision.action;
-        proof.confidence = outcome.decision.confidence;
-      }
+    if (outcome.modelVersion !== undefined) proof.modelVersion = outcome.modelVersion;
+    if (decision !== undefined) {
+      proof.action = decision.action;
+      proof.reason = decision.reason;
+      proof.citedClause = decision.cited_clause;
+      proof.confidence = decision.confidence;
     }
+    if (outcome.status === "needs_review") proof.reviewReason = outcome.reason;
     return proof;
   } catch (error) {
-    return { status: "error", connector: "ollama", detail: errorDetail(error) };
+    return { status: "error", connector: "gemini", detail: errorDetail(error) };
   }
 }
 
@@ -197,7 +184,7 @@ try {
   console.log(
     JSON.stringify({
       box: { status: "error", connector: "box", detail: errorDetail(error) },
-      ollama: { status: "error", connector: "ollama", detail: errorDetail(error) },
+      gemini: { status: "error", connector: "gemini", detail: errorDetail(error) },
       timingsMs: { total: Math.round(performance.now() - started) },
     }),
   );
@@ -208,17 +195,17 @@ const boxStarted = performance.now();
 const box = await proveBox(connections);
 const boxMs = Math.round(performance.now() - boxStarted);
 
-const ollamaStarted = performance.now();
-const ollama = await proveOllama(connections);
-const ollamaMs = Math.round(performance.now() - ollamaStarted);
+const geminiStarted = performance.now();
+const gemini = await proveGemini(connections);
+const geminiMs = Math.round(performance.now() - geminiStarted);
 
 console.log(
   JSON.stringify({
     box,
-    ollama,
+    gemini,
     timingsMs: {
       box: boxMs,
-      ollama: ollamaMs,
+      gemini: geminiMs,
       total: Math.round(performance.now() - started),
     },
   }),
