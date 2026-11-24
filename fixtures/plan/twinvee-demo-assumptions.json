@@ -1,0 +1,16 @@
+{
+  "note": "Demo assumptions, not facts about the parties",
+  "startDate": "2026-10-01",
+  "escrowFundingDate": "2026-10-01",
+  "escrowFundingNote": "assumed equal to the effective date; §3(b) says 'Immediately upon execution' and the execution date is not stated",
+  "openingCents": 2000000,
+  "floorCents": 1000000,
+  "costs": [
+    { "id": "cost-2026-10", "date": "2026-10-15", "amountCents": 600000 },
+    { "id": "cost-2026-11", "date": "2026-11-15", "amountCents": 600000 },
+    { "id": "cost-2026-12", "date": "2026-12-15", "amountCents": 600000 },
+    { "id": "cost-2027-01", "date": "2027-01-15", "amountCents": 600000 },
+    { "id": "cost-2027-02", "date": "2027-02-15", "amountCents": 600000 },
+    { "id": "cost-2027-03", "date": "2027-03-15", "amountCents": 600000 }
+  ]
+}
