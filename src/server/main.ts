@@ -22,11 +22,16 @@ const server = createApp({
   fixturesDir: process.env.CAVEAT_FIXTURES_DIR ?? "fixtures",
   boxFolder: process.env.CAVEAT_BOX_FOLDER ?? "caveat_TEST",
   decisionModel: process.env.CAVEAT_DECISION_MODEL,
-  runTimeoutMs: Number(process.env.CAVEAT_RUN_TIMEOUT_MS ?? 300000),
-  recheckTimeoutMs: Number(process.env.CAVEAT_RECHECK_TIMEOUT_MS ?? 30000),
+  runTimeoutMs: envNumber("CAVEAT_RUN_TIMEOUT_MS", 300000),
+  recheckTimeoutMs: envNumber("CAVEAT_RECHECK_TIMEOUT_MS", 30000),
 });
 
-const port = Number(process.env.PORT ?? 8080);
+function envNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+const port = envNumber("PORT", 8080);
 server.listen(port, () => {
   console.log(`caveat listening on :${port} (data ${dataDir}, revision ${revision})`);
 });
