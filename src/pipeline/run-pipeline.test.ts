@@ -196,9 +196,9 @@ describe("runPipeline orchestration", () => {
     const sectionIds = sections.map((s) => `${s.fileName}#${s.sectionId}`);
     expect(sectionIds).toContain("03-second-amendment.pdf#§3");
 
-    expect(receipt.releaseTiming.outcome.status).toBe("decided");
+    expect(receipt.releaseTiming?.outcome.status).toBe("decided");
     expect(receipt.effectiveAction).toBe("escrow_release");
-    expect(receipt.schedule.outcome.status).toBe("extracted");
+    expect(receipt.schedule?.outcome.status).toBe("extracted");
 
     // The review dir is absent, so the run is blocked but the receipt is whole.
     expect(receipt.status).toBe("needs_review");
