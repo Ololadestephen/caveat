@@ -243,7 +243,12 @@ export function approveRun(
   }
   const existing = getApproval(db, runId);
   if (existing !== undefined) {
-    return { ok: true, approval: existing, created: false };
+    // Idempotent only while the approval stands: a run that has since gone
+    // stale (or otherwise left "approved") must refuse a fresh approval.
+    if (run.status === "approved") {
+      return { ok: true, approval: existing, created: false };
+    }
+    return { ok: false, error: "wrong_status", status: run.status };
   }
   if (run.status !== "reviewable") {
     return { ok: false, error: "wrong_status", status: run.status };

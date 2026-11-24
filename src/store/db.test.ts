@@ -102,6 +102,17 @@ describe("approveRun", () => {
     }
   });
 
+  it("refuses a fresh approval after an approved run went stale", () => {
+    const db = openDb(":memory:");
+    seedRun(db, "run-1");
+    finishRun(db, "run-1", "reviewable", null);
+    approveRun(db, "run-1", "rhash", "dhash", "X", "t");
+    markStale(db, "run-1", "[{\"kind\":\"version_changed\"}]");
+    const out = approveRun(db, "run-1", "rhash", "dhash", "X", "t2");
+    expect(out).toMatchObject({ ok: false, error: "wrong_status", status: "stale" });
+    expect(getApproval(db, "run-1")?.approved_at).toBe("t");
+  });
+
   it("returns not_found for a missing run", () => {
     const db = openDb(":memory:");
     expect(approveRun(db, "nope", "r", "d", "X", "t")).toMatchObject({
