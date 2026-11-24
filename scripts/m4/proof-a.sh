@@ -19,7 +19,8 @@ TS="$(date +%Y%m%dT%H%M%S)"
 SUMMARY="$EVIDENCE_DIR/proof-a-$TS.json"
 LOCAL_PORT="${CAVEAT_PROXY_PORT:-18080}"
 BASE="http://127.0.0.1:$LOCAL_PORT"
-CONNECTION="BOX_CONNECTION_ID"
+# The Box connector id is discovered at runtime — it is account data, not code.
+CONNECTION=""
 ORIGINAL_POLICY='{"access_policy":{"sprite_labels":["caveat-proof"],"allowed_endpoints":["/2.0/folders/*","/2.0/files/*"],"blocked_endpoints":["/upload/*"]}}'
 
 mkdir -p "$EVIDENCE_DIR"
@@ -40,6 +41,15 @@ cleanup() {
 trap cleanup EXIT
 
 # --- a. deploy ---------------------------------------------------------------
+CONNECTION="$(sprite api "/v1/oauth/connections" -- -s 2>/dev/null | node -e '
+  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+    const body=JSON.parse(d);
+    const list=Array.isArray(body)?body:(body.connections??[]);
+    const box=list.filter((c)=>c.provider==="box");
+    if(box.length!==1){console.error(`want exactly 1 box connection, got ${box.length}`);process.exit(1)}
+    console.log(box[0].id);
+  });')" || fail "could not discover the Box connection"
+
 bash "$REPO_ROOT/scripts/m4/deploy.sh" >&2 || fail "deploy.sh"
 REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
