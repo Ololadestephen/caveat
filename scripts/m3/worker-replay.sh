@@ -35,12 +35,12 @@ mkdir -p "$EVIDENCE_DIR"
 # --- build bundle + overlays locally ----------------------------------------
 node --input-type=module -e '
 import { readFileSync, writeFileSync } from "node:fs";
-const f = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const f = JSON.parse(readFileSync(process.argv[1], "utf8"));
 const { candidates, ...bundle } = f;
-writeFileSync(process.argv[3] + "/bundle.json", JSON.stringify(bundle));
+writeFileSync(process.argv[2] + "/bundle.json", JSON.stringify(bundle));
 for (const [name, id] of [["wa-overlay", "deposit_1000"], ["wb-overlay", "deposit_2000"]]) {
   writeFileSync(
-    process.argv[3] + `/${name}.json`,
+    process.argv[2] + `/${name}.json`,
     JSON.stringify({ candidates: candidates.filter((c) => c.id === id) }),
   );
 }
