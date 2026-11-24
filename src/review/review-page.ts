@@ -242,7 +242,7 @@ ${rows}
 }
 
 function renderResults(receipt: RunReceipt): string {
-  if (receipt.readings.length === 0) {
+  if (receipt.status !== "reviewable" || receipt.readings.length === 0) {
     return `<section class="results">
   <h2>Results</h2>
   <p>No results — this run needs review before results are produced.</p>
