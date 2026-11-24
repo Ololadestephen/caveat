@@ -1,5 +1,6 @@
+import { isRecord, keySetError } from "../shape.ts";
 import { normalizeWhitespace, parseMonthDayYear } from "../text.ts";
-import { callStructuredChat } from "./chat.ts";
+import { callStructuredChat, chatConfig } from "./chat.ts";
 import { excerptTags, DECISION_SYSTEM_PROMPT } from "./prompt.ts";
 import { quoteInText } from "./validate.ts";
 import type { Excerpt, NeedsReviewReason } from "./types.ts";
@@ -105,20 +106,6 @@ export type ScheduleOutcome =
       modelVersion?: string;
       servedBy?: string;
     };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function keySetError(value: Record<string, unknown>, keys: string[]): string | undefined {
-  const actual = Object.keys(value);
-  const missing = keys.filter((k) => !actual.includes(k));
-  const extra = actual.filter((k) => !keys.includes(k));
-  const parts: string[] = [];
-  if (missing.length > 0) parts.push(`missing keys: ${missing.join(", ")}`);
-  if (extra.length > 0) parts.push(`unexpected keys: ${extra.join(", ")}`);
-  return parts.length > 0 ? parts.join("; ") : undefined;
-}
 
 const AMOUNT_RE = /^\$(\d{1,3}(?:,\d{3})*)(\.\d{2})?$/;
 const PERIOD_RE = /^(\d+)-month$/;
@@ -404,14 +391,7 @@ export class OpenRouterScheduleExtractor {
   ): Promise<ScheduleOutcome> {
     const userPrompt = `${SCHEDULE_USER_PROMPT}\n\n${excerptTags(question.excerpts)}`;
     const result = await callStructuredChat(
-      {
-        gatewayBaseUrl: this.gatewayBaseUrl,
-        timeoutMs: this.timeoutMs,
-        ...(this.allowedModelVersions !== undefined
-          ? { allowedModelVersions: this.allowedModelVersions }
-          : {}),
-        fetch: this.fetchImpl,
-      },
+      chatConfig(this.gatewayBaseUrl, this.timeoutMs, this.allowedModelVersions, this.fetchImpl),
       {
         model: this.model,
         systemPrompt: DECISION_SYSTEM_PROMPT,

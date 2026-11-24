@@ -1,4 +1,5 @@
 import type { ContractSection } from "../evidence/sections.ts";
+import { isRecord } from "../shape.ts";
 import { quoteInText } from "../interpret/validate.ts";
 
 export type ReviewCitation = {
@@ -49,10 +50,6 @@ export type SourcedOverride = {
 export type ReviewValidation<T> =
   | { ok: true; value: T }
   | { ok: false; reason: "review_citation_invalid"; detail: string };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function reqString(obj: Record<string, unknown>, key: string): string | undefined {
   const value = obj[key];

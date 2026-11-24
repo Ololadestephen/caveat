@@ -1,3 +1,4 @@
+import { isRecord, keySetError } from "../shape.ts";
 import { normalizeWhitespace } from "../text.ts";
 import { QUOTE_MAX_LENGTH, REASON_MAX_LENGTH } from "./schema.ts";
 import type { Decision, NeedsReviewReason, Question } from "./types.ts";
@@ -8,20 +9,6 @@ export type ValidationResult =
 
 const TOP_LEVEL_KEYS = ["action", "reason", "cited_clause", "confidence"];
 const CLAUSE_KEYS = ["excerpt_id", "quote"];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function keySetError(value: Record<string, unknown>, keys: string[]): string | undefined {
-  const actual = Object.keys(value);
-  const missing = keys.filter((k) => !actual.includes(k));
-  const extra = actual.filter((k) => !keys.includes(k));
-  const parts: string[] = [];
-  if (missing.length > 0) parts.push(`missing keys: ${missing.join(", ")}`);
-  if (extra.length > 0) parts.push(`unexpected keys: ${extra.join(", ")}`);
-  return parts.length > 0 ? parts.join("; ") : undefined;
-}
 
 // Verbatim checks run on whitespace-normalised text: contract text wraps
 // mid-phrase, so a quote that spans a wrap still counts as verbatim.

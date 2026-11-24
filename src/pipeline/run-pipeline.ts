@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 
+import { listConnections } from "../gateway.ts";
+import { isRecord } from "../shape.ts";
+import type { Connection } from "../gateway.ts";
+
 import { fetchBoxFile, findFolderByName, listFolder } from "../evidence/box.ts";
 import { detectFlags } from "../evidence/flags.ts";
 import { extractPdfLines } from "../evidence/pdf-text.ts";
@@ -27,7 +31,6 @@ import type {
 import { runFixture } from "../runner/run.ts";
 import { validateRunInput } from "../runner/validate.ts";
 
-const GATEWAY_LIST_URL = "https://api.sprites.dev/v1/gateway/list";
 const DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free";
 
 const FILE_NAMES = [
@@ -54,35 +57,6 @@ const READING_LABELS: Record<string, string> = {
   retainer_superseded: "Retainer superseded",
   retainer_continues: "Retainer continues",
 };
-
-export type Connection = { provider: string; gatewayBaseUrl: string };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export async function listConnections(options: { fetch?: typeof fetch } = {}): Promise<
-  Connection[]
-> {
-  const fetchImpl = options.fetch ?? fetch;
-  const response = await fetchImpl(GATEWAY_LIST_URL);
-  if (!response.ok) throw new Error(`gateway list returned HTTP ${response.status}`);
-  const body: unknown = await response.json();
-  if (!isRecord(body) || !Array.isArray(body.connections)) {
-    throw new Error("gateway list response lacked connections");
-  }
-  const connections: Connection[] = [];
-  for (const entry of body.connections) {
-    if (
-      isRecord(entry) &&
-      typeof entry.provider === "string" &&
-      typeof entry.gateway_base_url === "string"
-    ) {
-      connections.push({ provider: entry.provider, gatewayBaseUrl: entry.gateway_base_url });
-    }
-  }
-  return connections;
-}
 
 export type PipelineConfig = {
   runId: string;

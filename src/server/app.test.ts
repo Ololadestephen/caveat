@@ -6,7 +6,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { RecheckOutcome, SourceTuple, StaleChange } from "../evidence/recheck.ts";
-import type { Connection } from "../pipeline/run-pipeline.ts";
+import type { Connection } from "../gateway.ts";
 import { fixtureReceipt } from "../review/fixture-receipt.ts";
 import { draftHash, receiptHash } from "../review/draft.ts";
 import type { RunReceipt } from "../review/receipt.ts";

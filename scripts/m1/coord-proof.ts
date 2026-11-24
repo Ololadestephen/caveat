@@ -2,15 +2,15 @@ import { readFile } from "node:fs/promises";
 
 import { BoxError, fetchBoxFile, findFolderByName, listFolder } from "../../src/evidence/box.ts";
 import { OpenRouterDecisionProvider } from "../../src/interpret/openrouter.ts";
+import { listConnections } from "../../src/gateway.ts";
+import type { Connection } from "../../src/gateway.ts";
 import { renderDecisionCard } from "../../src/review/decision-card.ts";
+import { isRecord } from "../../src/shape.ts";
 import { BILLING_TRIGGER } from "../../src/interpret/types.ts";
 import type { DecisionOutcome, Question } from "../../src/interpret/types.ts";
 
-const GATEWAY_LIST_URL = "https://api.sprites.dev/v1/gateway/list";
 const BOX_FILE_NAME = "01-consulting-agreement.pdf";
 const PROOF_CASE_ID = "acceptance_clear";
-
-type Connection = { provider: string; gatewayBaseUrl: string };
 
 type BoxProof =
   | {
@@ -43,32 +43,6 @@ type OpenRouterProof = {
   detail?: string;
   decisionCardHtml?: string;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-async function listConnections(): Promise<Connection[]> {
-  const response = await fetch(GATEWAY_LIST_URL);
-  if (!response.ok) {
-    throw new Error(`gateway list returned HTTP ${response.status}`);
-  }
-  const body: unknown = await response.json();
-  if (!isRecord(body) || !Array.isArray(body.connections)) {
-    throw new Error("gateway list response lacked connections");
-  }
-  const connections: Connection[] = [];
-  for (const entry of body.connections) {
-    if (
-      isRecord(entry) &&
-      typeof entry.provider === "string" &&
-      typeof entry.gateway_base_url === "string"
-    ) {
-      connections.push({ provider: entry.provider, gatewayBaseUrl: entry.gateway_base_url });
-    }
-  }
-  return connections;
-}
 
 function errorDetail(error: unknown): string {
   if (error instanceof BoxError) return error.code;

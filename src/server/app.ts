@@ -4,8 +4,10 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { recheckFolder } from "../evidence/recheck.ts";
 import type { SourceTuple } from "../evidence/recheck.ts";
-import { listConnections, runPipeline } from "../pipeline/run-pipeline.ts";
-import type { Connection, PipelineConfig } from "../pipeline/run-pipeline.ts";
+import { listConnections } from "../gateway.ts";
+import type { Connection } from "../gateway.ts";
+import { runPipeline } from "../pipeline/run-pipeline.ts";
+import type { PipelineConfig } from "../pipeline/run-pipeline.ts";
 import { escapeHtml } from "../review/decision-card.ts";
 import { draftHash, receiptHash, renderDraft } from "../review/draft.ts";
 import type { RunReceipt } from "../review/receipt.ts";
@@ -337,7 +339,7 @@ ${rows}
     redirect(res, `/runs/${runId}`);
   }
 
-  async function handleExport(req: IncomingMessage, res: ServerResponse, runId: string): Promise<void> {
+  async function handleExport(res: ServerResponse, runId: string): Promise<void> {
     const run = getRun(db, runId);
     if (run === undefined) return html(res, 404, page("Not found", deps.revision, "<h1>Not found</h1>"));
     const approval = getApproval(db, runId);
@@ -453,7 +455,7 @@ ${rows}
       }
       const exportMatch = /^\/runs\/([^/]+)\/export$/.exec(path);
       if (method === "POST" && exportMatch !== null) {
-        return handleExport(req, res, exportMatch[1]!);
+        return handleExport(res, exportMatch[1]!);
       }
       if (method === "GET" && path === "/") {
         return html(res, 200, renderRunList());

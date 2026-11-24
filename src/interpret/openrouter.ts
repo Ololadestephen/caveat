@@ -1,4 +1,4 @@
-import { callStructuredChat } from "./chat.ts";
+import { callStructuredChat, chatConfig } from "./chat.ts";
 import { decisionSchema } from "./schema.ts";
 import { validateDecision } from "./validate.ts";
 import { DECISION_SYSTEM_PROMPT, buildDecisionUserPrompt } from "./prompt.ts";
@@ -54,14 +54,7 @@ export class OpenRouterDecisionProvider implements DecisionProvider {
     });
 
     const result = await callStructuredChat(
-      {
-        gatewayBaseUrl: this.gatewayBaseUrl,
-        timeoutMs: this.timeoutMs,
-        ...(this.allowedModelVersions !== undefined
-          ? { allowedModelVersions: this.allowedModelVersions }
-          : {}),
-        fetch: this.fetchImpl,
-      },
+      chatConfig(this.gatewayBaseUrl, this.timeoutMs, this.allowedModelVersions, this.fetchImpl),
       {
         model: this.model,
         systemPrompt: DECISION_SYSTEM_PROMPT,

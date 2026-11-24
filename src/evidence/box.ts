@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { isRecord } from "../shape.ts";
+
 export type BoxErrorCode =
   | "http_error"
   | "metadata_invalid"
@@ -32,10 +34,6 @@ export type BoxFileEvidence = {
 };
 
 export type BoxEntry = { id: string; type: string; name: string };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function normalizeBase(gatewayBaseUrl: string): string {
   return gatewayBaseUrl.replace(/\/+$/, "");

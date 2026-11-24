@@ -1,3 +1,4 @@
+import { isRecord } from "../shape.ts";
 import type { NeedsReviewReason } from "./types.ts";
 
 export type StructuredChatConfig = {
@@ -6,6 +7,21 @@ export type StructuredChatConfig = {
   allowedModelVersions?: string[];
   fetch?: typeof fetch;
 };
+
+// Providers keep their config as fields; this builds the request config once.
+export function chatConfig(
+  gatewayBaseUrl: string,
+  timeoutMs: number,
+  allowedModelVersions: string[] | undefined,
+  fetchImpl: typeof fetch,
+): StructuredChatConfig {
+  return {
+    gatewayBaseUrl,
+    timeoutMs,
+    ...(allowedModelVersions !== undefined ? { allowedModelVersions } : {}),
+    fetch: fetchImpl,
+  };
+}
 
 export type StructuredChatRequest = {
   model: string;
@@ -32,10 +48,6 @@ export type ChatResult =
     };
 
 const ERROR_MESSAGE_MAX = 200;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function truncate(value: string, max = ERROR_MESSAGE_MAX): string {
   return value.length > max ? `${value.slice(0, max)}...` : value;
