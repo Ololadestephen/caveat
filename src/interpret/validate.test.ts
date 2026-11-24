@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { validateDecision } from "./validate.ts";
-import type { BillingTriggerQuestion } from "./types.ts";
+import { BILLING_TRIGGER } from "./types.ts";
+import type { Question } from "./types.ts";
 
-const QUESTION: BillingTriggerQuestion = {
-  questionId: "q-billing",
+const QUESTION: Question = {
+  spec: BILLING_TRIGGER,
+  id: "q-billing",
   excerpts: [
     {
       id: "ex-1",

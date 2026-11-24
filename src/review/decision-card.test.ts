@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { escapeHtml, renderDecisionCard } from "./decision-card.ts";
-import type { BillingTriggerQuestion, DecisionOutcome } from "../interpret/types.ts";
+import { BILLING_TRIGGER } from "../interpret/types.ts";
+import type { DecisionOutcome, Question } from "../interpret/types.ts";
 
-const QUESTION: BillingTriggerQuestion = {
-  questionId: "q-billing",
+const QUESTION: Question = {
+  spec: BILLING_TRIGGER,
+  id: "q-billing",
   excerpts: [
     {
       id: "ex-1",

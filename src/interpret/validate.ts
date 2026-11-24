@@ -1,11 +1,6 @@
-import { DECISION_ACTIONS } from "./types.ts";
+import { normalizeWhitespace } from "../text.ts";
 import { QUOTE_MAX_LENGTH, REASON_MAX_LENGTH } from "./schema.ts";
-import type {
-  BillingTriggerQuestion,
-  Decision,
-  DecisionAction,
-  NeedsReviewReason,
-} from "./types.ts";
+import type { Decision, NeedsReviewReason, Question } from "./types.ts";
 
 export type ValidationResult =
   | { ok: true; decision: Decision }
@@ -28,9 +23,16 @@ function keySetError(value: Record<string, unknown>, keys: string[]): string | u
   return parts.length > 0 ? parts.join("; ") : undefined;
 }
 
+// Verbatim checks run on whitespace-normalised text: contract text wraps
+// mid-phrase, so a quote that spans a wrap still counts as verbatim.
+export function quoteInText(quote: string, text: string): boolean {
+  const normalizedQuote = normalizeWhitespace(quote);
+  return normalizedQuote.length > 0 && normalizeWhitespace(text).includes(normalizedQuote);
+}
+
 export function validateDecision(
   parsed: unknown,
-  question: BillingTriggerQuestion,
+  question: Question,
   threshold: number,
 ): ValidationResult {
   const schemaFail = (detail: string): ValidationResult => ({
@@ -48,9 +50,10 @@ export function validateDecision(
   }
 
   const { action, reason, cited_clause: citedClause, confidence } = parsed;
+  const actions = question.spec.actions;
 
-  if (typeof action !== "string" || !(DECISION_ACTIONS as readonly string[]).includes(action)) {
-    return schemaFail(`action must be one of ${DECISION_ACTIONS.join(", ")}`);
+  if (typeof action !== "string" || !actions.includes(action)) {
+    return schemaFail(`action must be one of ${actions.join(", ")}`);
   }
   if (typeof reason !== "string" || reason.length === 0 || reason.length > REASON_MAX_LENGTH) {
     return schemaFail(`reason must be a non-empty string of at most ${REASON_MAX_LENGTH} characters`);
@@ -78,7 +81,7 @@ export function validateDecision(
   }
 
   const decision: Decision = {
-    action: action as DecisionAction,
+    action,
     reason,
     cited_clause: { excerpt_id: citedClause.excerpt_id, quote: citedClause.quote },
     confidence,
@@ -93,7 +96,7 @@ export function validateDecision(
       decision,
     };
   }
-  if (decision.cited_clause.quote.length === 0 || !excerpt.text.includes(decision.cited_clause.quote)) {
+  if (!quoteInText(decision.cited_clause.quote, excerpt.text)) {
     return {
       ok: false,
       reason: "quote_not_verbatim",
@@ -105,7 +108,7 @@ export function validateDecision(
     return {
       ok: false,
       reason: "ambiguous",
-      detail: "provider reported the billing trigger as ambiguous",
+      detail: `provider reported ${question.spec.id} as ambiguous`,
       decision,
     };
   }

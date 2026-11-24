@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import { BoxError, fetchBoxFile, findFolderByName, listFolder } from "../../src/evidence/box.ts";
 import { OpenRouterDecisionProvider } from "../../src/interpret/openrouter.ts";
 import { renderDecisionCard } from "../../src/review/decision-card.ts";
-import type { BillingTriggerQuestion, DecisionOutcome } from "../../src/interpret/types.ts";
+import { BILLING_TRIGGER } from "../../src/interpret/types.ts";
+import type { DecisionOutcome, Question } from "../../src/interpret/types.ts";
 
 const GATEWAY_LIST_URL = "https://api.sprites.dev/v1/gateway/list";
 const BOX_FILE_NAME = "01-consulting-agreement.pdf";
@@ -111,11 +112,11 @@ async function proveBox(connections: Connection[]): Promise<BoxProof> {
 type FixtureCase = {
   id: string;
   expectedAction: string;
-  excerpts: BillingTriggerQuestion["excerpts"];
+  excerpts: Question["excerpts"];
 };
 
 async function loadProofCase(): Promise<{
-  question: BillingTriggerQuestion;
+  question: Question;
   caseId: string;
   expectedAction: string;
 }> {
@@ -131,7 +132,11 @@ async function loadProofCase(): Promise<{
     throw new Error(`billing-trigger fixture has no case ${caseId}`);
   }
   return {
-    question: { questionId: `${raw.questionId}/${proofCase.id}`, excerpts: proofCase.excerpts },
+    question: {
+      spec: BILLING_TRIGGER,
+      id: `${raw.questionId}/${proofCase.id}`,
+      excerpts: proofCase.excerpts,
+    },
     caseId: proofCase.id,
     expectedAction: proofCase.expectedAction,
   };

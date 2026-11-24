@@ -1,14 +1,16 @@
 import type {
-  BillingTriggerQuestion,
-  DecisionAction,
   DecisionOutcome,
   Excerpt,
   NeedsReviewReason,
+  Question,
 } from "../interpret/types.ts";
 
-const ACTION_LABELS: Record<DecisionAction, string> = {
+const ACTION_LABELS: Record<string, string> = {
   delivery_triggered: "Delivery triggered",
   acceptance_triggered: "Acceptance triggered",
+  cash_on_fixed_date: "Cash on fixed dates",
+  escrow_release: "Escrow release",
+  transaction_triggered: "Transaction triggered",
   ambiguous: "Ambiguous",
 };
 
@@ -19,6 +21,7 @@ const REVIEW_REASON_LABELS: Record<NeedsReviewReason, string> = {
   malformed_json: "Provider output was not valid JSON",
   unknown_excerpt: "Cited excerpt was not among the supplied excerpts",
   quote_not_verbatim: "Cited quote is not verbatim in the supplied excerpt",
+  inconsistent_terms: "Extracted terms are internally inconsistent",
   model_mismatch: "Resolved model version was not allowed",
   missing_model_version: "Response did not report a model version",
   blocked: "Provider blocked the response",
@@ -39,14 +42,19 @@ export function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
+export function actionLabel(action: string): string {
+  return ACTION_LABELS[action] ?? action;
+}
+
+export function reviewReasonLabel(reason: NeedsReviewReason): string {
+  return REVIEW_REASON_LABELS[reason];
+}
+
 function formatConfidence(confidence: number): string {
   return `self-reported confidence ${confidence.toFixed(2)}`;
 }
 
-function findExcerpt(
-  question: BillingTriggerQuestion | undefined,
-  excerptId: string,
-): Excerpt | undefined {
+function findExcerpt(question: Question | undefined, excerptId: string): Excerpt | undefined {
   return question?.excerpts.find((e) => e.id === excerptId);
 }
 
@@ -54,8 +62,9 @@ function excerptSourceLine(excerpt: Excerpt | undefined, excerptId: string): str
   if (excerpt === undefined) {
     return `excerpt ${escapeHtml(excerptId)}`;
   }
-  const { fileName, versionLabel, page } = excerpt.source;
-  return `excerpt ${escapeHtml(excerptId)} — ${escapeHtml(fileName)}, ${escapeHtml(versionLabel)}, page ${page}`;
+  const { fileName, versionLabel, page, section } = excerpt.source;
+  const sectionPart = section !== undefined ? `, ${escapeHtml(section)}` : "";
+  return `excerpt ${escapeHtml(excerptId)} — ${escapeHtml(fileName)}${sectionPart}, ${escapeHtml(versionLabel)}, page ${page}`;
 }
 
 function modelLine(model: string | undefined, modelVersion: string | undefined): string {
@@ -73,16 +82,13 @@ function servedByLine(servedBy: string | undefined): string {
     : `<p class="decision-served-by">served by ${escapeHtml(servedBy)}</p>`;
 }
 
-export function renderDecisionCard(
-  outcome: DecisionOutcome,
-  question?: BillingTriggerQuestion,
-): string {
+export function renderDecisionCard(outcome: DecisionOutcome, question?: Question): string {
   if (outcome.status === "decided") {
     const { decision } = outcome;
     const excerpt = findExcerpt(question, decision.cited_clause.excerpt_id);
     return `<section class="decision-card decision-card--decided" data-provider="${escapeHtml(outcome.provider)}">
   <h2 class="decision-heading">Billing trigger decision</h2>
-  <p class="decision-action">${escapeHtml(ACTION_LABELS[decision.action])}</p>
+  <p class="decision-action">${escapeHtml(actionLabel(decision.action))}</p>
   <p class="decision-reason">${escapeHtml(decision.reason)}</p>
   <blockquote class="decision-quote">
     <p>&ldquo;${escapeHtml(decision.cited_clause.quote)}&rdquo;</p>
@@ -98,7 +104,7 @@ export function renderDecisionCard(
     outcome.decision === undefined
       ? ""
       : `
-  <p class="decision-action">${escapeHtml(ACTION_LABELS[outcome.decision.action])}</p>
+  <p class="decision-action">${escapeHtml(actionLabel(outcome.decision.action))}</p>
   <p class="decision-reason">${escapeHtml(outcome.decision.reason)}</p>
   <blockquote class="decision-quote">
     <p>&ldquo;${escapeHtml(outcome.decision.cited_clause.quote)}&rdquo;</p>
@@ -108,7 +114,7 @@ export function renderDecisionCard(
 
   return `<section class="decision-card decision-card--needs-review" data-provider="${escapeHtml(outcome.provider)}">
   <h2 class="decision-heading">Needs human review</h2>
-  <p class="decision-review-reason">${escapeHtml(REVIEW_REASON_LABELS[outcome.reason])}</p>
+  <p class="decision-review-reason">${escapeHtml(reviewReasonLabel(outcome.reason))}</p>
   <p class="decision-review-detail">${escapeHtml(outcome.detail)}</p>
   ${modelLine(outcome.model, outcome.modelVersion)}
   ${servedByLine(outcome.servedBy)}

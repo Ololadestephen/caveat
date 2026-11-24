@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_OPENROUTER_MODEL, OpenRouterDecisionProvider } from "./openrouter.ts";
-import { DECISION_JSON_SCHEMA } from "./schema.ts";
-import type { BillingTriggerQuestion } from "./types.ts";
+import { decisionSchema } from "./schema.ts";
+import { BILLING_TRIGGER } from "./types.ts";
+import type { Question } from "./types.ts";
 
 const MODEL = DEFAULT_OPENROUTER_MODEL;
 const RESOLVED = "nvidia/nemotron-3.5-super-vl";
 const SERVED_BY = "Nvidia";
 
-const QUESTION: BillingTriggerQuestion = {
-  questionId: "q-billing",
+const QUESTION: Question = {
+  spec: BILLING_TRIGGER,
+  id: "q-billing",
   excerpts: [
     {
       id: "ex-1",
@@ -121,7 +123,7 @@ describe("OpenRouterDecisionProvider", () => {
       json_schema: {
         name: "billing_trigger_decision",
         strict: true,
-        schema: DECISION_JSON_SCHEMA,
+        schema: decisionSchema(BILLING_TRIGGER.actions),
       },
     });
     expect(body.provider).toEqual({ require_parameters: true });
