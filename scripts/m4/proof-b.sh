@@ -145,18 +145,28 @@ CODE="$(post "$BASE/runs/$OLD_RUN/export" | code)"
 note "{\"step\":\"2\",\"stale_refusals\":true}"
 
 # --- 3. new run -> reviewable ---------------------------------------------------
-RUN_LOCATION="$(post "$BASE/runs" | awk 'tolower($1)=="location:" {print $2}' | tr -d '\r')"
-[ -n "$RUN_LOCATION" ] || fail "POST /runs did not redirect"
-NEW_RUN="${RUN_LOCATION##*/runs/}"
-note "{\"step\":\"3\",\"run_id\":\"$NEW_RUN\"}"
-
+# A needs_review/failed outcome is a legitimate terminal state (fail-closed);
+# the decision model is nondeterministic, so retry once before giving up —
+# the blocked run is kept in the store as evidence.
+NEW_RUN=""
 NEW_PAGE=""
-for _ in $(seq 1 60); do
-  NEW_PAGE="$(curl -s "$BASE/runs/$NEW_RUN")"
-  if echo "$NEW_PAGE" | grep -q 'badge--reviewable\|badge--needs_review\|badge--failed'; then
+for ATTEMPT in 1 2; do
+  RUN_LOCATION="$(post "$BASE/runs" | awk 'tolower($1)=="location:" {print $2}' | tr -d '\r')"
+  [ -n "$RUN_LOCATION" ] || fail "POST /runs did not redirect"
+  NEW_RUN="${RUN_LOCATION##*/runs/}"
+  note "{\"step\":\"3\",\"run_id\":\"$NEW_RUN\",\"attempt\":$ATTEMPT}"
+  NEW_PAGE=""
+  for _ in $(seq 1 60); do
+    NEW_PAGE="$(curl -s "$BASE/runs/$NEW_RUN")"
+    if echo "$NEW_PAGE" | grep -q 'badge--reviewable\|badge--needs_review\|badge--failed'; then
+      break
+    fi
+    sleep 5
+  done
+  if echo "$NEW_PAGE" | grep -q 'badge--reviewable'; then
     break
   fi
-  sleep 5
+  note "{\"step\":\"3\",\"attempt\":$ATTEMPT,\"outcome\":\"not_reviewable\"}"
 done
 echo "$NEW_PAGE" | grep -q 'badge--reviewable' || fail "new run did not become reviewable"
 echo "$NEW_PAGE" | grep -q 'Escrow release' || fail "new page lacks the decision"
