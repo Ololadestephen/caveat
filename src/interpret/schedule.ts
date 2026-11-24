@@ -122,7 +122,9 @@ export function extractAmountCents(text: string): number | undefined {
   return dollars * 100 + cents;
 }
 
-function fail(reason: NeedsReviewReason, detail: string): ScheduleValidation {
+type Invalid = Extract<ScheduleValidation, { ok: false }>;
+
+function fail(reason: NeedsReviewReason, detail: string): Invalid {
   return { ok: false, reason, detail };
 }
 
@@ -132,7 +134,7 @@ function checkTextQuote(
   field: TextQuote,
   fieldPath: string,
   excerptById: Map<string, { index: number; text: string }>,
-): ScheduleValidation | undefined {
+): Invalid | undefined {
   if (typeof field.text !== "string" || field.text.length === 0) {
     return fail("schema_mismatch", `${fieldPath}.text must be a non-empty string`);
   }
@@ -158,6 +160,133 @@ function checkTextQuote(
   return undefined;
 }
 
+type ExcerptIndex = Map<string, { index: number; text: string }>;
+
+// One {text, excerpt_id, quote} field: shape first, then the verbatim chain.
+function fieldQuote(
+  parent: Record<string, unknown>,
+  name: string,
+  excerptById: ExcerptIndex,
+): { ok: true; value: TextQuote } | Invalid {
+  const field = parent[name];
+  if (!isRecord(field)) return fail("schema_mismatch", `${name} is not a JSON object`);
+  const keys = keySetError(field, ["text", "excerpt_id", "quote"]);
+  if (keys !== undefined) return fail("schema_mismatch", `${name}: ${keys}`);
+  const quote = field as unknown as TextQuote;
+  const bad = checkTextQuote(quote, name, excerptById);
+  if (bad !== undefined) return bad;
+  return { ok: true, value: quote };
+}
+
+type RawRelease = {
+  amount_text: string;
+  date_text: string;
+  condition_text: string | null;
+  excerpt_id: string;
+  quote: string;
+};
+
+// Shape and verbatim checks for the releases array, in model order.
+function rawReleases(
+  value: unknown,
+  excerptById: ExcerptIndex,
+): { ok: true; value: RawRelease[] } | Invalid {
+  if (!Array.isArray(value)) {
+    return fail("schema_mismatch", "releases is not an array");
+  }
+  if (value.length < 1 || value.length > 8) {
+    return fail("schema_mismatch", "releases must contain between 1 and 8 items");
+  }
+  const RELEASE_KEYS = ["amount_text", "date_text", "condition_text", "excerpt_id", "quote"];
+  const releases: RawRelease[] = [];
+  for (const [i, item] of value.entries()) {
+    const path = `releases[${i}]`;
+    if (!isRecord(item)) return fail("schema_mismatch", `${path} is not a JSON object`);
+    const keys = keySetError(item, RELEASE_KEYS);
+    if (keys !== undefined) return fail("schema_mismatch", `${path}: ${keys}`);
+    const release = item as unknown as RawRelease;
+    const bad = checkTextQuote(
+      { text: release.amount_text, excerpt_id: release.excerpt_id, quote: release.quote },
+      `${path}.amount_text`,
+      excerptById,
+    );
+    if (bad !== undefined) return bad;
+    for (const [field, fieldValue] of [
+      ["date_text", release.date_text],
+      ["condition_text", release.condition_text],
+    ] as const) {
+      if (fieldValue === null) continue;
+      if (typeof fieldValue !== "string" || fieldValue.length === 0) {
+        return fail("schema_mismatch", `${path}.${field} must be a string or null`);
+      }
+      if (!quoteInText(fieldValue, release.quote)) {
+        return fail(
+          "quote_not_verbatim",
+          `${path}.${field} is not verbatim within its quote`,
+        );
+      }
+    }
+    releases.push(release);
+  }
+  return { ok: true, value: releases };
+}
+
+type PositionedRelease = {
+  release: RawRelease;
+  index: number;
+  excerptIndex: number;
+  quotePos: number;
+};
+
+// Build one ValidatedRelease from a raw release + its assigned id.
+function buildRelease(
+  release: RawRelease,
+  id: string,
+  conditional: boolean,
+): { ok: true; value: ValidatedRelease } | Invalid {
+  const amountCents = parseAmountCents(release.amount_text);
+  if (amountCents === undefined) {
+    return fail(
+      "schema_mismatch",
+      `release amount_text ${JSON.stringify(release.amount_text)} is not a dollar amount like "$1,234"`,
+    );
+  }
+  const parsedDate = parseMonthDayYear(release.date_text);
+  if (parsedDate === undefined) {
+    return fail(
+      "schema_mismatch",
+      `release date_text ${JSON.stringify(release.date_text)} is not a "Month D, YYYY" date`,
+    );
+  }
+  let extensionId: string | undefined;
+  if (conditional) {
+    const until = UNTIL_DATE_RE.exec(release.condition_text ?? "");
+    const untilDate = until !== null ? parseMonthDayYear(until[1] ?? "") : undefined;
+    if (untilDate === undefined) {
+      return fail(
+        "schema_mismatch",
+        `release condition_text ${JSON.stringify(release.condition_text)} contains no "until <Month D, YYYY>" date`,
+      );
+    }
+    extensionId = `ext-${untilDate.iso}`;
+  }
+  return {
+    ok: true,
+    value: {
+      id,
+      conditional,
+      extensionId,
+      amountText: release.amount_text,
+      amountCents,
+      dateText: release.date_text,
+      date: parsedDate.iso,
+      conditionText: release.condition_text,
+      excerptId: release.excerpt_id,
+      quote: release.quote,
+    },
+  };
+}
+
 // Validates one parsed schedule extraction: schema shape first, then the
 // verbatim chain (each text inside its quote, each quote inside its cited
 // excerpt, whitespace-normalised), then the field formats, confidence, and
@@ -176,156 +305,70 @@ export function validateScheduleExtraction(
 
   const excerptById = new Map(excerpts.map((e, index) => [e.id, { index, text: e.text }]));
 
-  const monthly = parsed.monthly_amount;
-  if (!isRecord(monthly)) return fail("schema_mismatch", "monthly_amount is not a JSON object");
-  const monthlyKeys = keySetError(monthly, ["text", "excerpt_id", "quote"]);
-  if (monthlyKeys !== undefined) return fail("schema_mismatch", `monthly_amount: ${monthlyKeys}`);
-  const monthlyBad = checkTextQuote(monthly as TextQuote, "monthly_amount", excerptById);
-  if (monthlyBad !== undefined) return monthlyBad;
+  const monthlyOut = fieldQuote(parsed, "monthly_amount", excerptById);
+  if (!monthlyOut.ok) return monthlyOut;
+  const monthly = monthlyOut.value;
 
-  const period = parsed.period;
-  if (!isRecord(period)) return fail("schema_mismatch", "period is not a JSON object");
-  const periodKeys = keySetError(period, ["text", "excerpt_id", "quote"]);
-  if (periodKeys !== undefined) return fail("schema_mismatch", `period: ${periodKeys}`);
-  const periodBad = checkTextQuote(period as TextQuote, "period", excerptById);
-  if (periodBad !== undefined) return periodBad;
+  const periodOut = fieldQuote(parsed, "period", excerptById);
+  if (!periodOut.ok) return periodOut;
+  const period = periodOut.value;
 
-  if (!Array.isArray(parsed.releases)) {
-    return fail("schema_mismatch", "releases is not an array");
-  }
-  if (parsed.releases.length < 1 || parsed.releases.length > 8) {
-    return fail("schema_mismatch", "releases must contain between 1 and 8 items");
-  }
-  const RELEASE_KEYS = ["amount_text", "date_text", "condition_text", "excerpt_id", "quote"];
-  type RawRelease = {
-    amount_text: string;
-    date_text: string;
-    condition_text: string | null;
-    excerpt_id: string;
-    quote: string;
-  };
-  const rawReleases: RawRelease[] = [];
-  for (const [i, item] of parsed.releases.entries()) {
-    const path = `releases[${i}]`;
-    if (!isRecord(item)) return fail("schema_mismatch", `${path} is not a JSON object`);
-    const keys = keySetError(item, RELEASE_KEYS);
-    if (keys !== undefined) return fail("schema_mismatch", `${path}: ${keys}`);
-    const release = item as unknown as RawRelease;
-    const bad = checkTextQuote(
-      { text: release.amount_text, excerpt_id: release.excerpt_id, quote: release.quote },
-      `${path}.amount_text`,
-      excerptById,
-    );
-    if (bad !== undefined) return bad;
-    for (const [field, value] of [
-      ["date_text", release.date_text],
-      ["condition_text", release.condition_text],
-    ] as const) {
-      if (value === null) continue;
-      if (typeof value !== "string" || value.length === 0) {
-        return fail("schema_mismatch", `${path}.${field} must be a string or null`);
-      }
-      if (!quoteInText(value, release.quote)) {
-        return fail(
-          "quote_not_verbatim",
-          `${path}.${field} is not verbatim within its quote`,
-        );
-      }
-    }
-    rawReleases.push(release);
-  }
+  const releasesOut = rawReleases(parsed.releases, excerptById);
+  if (!releasesOut.ok) return releasesOut;
 
   const confidence = parsed.confidence;
   if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
     return fail("schema_mismatch", "confidence must be a number between 0 and 1");
   }
 
-  const monthlyAmountCents = parseAmountCents((monthly as TextQuote).text);
+  const monthlyAmountCents = parseAmountCents(monthly.text);
   if (monthlyAmountCents === undefined) {
     return fail(
       "schema_mismatch",
-      `monthly_amount.text ${JSON.stringify((monthly as TextQuote).text)} is not a dollar amount like "$1,234"`,
+      `monthly_amount.text ${JSON.stringify(monthly.text)} is not a dollar amount like "$1,234"`,
     );
   }
-  const periodMatch = PERIOD_RE.exec((period as TextQuote).text.trim());
+  const periodMatch = PERIOD_RE.exec(period.text.trim());
   if (periodMatch === null) {
     return fail(
       "schema_mismatch",
-      `period.text ${JSON.stringify((period as TextQuote).text)} is not a "<n>-month" period`,
+      `period.text ${JSON.stringify(period.text)} is not a "<n>-month" period`,
     );
   }
   const periodMonths = Number(periodMatch[1]);
 
   // Number the releases by document position, separately per conditionality.
-  const positioned = rawReleases.map((release, i) => {
+  const positioned: PositionedRelease[] = releasesOut.value.map((release, index) => {
     const excerpt = excerptById.get(release.excerpt_id);
     const quotePos =
       excerpt === undefined
         ? -1
         : normalizeWhitespace(excerpt.text).indexOf(normalizeWhitespace(release.quote));
-    return { release, i, excerptIndex: excerpt?.index ?? -1, quotePos };
+    return { release, index, excerptIndex: excerpt?.index ?? -1, quotePos };
   });
-  positioned.sort((a, b) => a.excerptIndex - b.excerptIndex || a.quotePos - b.quotePos || a.i - b.i);
+  positioned.sort((a, b) => a.excerptIndex - b.excerptIndex || a.quotePos - b.quotePos || a.index - b.index);
   const unconditional = positioned.filter((p) => p.release.condition_text === null);
   const conditional = positioned.filter((p) => p.release.condition_text !== null);
 
   const releases: ValidatedRelease[] = [];
   let releaseSum = 0;
-  const build = (
-    entry: (typeof positioned)[number],
-    id: string,
-    conditional: boolean,
+  const buildAll = (
+    entries: PositionedRelease[],
+    idPrefix: string,
+    conditionalReleases: boolean,
   ): ScheduleValidation | undefined => {
-    const { release } = entry;
-    const amountCents = parseAmountCents(release.amount_text);
-    if (amountCents === undefined) {
-      return fail(
-        "schema_mismatch",
-        `release amount_text ${JSON.stringify(release.amount_text)} is not a dollar amount like "$1,234"`,
-      );
+    for (const [i, entry] of entries.entries()) {
+      const built = buildRelease(entry.release, `${idPrefix}${i + 1}`, conditionalReleases);
+      if (!built.ok) return built;
+      releases.push(built.value);
+      releaseSum += built.value.amountCents;
     }
-    const parsedDate = parseMonthDayYear(release.date_text);
-    if (parsedDate === undefined) {
-      return fail(
-        "schema_mismatch",
-        `release date_text ${JSON.stringify(release.date_text)} is not a "Month D, YYYY" date`,
-      );
-    }
-    let extensionId: string | undefined;
-    if (conditional) {
-      const until = UNTIL_DATE_RE.exec(release.condition_text ?? "");
-      const untilDate = until !== null ? parseMonthDayYear(until[1] ?? "") : undefined;
-      if (untilDate === undefined) {
-        return fail(
-          "schema_mismatch",
-          `release condition_text ${JSON.stringify(release.condition_text)} contains no "until <Month D, YYYY>" date`,
-        );
-      }
-      extensionId = `ext-${untilDate.iso}`;
-    }
-    releaseSum += amountCents;
-    releases.push({
-      id,
-      conditional,
-      extensionId,
-      amountText: release.amount_text,
-      amountCents,
-      dateText: release.date_text,
-      date: parsedDate.iso,
-      conditionText: release.condition_text,
-      excerptId: release.excerpt_id,
-      quote: release.quote,
-    });
     return undefined;
   };
-  for (const [i, entry] of unconditional.entries()) {
-    const bad = build(entry, `release-${i + 1}`, false);
-    if (bad !== undefined) return bad;
-  }
-  for (const [i, entry] of conditional.entries()) {
-    const bad = build(entry, `release-ext-${i + 1}`, true);
-    if (bad !== undefined) return bad;
-  }
+  const unconditionalBad = buildAll(unconditional, "release-", false);
+  if (unconditionalBad !== undefined) return unconditionalBad;
+  const conditionalBad = buildAll(conditional, "release-ext-", true);
+  if (conditionalBad !== undefined) return conditionalBad;
 
   if (confidence < threshold) {
     return fail(
@@ -345,14 +388,14 @@ export function validateScheduleExtraction(
   return {
     ok: true,
     schedule: {
-      monthlyAmountText: (monthly as TextQuote).text,
+      monthlyAmountText: monthly.text,
       monthlyAmountCents,
-      monthlyExcerptId: (monthly as TextQuote).excerpt_id,
-      monthlyQuote: (monthly as TextQuote).quote,
-      periodText: (period as TextQuote).text,
+      monthlyExcerptId: monthly.excerpt_id,
+      monthlyQuote: monthly.quote,
+      periodText: period.text,
       periodMonths,
-      periodExcerptId: (period as TextQuote).excerpt_id,
-      periodQuote: (period as TextQuote).quote,
+      periodExcerptId: period.excerpt_id,
+      periodQuote: period.quote,
       releases,
       confidence,
     },
