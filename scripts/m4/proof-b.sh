@@ -117,13 +117,10 @@ echo "$OLD_PAGE" | grep -q "$OLD_RECEIPT_SHA" || fail "old page lost the receipt
 echo "$OLD_PAGE" | grep -qi "stale" || fail "old page lacks the stale banner"
 echo "$OLD_PAGE" | grep -q "version_changed" || fail "old page lacks the change list"
 
-CODE="$(post -d "receiptHash=$OLD_RECEIPT_SHA&draftHash=$OLD_DRAFT_SHA" "$BASE/runs/$OLD_RUN/approve" | code)"
-[ "$CODE" = "409" ] || fail "approve on stale returned $CODE"
-CODE="$(post "$BASE/runs/$OLD_RUN/export" | code)"
-[ "$CODE" = "409" ] || fail "export on stale returned $CODE"
-note "{\"step\":\"1\",\"stale_refusals\":true}"
-
 # --- 2. redeploy HEAD ----------------------------------------------------------
+# Approve/export refusals are checked after the deploy: the previous revision
+# had an approve-ordering bug (idempotent approval returned before the status
+# check) fixed in e81a1b1, so a stale run must be refused by the NEW revision.
 bash "$REPO_ROOT/scripts/m4/deploy.sh" >&2 || fail "deploy.sh"
 wait_ready || fail "service did not come back after redeploy"
 REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
@@ -140,6 +137,12 @@ N="$(db_query "SELECT COUNT(*) AS n FROM approvals WHERE run_id = '$OLD_RUN'" | 
 E="$(db_query "SELECT COUNT(*) AS n FROM exports WHERE run_id = '$OLD_RUN'" | grep -oE '[0-9]+')"
 [ "$E" = "3" ] || fail "export rows changed on redeploy: $E"
 note "{\"step\":\"2\",\"old_run\":\"unchanged\"}"
+
+CODE="$(post -d "receiptHash=$OLD_RECEIPT_SHA&draftHash=$OLD_DRAFT_SHA" "$BASE/runs/$OLD_RUN/approve" | code)"
+[ "$CODE" = "409" ] || fail "approve on stale returned $CODE"
+CODE="$(post "$BASE/runs/$OLD_RUN/export" | code)"
+[ "$CODE" = "409" ] || fail "export on stale returned $CODE"
+note "{\"step\":\"2\",\"stale_refusals\":true}"
 
 # --- 3. new run -> reviewable ---------------------------------------------------
 RUN_LOCATION="$(post "$BASE/runs" | awk 'tolower($1)=="location:" {print $2}' | tr -d '\r')"
