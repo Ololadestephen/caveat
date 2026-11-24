@@ -14,10 +14,11 @@ for DIR in src scripts fixtures; do
 done
 
 ENV_VARS=""
-if [ -n "${CAVEAT_BOX_FOLDER:-}" ]; then ENV_VARS="CAVEAT_BOX_FOLDER=$CAVEAT_BOX_FOLDER"; fi
-if [ -n "${CAVEAT_OLLAMA_MODEL:-}" ]; then
-  ENV_VARS="${ENV_VARS:+$ENV_VARS,}CAVEAT_OLLAMA_MODEL=$CAVEAT_OLLAMA_MODEL"
-fi
+for VAR in CAVEAT_BOX_FOLDER CAVEAT_GEMINI_MODEL CAVEAT_PROOF_CASE; do
+  if [ -n "${!VAR:-}" ]; then
+    ENV_VARS="${ENV_VARS:+$ENV_VARS,}$VAR=${!VAR}"
+  fi
+done
 
 mkdir -p "$EVIDENCE_DIR"
 OUT="$EVIDENCE_DIR/coord-$(date +%Y%m%dT%H%M%S).json"

@@ -27,6 +27,7 @@ type BoxProof =
 type GeminiProof = {
   status: string;
   connector: "gemini";
+  caseId?: string;
   model?: string;
   modelVersion?: string;
   action?: string;
@@ -122,8 +123,11 @@ async function loadProofCase(): Promise<{
     throw new Error("billing-trigger fixture is malformed");
   }
   const cases = raw.cases as FixtureCase[];
-  const proofCase = cases.find((c) => c.id === PROOF_CASE_ID) ?? cases[0];
-  if (proofCase === undefined) throw new Error("billing-trigger fixture has no cases");
+  const caseId = process.env.CAVEAT_PROOF_CASE ?? PROOF_CASE_ID;
+  const proofCase = cases.find((c) => c.id === caseId);
+  if (proofCase === undefined) {
+    throw new Error(`billing-trigger fixture has no case ${caseId}`);
+  }
   return {
     question: { questionId: `${raw.questionId}/${proofCase.id}`, excerpts: proofCase.excerpts },
     caseId: proofCase.id,
@@ -144,12 +148,13 @@ async function proveGemini(connections: Connection[]): Promise<GeminiProof> {
   });
 
   try {
-    const { question, expectedAction } = await loadProofCase();
+    const { question, caseId, expectedAction } = await loadProofCase();
     const decideStarted = performance.now();
     const outcome: DecisionOutcome = await provider.decide(question);
     const latencyMs = Math.round(performance.now() - decideStarted);
     const decision = outcome.decision;
     const proof: GeminiProof = {
+      caseId,
       status:
         outcome.status === "decided"
           ? outcome.decision.action === expectedAction
