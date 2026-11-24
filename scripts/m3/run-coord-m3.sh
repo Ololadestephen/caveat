@@ -32,8 +32,14 @@ sprite file push -p -s "$SPRITE" -r "$REVIEWS" "$REMOTE_DIR/reviews" >/dev/null
 # dependencies, so the directory alone resolves.
 if ! sprite exec --no-stdin -s "$SPRITE" -- sh -c "cd '$REMOTE_DIR' && npm ci --omit=dev --no-audit --no-fund" >/dev/null 2>&1; then
   echo "npm ci failed on the coordinator; pushing node_modules/pdfjs-dist instead" >&2
-  sprite file push -p -s "$SPRITE" -r "$REPO_ROOT/node_modules/pdfjs-dist" \
+  PDFJS_STAGE="$(mktemp -d)/pdfjs-dist"
+  mkdir -p "$PDFJS_STAGE"
+  cp "$REPO_ROOT/node_modules/pdfjs-dist/package.json" "$PDFJS_STAGE/"
+  cp -R "$REPO_ROOT/node_modules/pdfjs-dist/legacy" "$PDFJS_STAGE/"
+  find "$PDFJS_STAGE" -name '*.map' -delete
+  sprite file push -p -s "$SPRITE" -r "$PDFJS_STAGE" \
     "$REMOTE_DIR/node_modules/pdfjs-dist" >/dev/null
+  rm -rf "$(dirname "$PDFJS_STAGE")"
 fi
 
 ENV_VARS="CAVEAT_RUN_ID=$RUN_ID"
