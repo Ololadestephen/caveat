@@ -101,6 +101,10 @@ function buildEvents(candidate: Candidate, scenario: Scenario, costs: RunInput["
         });
         break;
       }
+      default: {
+        const unexpected: never = rule;
+        throw new Error(`unhandled payment rule kind: ${String(unexpected)}`);
+      }
     }
   }
   events.sort((a, b) => {

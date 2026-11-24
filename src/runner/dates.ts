@@ -23,6 +23,13 @@ export function isValidDateString(value: string): boolean {
 // Hinnant's days-from-civil / civil-from-days. Pure integer arithmetic on
 // proleptic Gregorian dates; day 0 is 1970-01-01. No Date.now, no local
 // timezone, no Intl.
+const DAYS_PER_400_YEAR_ERA = 146097;
+const DAYS_PER_100_YEARS = 36524;
+const DAYS_PER_4_YEARS = 1460;
+const DAYS_PER_ERA_MINUS_1 = 146096;
+// Day number of 1970-01-01 measured from the algorithm's 0000-03-01 origin.
+const UNIX_EPOCH_OFFSET_DAYS = 719468;
+
 export function dayNumber(date: string): number {
   const match = DATE_RE.exec(date);
   if (!match) throw new Error(`invalid date string: ${date}`);
@@ -35,15 +42,15 @@ export function dayNumber(date: string): number {
   const mp = (m + 9) % 12;
   const doy = Math.floor((153 * mp + 2) / 5) + d - 1;
   const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
-  return era * 146097 + doe - 719468;
+  return era * DAYS_PER_400_YEAR_ERA + doe - UNIX_EPOCH_OFFSET_DAYS;
 }
 
 export function dateString(dayNum: number): string {
-  const z = dayNum + 719468;
-  const era = Math.floor(z / 146097);
-  const doe = z - era * 146097;
+  const z = dayNum + UNIX_EPOCH_OFFSET_DAYS;
+  const era = Math.floor(z / DAYS_PER_400_YEAR_ERA);
+  const doe = z - era * DAYS_PER_400_YEAR_ERA;
   const yoe = Math.floor(
-    (doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365,
+    (doe - Math.floor(doe / DAYS_PER_4_YEARS) + Math.floor(doe / DAYS_PER_100_YEARS) - Math.floor(doe / DAYS_PER_ERA_MINUS_1)) / 365,
   );
   const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
   const mp = Math.floor((5 * doy + 2) / 153);

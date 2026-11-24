@@ -235,6 +235,10 @@ export function policyAdjustments(input: RunInput, scenario: Scenario): PolicyAd
         }
         case "escrow_deposit":
           break;
+        default: {
+          const unexpected: never = rule;
+          throw new Error(`unhandled payment rule kind: ${String(unexpected)}`);
+        }
       }
       if (contractDay !== undefined && modeledDay !== undefined && modeledDay !== contractDay) {
         adjustments.push({
