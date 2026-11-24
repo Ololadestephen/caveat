@@ -1,0 +1,461 @@
+import { normalizeWhitespace, parseMonthDayYear } from "../text.ts";
+import { callStructuredChat } from "./chat.ts";
+import { excerptTags, DECISION_SYSTEM_PROMPT } from "./prompt.ts";
+import { quoteInText } from "./validate.ts";
+import type { Excerpt, NeedsReviewReason } from "./types.ts";
+import type { OpenRouterProviderConfig } from "./openrouter.ts";
+
+const DEFAULT_THRESHOLD = 0.8;
+const DEFAULT_TIMEOUT_MS = 60_000;
+
+export const SCHEDULE_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["monthly_amount", "period", "releases", "confidence"],
+  properties: {
+    monthly_amount: {
+      type: "object",
+      additionalProperties: false,
+      required: ["text", "excerpt_id", "quote"],
+      properties: {
+        text: { type: "string" },
+        excerpt_id: { type: "string" },
+        quote: { type: "string" },
+      },
+    },
+    period: {
+      type: "object",
+      additionalProperties: false,
+      required: ["text", "excerpt_id", "quote"],
+      properties: {
+        text: { type: "string" },
+        excerpt_id: { type: "string" },
+        quote: { type: "string" },
+      },
+    },
+    releases: {
+      type: "array",
+      minItems: 1,
+      maxItems: 8,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["amount_text", "date_text", "condition_text", "excerpt_id", "quote"],
+        properties: {
+          amount_text: { type: "string" },
+          date_text: { type: "string" },
+          condition_text: { type: ["string", "null"] },
+          excerpt_id: { type: "string" },
+          quote: { type: "string" },
+        },
+      },
+    },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+  },
+} as const;
+
+export const SCHEDULE_USER_PROMPT = `Extract the escrow payment schedule exactly as written. monthly_amount.text: the per-month compensation amount exactly as written (for example "$1,234"). period.text: the length of the escrow-funded period exactly as written (for example "3-month"). releases: every scheduled payment to the consultant out of escrow; amount_text and date_text exactly as written; condition_text: the condition clause exactly as written, or null if the payment is unconditional. Every text value must be copied verbatim from its quote, and every quote verbatim from one supplied excerpt. Do not add, total, or convert amounts or dates.`;
+
+export type ValidatedRelease = {
+  id: string;
+  conditional: boolean;
+  extensionId: string | undefined;
+  amountText: string;
+  amountCents: number;
+  dateText: string;
+  date: string;
+  conditionText: string | null;
+  excerptId: string;
+  quote: string;
+};
+
+export type ValidatedSchedule = {
+  monthlyAmountText: string;
+  monthlyAmountCents: number;
+  monthlyExcerptId: string;
+  monthlyQuote: string;
+  periodText: string;
+  periodMonths: number;
+  periodExcerptId: string;
+  periodQuote: string;
+  releases: ValidatedRelease[];
+  confidence: number;
+};
+
+export type ScheduleValidation =
+  | { ok: true; schedule: ValidatedSchedule }
+  | { ok: false; reason: NeedsReviewReason; detail: string };
+
+export type ScheduleOutcome =
+  | {
+      status: "extracted";
+      schedule: ValidatedSchedule;
+      provider: string;
+      model: string;
+      modelVersion?: string;
+      servedBy?: string;
+      latencyMs: number;
+    }
+  | {
+      status: "needs_review";
+      reason: NeedsReviewReason;
+      detail: string;
+      provider: string;
+      model?: string;
+      modelVersion?: string;
+      servedBy?: string;
+    };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function keySetError(value: Record<string, unknown>, keys: string[]): string | undefined {
+  const actual = Object.keys(value);
+  const missing = keys.filter((k) => !actual.includes(k));
+  const extra = actual.filter((k) => !keys.includes(k));
+  const parts: string[] = [];
+  if (missing.length > 0) parts.push(`missing keys: ${missing.join(", ")}`);
+  if (extra.length > 0) parts.push(`unexpected keys: ${extra.join(", ")}`);
+  return parts.length > 0 ? parts.join("; ") : undefined;
+}
+
+const AMOUNT_RE = /^\$(\d{1,3}(?:,\d{3})*)(\.\d{2})?$/;
+const PERIOD_RE = /^(\d+)-month$/;
+const UNTIL_DATE_RE = /until\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})/;
+
+export function parseAmountCents(text: string): number | undefined {
+  const match = AMOUNT_RE.exec(text.trim());
+  if (match === null) return undefined;
+  const dollars = Number((match[1] ?? "").replaceAll(",", ""));
+  const cents = match[2] !== undefined ? Number(match[2].slice(1)) : 0;
+  return dollars * 100 + cents;
+}
+
+const AMOUNT_SEARCH_RE = /\$(\d{1,3}(?:,\d{3})*)(\.\d{2})?/;
+
+// Extracts the first dollar amount inside a longer text ("$6,000 per month").
+export function extractAmountCents(text: string): number | undefined {
+  const match = AMOUNT_SEARCH_RE.exec(text);
+  if (match === null) return undefined;
+  const dollars = Number((match[1] ?? "").replaceAll(",", ""));
+  const cents = match[2] !== undefined ? Number(match[2].slice(1)) : 0;
+  return dollars * 100 + cents;
+}
+
+function fail(reason: NeedsReviewReason, detail: string): ScheduleValidation {
+  return { ok: false, reason, detail };
+}
+
+type TextQuote = { text: string; excerpt_id: string; quote: string };
+
+function checkTextQuote(
+  field: TextQuote,
+  fieldPath: string,
+  excerptById: Map<string, { index: number; text: string }>,
+): ScheduleValidation | undefined {
+  if (typeof field.text !== "string" || field.text.length === 0) {
+    return fail("schema_mismatch", `${fieldPath}.text must be a non-empty string`);
+  }
+  if (typeof field.excerpt_id !== "string" || field.excerpt_id.length === 0) {
+    return fail("schema_mismatch", `${fieldPath}.excerpt_id must be a non-empty string`);
+  }
+  if (typeof field.quote !== "string" || field.quote.length === 0) {
+    return fail("schema_mismatch", `${fieldPath}.quote must be a non-empty string`);
+  }
+  const excerpt = excerptById.get(field.excerpt_id);
+  if (excerpt === undefined) {
+    return fail(
+      "unknown_excerpt",
+      `${fieldPath} cites excerpt id ${JSON.stringify(field.excerpt_id)} which was not supplied`,
+    );
+  }
+  if (!quoteInText(field.quote, excerpt.text)) {
+    return fail("quote_not_verbatim", `${fieldPath}.quote is not verbatim in its cited excerpt`);
+  }
+  if (!quoteInText(field.text, field.quote)) {
+    return fail("quote_not_verbatim", `${fieldPath}.text is not verbatim within its quote`);
+  }
+  return undefined;
+}
+
+// Validates one parsed schedule extraction: schema shape first, then the
+// verbatim chain (each text inside its quote, each quote inside its cited
+// excerpt, whitespace-normalised), then the field formats, confidence, and
+// finally the internal-consistency check. Release ids are assigned here from
+// document position, never from the model's array order.
+export function validateScheduleExtraction(
+  parsed: unknown,
+  excerpts: Excerpt[],
+  threshold: number,
+): ScheduleValidation {
+  if (!isRecord(parsed)) {
+    return fail("schema_mismatch", "extraction is not a JSON object");
+  }
+  const topError = keySetError(parsed, ["monthly_amount", "period", "releases", "confidence"]);
+  if (topError !== undefined) return fail("schema_mismatch", topError);
+
+  const excerptById = new Map(excerpts.map((e, index) => [e.id, { index, text: e.text }]));
+
+  const monthly = parsed.monthly_amount;
+  if (!isRecord(monthly)) return fail("schema_mismatch", "monthly_amount is not a JSON object");
+  const monthlyKeys = keySetError(monthly, ["text", "excerpt_id", "quote"]);
+  if (monthlyKeys !== undefined) return fail("schema_mismatch", `monthly_amount: ${monthlyKeys}`);
+  const monthlyBad = checkTextQuote(monthly as TextQuote, "monthly_amount", excerptById);
+  if (monthlyBad !== undefined) return monthlyBad;
+
+  const period = parsed.period;
+  if (!isRecord(period)) return fail("schema_mismatch", "period is not a JSON object");
+  const periodKeys = keySetError(period, ["text", "excerpt_id", "quote"]);
+  if (periodKeys !== undefined) return fail("schema_mismatch", `period: ${periodKeys}`);
+  const periodBad = checkTextQuote(period as TextQuote, "period", excerptById);
+  if (periodBad !== undefined) return periodBad;
+
+  if (!Array.isArray(parsed.releases)) {
+    return fail("schema_mismatch", "releases is not an array");
+  }
+  if (parsed.releases.length < 1 || parsed.releases.length > 8) {
+    return fail("schema_mismatch", "releases must contain between 1 and 8 items");
+  }
+  const RELEASE_KEYS = ["amount_text", "date_text", "condition_text", "excerpt_id", "quote"];
+  type RawRelease = {
+    amount_text: string;
+    date_text: string;
+    condition_text: string | null;
+    excerpt_id: string;
+    quote: string;
+  };
+  const rawReleases: RawRelease[] = [];
+  for (const [i, item] of parsed.releases.entries()) {
+    const path = `releases[${i}]`;
+    if (!isRecord(item)) return fail("schema_mismatch", `${path} is not a JSON object`);
+    const keys = keySetError(item, RELEASE_KEYS);
+    if (keys !== undefined) return fail("schema_mismatch", `${path}: ${keys}`);
+    const release = item as unknown as RawRelease;
+    const bad = checkTextQuote(
+      { text: release.amount_text, excerpt_id: release.excerpt_id, quote: release.quote },
+      `${path}.amount_text`,
+      excerptById,
+    );
+    if (bad !== undefined) return bad;
+    for (const [field, value] of [
+      ["date_text", release.date_text],
+      ["condition_text", release.condition_text],
+    ] as const) {
+      if (value === null) continue;
+      if (typeof value !== "string" || value.length === 0) {
+        return fail("schema_mismatch", `${path}.${field} must be a string or null`);
+      }
+      if (!quoteInText(value, release.quote)) {
+        return fail(
+          "quote_not_verbatim",
+          `${path}.${field} is not verbatim within its quote`,
+        );
+      }
+    }
+    rawReleases.push(release);
+  }
+
+  const confidence = parsed.confidence;
+  if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    return fail("schema_mismatch", "confidence must be a number between 0 and 1");
+  }
+
+  const monthlyAmountCents = parseAmountCents((monthly as TextQuote).text);
+  if (monthlyAmountCents === undefined) {
+    return fail(
+      "schema_mismatch",
+      `monthly_amount.text ${JSON.stringify((monthly as TextQuote).text)} is not a dollar amount like "$1,234"`,
+    );
+  }
+  const periodMatch = PERIOD_RE.exec((period as TextQuote).text.trim());
+  if (periodMatch === null) {
+    return fail(
+      "schema_mismatch",
+      `period.text ${JSON.stringify((period as TextQuote).text)} is not a "<n>-month" period`,
+    );
+  }
+  const periodMonths = Number(periodMatch[1]);
+
+  // Number the releases by document position, separately per conditionality.
+  const positioned = rawReleases.map((release, i) => {
+    const excerpt = excerptById.get(release.excerpt_id);
+    const quotePos =
+      excerpt === undefined
+        ? -1
+        : normalizeWhitespace(excerpt.text).indexOf(normalizeWhitespace(release.quote));
+    return { release, i, excerptIndex: excerpt?.index ?? -1, quotePos };
+  });
+  positioned.sort((a, b) => a.excerptIndex - b.excerptIndex || a.quotePos - b.quotePos || a.i - b.i);
+  const unconditional = positioned.filter((p) => p.release.condition_text === null);
+  const conditional = positioned.filter((p) => p.release.condition_text !== null);
+
+  const releases: ValidatedRelease[] = [];
+  let releaseSum = 0;
+  const build = (
+    entry: (typeof positioned)[number],
+    id: string,
+    conditional: boolean,
+  ): ScheduleValidation | undefined => {
+    const { release } = entry;
+    const amountCents = parseAmountCents(release.amount_text);
+    if (amountCents === undefined) {
+      return fail(
+        "schema_mismatch",
+        `release amount_text ${JSON.stringify(release.amount_text)} is not a dollar amount like "$1,234"`,
+      );
+    }
+    const parsedDate = parseMonthDayYear(release.date_text);
+    if (parsedDate === undefined) {
+      return fail(
+        "schema_mismatch",
+        `release date_text ${JSON.stringify(release.date_text)} is not a "Month D, YYYY" date`,
+      );
+    }
+    let extensionId: string | undefined;
+    if (conditional) {
+      const until = UNTIL_DATE_RE.exec(release.condition_text ?? "");
+      const untilDate = until !== null ? parseMonthDayYear(until[1] ?? "") : undefined;
+      if (untilDate === undefined) {
+        return fail(
+          "schema_mismatch",
+          `release condition_text ${JSON.stringify(release.condition_text)} contains no "until <Month D, YYYY>" date`,
+        );
+      }
+      extensionId = `ext-${untilDate.iso}`;
+    }
+    releaseSum += amountCents;
+    releases.push({
+      id,
+      conditional,
+      extensionId,
+      amountText: release.amount_text,
+      amountCents,
+      dateText: release.date_text,
+      date: parsedDate.iso,
+      conditionText: release.condition_text,
+      excerptId: release.excerpt_id,
+      quote: release.quote,
+    });
+    return undefined;
+  };
+  for (const [i, entry] of unconditional.entries()) {
+    const bad = build(entry, `release-${i + 1}`, false);
+    if (bad !== undefined) return bad;
+  }
+  for (const [i, entry] of conditional.entries()) {
+    const bad = build(entry, `release-ext-${i + 1}`, true);
+    if (bad !== undefined) return bad;
+  }
+
+  if (confidence < threshold) {
+    return fail(
+      "low_confidence",
+      `self-reported confidence ${confidence} is below threshold ${threshold}`,
+    );
+  }
+
+  const expected = monthlyAmountCents * periodMonths;
+  if (expected !== releaseSum) {
+    return fail(
+      "inconsistent_terms",
+      `monthly amount ${monthlyAmountCents} x ${periodMonths} months = ${expected} but the releases sum to ${releaseSum}`,
+    );
+  }
+
+  return {
+    ok: true,
+    schedule: {
+      monthlyAmountText: (monthly as TextQuote).text,
+      monthlyAmountCents,
+      monthlyExcerptId: (monthly as TextQuote).excerpt_id,
+      monthlyQuote: (monthly as TextQuote).quote,
+      periodText: (period as TextQuote).text,
+      periodMonths,
+      periodExcerptId: (period as TextQuote).excerpt_id,
+      periodQuote: (period as TextQuote).quote,
+      releases,
+      confidence,
+    },
+  };
+}
+
+export class OpenRouterScheduleExtractor {
+  readonly name = "openrouter";
+  private readonly gatewayBaseUrl: string;
+  private readonly model: string;
+  private readonly threshold: number;
+  private readonly timeoutMs: number;
+  private readonly allowedModelVersions: string[] | undefined;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(config: OpenRouterProviderConfig) {
+    this.gatewayBaseUrl = config.gatewayBaseUrl;
+    this.model = config.model ?? "nvidia/nemotron-3.5-super-vl:free";
+    this.threshold = config.threshold ?? DEFAULT_THRESHOLD;
+    this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.allowedModelVersions = config.allowedModelVersions;
+    this.fetchImpl = config.fetch ?? fetch;
+  }
+
+  async extract(
+    question: { id: string; excerpts: Excerpt[] },
+    options?: { signal?: AbortSignal },
+  ): Promise<ScheduleOutcome> {
+    const userPrompt = `${SCHEDULE_USER_PROMPT}\n\n${excerptTags(question.excerpts)}`;
+    const result = await callStructuredChat(
+      {
+        gatewayBaseUrl: this.gatewayBaseUrl,
+        timeoutMs: this.timeoutMs,
+        ...(this.allowedModelVersions !== undefined
+          ? { allowedModelVersions: this.allowedModelVersions }
+          : {}),
+        fetch: this.fetchImpl,
+      },
+      {
+        model: this.model,
+        systemPrompt: DECISION_SYSTEM_PROMPT,
+        userPrompt,
+        schemaName: "schedule_extraction",
+        schema: SCHEDULE_JSON_SCHEMA,
+      },
+      options,
+    );
+
+    const failOutcome = (
+      reason: NeedsReviewReason,
+      detail: string,
+      extra?: { modelVersion?: string; servedBy?: string },
+    ): ScheduleOutcome => ({
+      status: "needs_review",
+      reason,
+      detail,
+      provider: this.name,
+      model: this.model,
+      ...extra,
+    });
+
+    if (!result.ok) {
+      return failOutcome(result.reason, result.detail, {
+        ...(result.modelVersion !== undefined ? { modelVersion: result.modelVersion } : {}),
+        ...(result.servedBy !== undefined ? { servedBy: result.servedBy } : {}),
+      });
+    }
+    const validation = validateScheduleExtraction(result.parsed, question.excerpts, this.threshold);
+    if (!validation.ok) {
+      return failOutcome(validation.reason, validation.detail, {
+        modelVersion: result.modelVersion,
+        ...(result.servedBy !== undefined ? { servedBy: result.servedBy } : {}),
+      });
+    }
+    return {
+      status: "extracted",
+      schedule: validation.schedule,
+      provider: this.name,
+      model: this.model,
+      modelVersion: result.modelVersion,
+      ...(result.servedBy !== undefined ? { servedBy: result.servedBy } : {}),
+      latencyMs: result.latencyMs,
+    };
+  }
+}
