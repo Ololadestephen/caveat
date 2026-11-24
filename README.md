@@ -14,7 +14,7 @@ A Caveat run on them surfaces four things a reader can miss:
 
 - **Escrow is not cash.** The Second Amendment pays six months of compensation
   into escrow; the first release to the consultant is months away. Under the
-  reading where the old retainer stops, the model shows cash falling below
+  reading where the old retainer stops, the cash runner shows cash falling below
   the floor while $150,000 sits in escrow — so the first question to raise is
   whether part of the escrowed amount can be released early.
 - **An impossible date.** Section 3(c) reads "from December 31, 2026 until
@@ -39,8 +39,11 @@ A Caveat run on them surfaces four things a reader can miss:
 - **Connectors**: the only route to Box and OpenRouter is the coordinator's
   Sprite connectors, scoped by an access policy (the proof folder's
   `/2.0/folders/*` and `/2.0/files/*` endpoints, and `/v1/chat/completions`
-  for OpenRouter). No API tokens live in this repo or on the operator's
-  machine — proofs are driven through the Sprite CLI and `sprite proxy`.
+  for OpenRouter). The Box and OpenRouter keys are held by the connectors
+  and never reach this repo, the operator's machine or any Sprite. The
+  operator's machine holds only its `sprite` CLI login, which the proof
+  scripts use through `sprite exec` and `sprite proxy`; the coordinator
+  holds no org token.
 - **Worker Sprites** (`caveat-wa`, `caveat-wb`): hold no Box/OpenRouter
   grants at all. The worker proof pushes a fixture bundle, runs it under a
   per-worker overlay, checkpoints the Sprite, restores it, and replays —
@@ -56,9 +59,16 @@ A Caveat run on them surfaces four things a reader can miss:
   the public EDGAR exhibits below), the model calls through OpenRouter, the
   deterministic cash runner, the web app, and the export-time recheck that
   detects Box drift.
-- **Synthetic**: the demo cash assumptions (opening cash, cash floor, monthly
-  costs on the 15th), the runner's next-business-day convention for weekend
-  payments, and the typed-decision fixture cases used by the M1 proof.
+- **Synthetic or assumed**: the hand-checked $12,000 deposit ledger used as
+  the arithmetic oracle (`fixtures/runner/synthetic-12k*.json`), the demo
+  cash assumptions (opening cash, cash floor, monthly costs on the 15th), the
+  October 1, 2026 escrow funding date (Section 3(b) says only "immediately
+  upon execution"), and the typed-decision fixture cases used by the M1
+  proof. The First Amendment payment due on execution of the merger
+  agreement has no stated date and is left out of the cash model.
+- **Runner policies**: payments due on a weekend are counted on the next
+  business day (the contract itself says January 2, 2027), costs never move,
+  and there is no holiday calendar.
 - **Private, not in this repo**: the hand-maintained human review record
   (`reviews/retainer-review.json`) and the proof evidence written under
   `$CAVEAT_PRIVATE`.
@@ -128,7 +138,7 @@ costs or modeled extensions are demo assumptions, not facts about the parties.
 The cash-runner arithmetic is checked against a fixed synthetic ledger.
 
 ## Environment
-- `CAVEAT_DECISION_MODEL` — decision model id for the coord proof (default
+- `CAVEAT_DECISION_MODEL` — decision model id for every typed call (default
   `nvidia/nemotron-3.5-super-vl:free`); set to `typesafe/jev-router` to route the
   same typed question through Jev with no code change.
 
