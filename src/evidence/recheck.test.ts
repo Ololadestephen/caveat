@@ -19,7 +19,7 @@ function sha1Of(bytes: string): string {
 // A minimal Box gateway: folders/0/items -> folder, folders/F1/items -> files,
 // files/<id> metadata + /content bytes.
 function stubFetch(files: FileState[], fail?: (url: string) => Response | undefined) {
-  return (url: unknown, _init?: unknown): Promise<Response> => {
+  return (url: unknown): Promise<Response> => {
     const u = String(url);
     const failed = fail?.(u);
     if (failed !== undefined) return Promise.resolve(failed);
@@ -166,7 +166,7 @@ describe("recheckFolder", () => {
       });
     const out = await recheckFolder(BASE, "0", "caveat_TEST", APPROVED, {
       timeoutMs: 5,
-      fetch: hang as typeof fetch,
+      fetch: hang,
     });
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.detail).toContain("TimeoutError");
