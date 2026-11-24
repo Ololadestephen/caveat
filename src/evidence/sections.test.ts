@@ -46,11 +46,13 @@ describe("extractSections — decimal-clause format (01 style)", () => {
 
   it("extracts decimal sections and drops lone-number lines", () => {
     const sections = extractSections("01-consulting-agreement.pdf", pages);
-    expect(sections.map((s) => s.sectionId)).toEqual(["§1.3", "§1.4", "§1.5"]);
-    expect(sections[0]?.text).toBe(
+    expect(sections.map((s) => s.sectionId)).toEqual(["Recitals", "§1.3", "§1.4", "§1.5"]);
+    expect(sections[0]?.title).toBe("Recitals");
+    expect(sections[0]?.text).toBe("CONSULTING AGREEMENT This agreement is made as of April 1, 2026.");
+    expect(sections[1]?.text).toBe(
       "1.3 Company shall compensate Consultant at a rate of $6,000 per month for work related to the Services.",
     );
-    expect(sections[2]?.pages).toEqual([2, 2]);
+    expect(sections[3]?.pages).toEqual([2, 2]);
   });
 });
 
@@ -76,6 +78,7 @@ describe("extractSections — inline-letter format (02 style)", () => {
   it("extracts top-level and letter sections without swallowing enumerations", () => {
     const sections = extractSections("02-first-amendment.pdf", pages);
     expect(sections.map((s) => s.sectionId)).toEqual([
+      "Recitals",
       "§1",
       "§1(a)",
       "§2",
@@ -150,6 +153,7 @@ describe("extractSections — standalone-letter format (03 style)", () => {
   it("extracts nested section ids in document order", () => {
     const sections = extractSections("03-second-amendment.pdf", pages);
     expect(sections.map((s) => s.sectionId)).toEqual([
+      "Recitals",
       "§1",
       "§2",
       "§3",

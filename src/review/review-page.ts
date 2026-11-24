@@ -159,10 +159,18 @@ function renderHumanReview(receipt: RunReceipt): string {
   }
   const { review } = hr;
   const base = review.baseRetainer;
+  const revisionPart =
+    review.revision === undefined ? "" : `, revision ${review.revision}`;
   const baseSummary =
     base.answer === "unresolved_compare_both"
-      ? `Retainer after the second amendment: unresolved, comparing both readings (reviewer ${escapeHtml(review.reviewer)}, ${escapeHtml(review.reviewedAt)})`
-      : `Base retainer: ${escapeHtml(base.answer)} (reviewer ${escapeHtml(review.reviewer)}, ${escapeHtml(review.reviewedAt)})`;
+      ? `Retainer after the second amendment: unresolved, comparing both readings (reviewer ${escapeHtml(review.reviewer)}, ${escapeHtml(review.reviewedAt)}${revisionPart})`
+      : `Base retainer: ${escapeHtml(base.answer)} (reviewer ${escapeHtml(review.reviewer)}, ${escapeHtml(review.reviewedAt)}${revisionPart})`;
+  const baseNote =
+    base.note === undefined ? "" : `  <p class="review-note">${escapeHtml(base.note)}</p>\n`;
+  const revisionNote =
+    review.revisionNote === undefined
+      ? ""
+      : `  <p class="review-note">Revision note: ${escapeHtml(review.revisionNote)}</p>\n`;
   const reading =
     base.continuesReading === undefined
       ? ""
@@ -172,17 +180,21 @@ ${citationLines([base.continuesReading.amount, base.continuesReading.payDay, bas
   const cashEffect =
     first.cashEffectInWindow === "none"
       ? "; no cash events in the modeled window"
-      : first.cashEffectInWindow !== undefined
-        ? `; cash effect in window: ${escapeHtml(first.cashEffectInWindow)}`
-        : "";
+      : first.cashEffectInWindow === "none_modeled"
+        ? "; no cash events modeled in the window"
+        : first.cashEffectInWindow !== undefined
+          ? `; cash effect in window: ${escapeHtml(first.cashEffectInWindow)}`
+          : "";
+  const firstNote =
+    first.note === undefined ? "" : `  <p class="review-note">${escapeHtml(first.note)}</p>\n`;
   return `<section class="human-review">
   <h2>Human review</h2>
   <p>${baseSummary}</p>
-${citationLines(base.citations)}
+${baseNote}${citationLines(base.citations)}
 ${reading}
   <p>First-amendment pay: ${escapeHtml(first.answer)}${cashEffect}</p>
-${citationLines(first.citations)}
-</section>`;
+${firstNote}${citationLines(first.citations)}
+${revisionNote}</section>`;
 }
 
 function renderFlags(receipt: RunReceipt): string {

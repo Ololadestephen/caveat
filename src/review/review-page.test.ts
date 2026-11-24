@@ -137,6 +137,8 @@ const RECEIPT: RunReceipt = {
       questionId: "retainer_after_second_amendment",
       reviewer: "Ololade Stephen",
       reviewedAt: "2026-11-24",
+      revision: 2,
+      revisionNote: "Corrects revision 1.",
       baseRetainer: {
         answer: "unresolved_compare_both",
         note: undefined,
@@ -297,8 +299,9 @@ describe("renderReviewPage — reviewable run", () => {
 
   it("renders the human review card for the unresolved retainer", () => {
     expect(html).toContain(
-      "Retainer after the second amendment: unresolved, comparing both readings (reviewer Ololade Stephen, 2026-11-24)",
+      "Retainer after the second amendment: unresolved, comparing both readings (reviewer Ololade Stephen, 2026-11-24, revision 2)",
     );
+    expect(html).toContain("Revision note: Corrects revision 1.");
     expect(html).toContain("in lieu of all other compensation");
     expect(html).toContain("First-amendment pay: continues; no cash events in the modeled window");
     expect(html).toContain("$25,000 upon signing");

@@ -149,6 +149,17 @@ export function buildTwinveeInputs(args: {
   assumptions: TwinveeAssumptions;
 }): { retainer_superseded: Record<string, unknown>; retainer_continues: Record<string, unknown> } {
   const { schedule, review, assumptions } = args;
+  const cashEffect = review.firstAmendmentPay.cashEffectInWindow;
+  if (
+    cashEffect !== undefined &&
+    cashEffect !== "none" &&
+    cashEffect !== "none_modeled"
+  ) {
+    throw new PlanError(
+      "first_amendment_cash_unmodeled",
+      `firstAmendmentPay.cashEffectInWindow is ${JSON.stringify(cashEffect)}; in-window first-amendment cash is not modeled`,
+    );
+  }
   const extensionIds = schedule.releases
     .map((r) => r.extensionId)
     .filter((id): id is string => id !== undefined);

@@ -84,6 +84,8 @@ const REVIEW: RetainerReview = {
   questionId: "retainer_after_second_amendment",
   reviewer: "Ololade Stephen",
   reviewedAt: "2026-11-24",
+  revision: 2,
+  revisionNote: "Corrects revision 1.",
   baseRetainer: {
     answer: "unresolved_compare_both",
     note: "Reviewer chose not to resolve; show both readings side by side.",

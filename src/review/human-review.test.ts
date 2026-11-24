@@ -27,6 +27,12 @@ const SECTIONS = [
     sectionId: "§4",
     text: "Except as expressly amended, all terms of the Consulting Agreement remain unchanged and in full force and effect. In the event of any conflict, this Amendment shall control.",
   },
+  {
+    fileName: "03-second-amendment.pdf",
+    sectionId: "§1",
+    title: "Recitals",
+    text: "1. Recitals WHEREAS, in connection with the proposed Agreement and Plan of Merger and the transactions contemplated thereby, the parties wish to amend.",
+  },
 ];
 
 function validReview(): Record<string, unknown> {
@@ -34,6 +40,8 @@ function validReview(): Record<string, unknown> {
     questionId: "retainer_after_second_amendment",
     reviewer: "Ololade Stephen",
     reviewedAt: "2026-11-24",
+      revision: 2,
+      revisionNote: "Corrects revision 1.",
     baseRetainer: {
       answer: "unresolved_compare_both",
       note: "Reviewer chose not to resolve; show both readings side by side.",
@@ -129,6 +137,19 @@ describe("validateRetainerReview", () => {
       ok: false,
       reason: "review_citation_invalid",
     });
+  });
+
+  it("resolves a Recitals citation by section title", () => {
+    const review = validReview();
+    const pay = review.firstAmendmentPay as { citations: unknown[] };
+    pay.citations.push({
+      fileName: "03-second-amendment.pdf",
+      section: "Recitals",
+      quote: "in connection with the proposed Agreement and Plan of Merger and the transactions contemplated thereby",
+    });
+    const result = validateRetainerReview(review, SECTIONS);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.revision).toBe(2);
   });
 
   it("accepts whitespace-normalised citation quotes", () => {

@@ -4,6 +4,10 @@ import type { PdfPageLines } from "./pdf-text.ts";
 export type ContractSection = {
   fileName: string;
   sectionId: string;
+  // The heading's title text for top-level "N. Title" sections (e.g.
+  // "Recitals", "Transaction Compensation"); also "Recitals" for the emitted
+  // preamble. Undefined for decimal-clause and letter/roman subsections.
+  title?: string;
   text: string;
   pages: [number, number];
 };
@@ -29,7 +33,13 @@ const ROMAN_VALUES: Record<string, number> = {
   i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10,
 };
 
-type OpenSection = { id: string; lines: string[]; startPage: number; lastPage: number };
+type OpenSection = {
+  id: string;
+  title: string | undefined;
+  lines: string[];
+  startPage: number;
+  lastPage: number;
+};
 
 // Turn extracted page lines into labelled contract sections. Sections end at
 // "IN WITNESS WHEREOF" so signature blocks never become sections, and lone
@@ -49,19 +59,21 @@ export function extractSections(fileName: string, pages: PdfPageLines[]): Contra
     if (current === undefined) return;
     const text = normalizeWhitespace(current.lines.join(" "));
     if (text.length > 0) {
-      sections.push({
+      const section: ContractSection = {
         fileName,
         sectionId: current.id,
         text,
         pages: [current.startPage, current.lastPage],
-      });
+      };
+      if (current.title !== undefined) section.title = current.title;
+      sections.push(section);
     }
     current = undefined;
   };
 
-  const open = (id: string, page: number): OpenSection => {
+  const open = (id: string, page: number, title?: string): OpenSection => {
     close();
-    const next: OpenSection = { id, lines: [], startPage: page, lastPage: page };
+    const next: OpenSection = { id, title, lines: [], startPage: page, lastPage: page };
     current = next;
     return next;
   };
@@ -95,7 +107,7 @@ export function extractSections(fileName: string, pages: PdfPageLines[]): Contra
         // The first heading anchors the sequence at whatever number the
         // document starts with; later headings must continue it (+1).
         if (number <= 20 && (expectedTop === 0 || number === expectedTop)) {
-          open(`§${number}`, page);
+          open(`§${number}`, page, trimmed.slice(top[0].length - 1));
           expectedTop = number + 1;
           currentTop = number;
           currentLetter = "";
@@ -160,6 +172,12 @@ export function extractSections(fileName: string, pages: PdfPageLines[]): Contra
         }
       }
 
+      // Leading text before the first numbered section is the preamble
+      // (recitals, title lines); it becomes a "Recitals" section so citations
+      // can point at it.
+      if (current === undefined) {
+        open("Recitals", page, "Recitals");
+      }
       append(trimmed, page);
     }
   }

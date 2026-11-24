@@ -20,6 +20,8 @@ export type RetainerReview = {
   questionId: string;
   reviewer: string;
   reviewedAt: string;
+  revision: number | undefined;
+  revisionNote: string | undefined;
   baseRetainer: {
     answer: string;
     note: string | undefined;
@@ -67,10 +69,24 @@ function optString(
   return { ok: true, value };
 }
 
-type Sections = readonly Pick<ContractSection, "fileName" | "sectionId" | "text">[];
+type Sections = readonly Pick<
+  ContractSection,
+  "fileName" | "sectionId" | "text" | "title"
+>[];
 
-function sectionText(sections: Sections, fileName: string, sectionId: string): string | undefined {
-  return sections.find((s) => s.fileName === fileName && s.sectionId === sectionId)?.text;
+// A citation names a section by its id or by its heading title — "Recitals"
+// resolves both to the emitted preamble and to a "1. Recitals" section.
+function sectionTexts(
+  sections: Sections,
+  fileName: string,
+  sectionRef: string,
+): string[] {
+  return sections
+    .filter(
+      (s) =>
+        s.fileName === fileName && (s.sectionId === sectionRef || s.title === sectionRef),
+    )
+    .map((s) => s.text);
 }
 
 function invalid(detail: string): ReviewValidation<never> {
@@ -95,11 +111,11 @@ function parseCitations(
     if (fileName === undefined || section === undefined || quote === undefined) {
       return { error: `${p}: fileName, section and quote must be non-empty strings` };
     }
-    const text = sectionText(sections, fileName, section);
-    if (text === undefined) {
+    const texts = sectionTexts(sections, fileName, section);
+    if (texts.length === 0) {
       return { error: `${p}: no extracted section ${section} in ${fileName}` };
     }
-    if (!quoteInText(quote, text)) {
+    if (!texts.some((text) => quoteInText(quote, text))) {
       return { error: `${p}: quote is not verbatim in ${fileName} ${section}` };
     }
     citations.push({ fileName, section, quote });
@@ -120,11 +136,11 @@ function parseReadingCitation(
   if (text === undefined || fileName === undefined || section === undefined || quote === undefined) {
     return { error: `${path}: text, fileName, section and quote must be non-empty strings` };
   }
-  const sectionBody = sectionText(sections, fileName, section);
-  if (sectionBody === undefined) {
+  const texts = sectionTexts(sections, fileName, section);
+  if (texts.length === 0) {
     return { error: `${path}: no extracted section ${section} in ${fileName}` };
   }
-  if (!quoteInText(quote, sectionBody)) {
+  if (!texts.some((body) => quoteInText(quote, body))) {
     return { error: `${path}: quote is not verbatim in ${fileName} ${section}` };
   }
   if (!quoteInText(text, quote)) {
@@ -199,8 +215,13 @@ export function validateRetainerReview(
   const baseNote = optString(base, "note");
   const firstCash = optString(first, "cashEffectInWindow");
   const firstNote = optString(first, "note");
-  if (!baseNote.ok || !firstCash.ok || !firstNote.ok) {
-    return invalid("note and cashEffectInWindow must be non-empty strings when present");
+  const revisionNote = optString(raw, "revisionNote");
+  if (!baseNote.ok || !firstCash.ok || !firstNote.ok || !revisionNote.ok) {
+    return invalid("note, cashEffectInWindow and revisionNote must be non-empty strings when present");
+  }
+  const revision = raw.revision;
+  if (revision !== undefined && (!Number.isInteger(revision) || revision < 1)) {
+    return invalid("revision must be a positive integer when present");
   }
 
   return {
@@ -209,6 +230,8 @@ export function validateRetainerReview(
       questionId,
       reviewer,
       reviewedAt,
+      revision: revision as number | undefined,
+      revisionNote: revisionNote.value,
       baseRetainer: {
         answer: baseAnswer,
         note: baseNote.value,
