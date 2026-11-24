@@ -68,6 +68,7 @@ export type PipelineConfig = {
   operativeFile?: string;
   assertExpected?: boolean;
   connections?: Connection[];
+  pdfText?: typeof extractPdfLines;
 };
 
 export type PipelineResult = {
@@ -86,56 +87,74 @@ class PipelineError extends Error {
   }
 }
 
-// The evidence->decision->runner pipeline. The typed questions cover the
-// operative (second) amendment; the other files' sections feed flags and
-// human-review citation verification. Results are compared against the
-// committed expected fixtures unless assertExpected is false — a mismatch
-// blocks the run rather than shipping wrong numbers.
-export async function runPipeline(config: PipelineConfig): Promise<PipelineResult> {
-  const timings: Record<string, number> = {};
-  const totalStarted = performance.now();
-  const timed = <T>(step: string, started: number, value: T): T => {
-    timings[step] = Math.round(performance.now() - started);
-    return value;
-  };
-  const at = (step: string) => async <T>(p: Promise<T>): Promise<T> => {
-    try {
-      return await p;
-    } catch (error) {
-      throw new PipelineError(step, error);
-    }
-  };
+// Per-run wall-clock timings keyed by stage name.
+class StageTimer {
+  readonly timings: Record<string, number> = {};
+  private readonly totalStarted = performance.now();
+  private stageStarted = performance.now();
 
-  // --- Connectors -------------------------------------------------------------
-  let started = performance.now();
+  // Tag a rejected promise with the pipeline step that produced it.
+  step<T>(name: string, p: Promise<T>): Promise<T> {
+    return p.catch((error: unknown) => {
+      throw error instanceof PipelineError ? error : new PipelineError(name, error);
+    });
+  }
+
+  begin(): void {
+    this.stageStarted = performance.now();
+  }
+
+  record(name: string): void {
+    this.timings[name] = Math.round(performance.now() - this.stageStarted);
+  }
+
+  finish(): void {
+    this.timings.total = Math.round(performance.now() - this.totalStarted);
+  }
+}
+
+type Connectors = { boxConn: Connection; openrouterConn: Connection };
+
+async function connect(config: PipelineConfig, timer: StageTimer): Promise<Connectors> {
   const connections =
-    config.connections ?? (await at("gateway_list")(listConnections()));
+    config.connections ?? (await timer.step("gateway_list", listConnections()));
   const boxConn = connections.find((c) => c.provider === "box");
   const openrouterConn = connections.find((c) => c.provider === "openrouter");
   if (boxConn === undefined) throw new PipelineError("box", new Error("box connector not configured"));
   if (openrouterConn === undefined) {
     throw new PipelineError("openrouter", new Error("openrouter connector not configured"));
   }
-  timed("gateway_list", started, null);
+  return { boxConn, openrouterConn };
+}
 
-  // --- Evidence: fetch all three PDFs -------------------------------------------
-  started = performance.now();
-  const folderName = config.boxFolder ?? "caveat_TEST";
-  const folder = await at("box_folder")(
+type FetchedFile = {
+  fileName: string;
+  bytes: Uint8Array;
+  sha256: string;
+  versionPresent: boolean;
+};
+
+async function fetchSources(
+  boxConn: Connection,
+  folderName: string,
+  timer: StageTimer,
+): Promise<{ sourceTuple: SourceTuple; fetched: FetchedFile[] }> {
+  const folder = await timer.step(
+    "box_folder",
     findFolderByName(boxConn.gatewayBaseUrl, "0", folderName),
   );
   if (folder === undefined) {
     throw new PipelineError("box_folder", new Error(`folder ${folderName} not found`));
   }
-  const entries = await at("box_list")(listFolder(boxConn.gatewayBaseUrl, folder.id));
+  const entries = await timer.step("box_list", listFolder(boxConn.gatewayBaseUrl, folder.id));
   const sourceTuple: SourceTuple = [];
-  const fetched: { fileName: string; bytes: Uint8Array; sha256: string; versionPresent: boolean }[] = [];
+  const fetched: FetchedFile[] = [];
   for (const fileName of FILE_NAMES) {
     const entry = entries.find((e) => e.type === "file" && e.name === fileName);
     if (entry === undefined) {
       throw new PipelineError("box_file", new Error(`${fileName} not in ${folderName}`));
     }
-    const evidence = await at("box_fetch")(fetchBoxFile(boxConn.gatewayBaseUrl, entry.id));
+    const evidence = await timer.step("box_fetch", fetchBoxFile(boxConn.gatewayBaseUrl, entry.id));
     fetched.push({
       fileName: evidence.metadata.name,
       bytes: evidence.bytes,
@@ -150,14 +169,18 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
       size: evidence.metadata.size,
     });
   }
-  timed("box_fetch", started, null);
+  return { sourceTuple, fetched };
+}
 
-  // --- PDF text -> sections ------------------------------------------------------
-  started = performance.now();
+async function sectionize(
+  fetched: FetchedFile[],
+  pdfText: typeof extractPdfLines,
+  timer: StageTimer,
+): Promise<{ sections: ContractSection[]; excerpts: Excerpt[] }> {
   const sections: ContractSection[] = [];
   const excerpts: Excerpt[] = [];
   for (const file of fetched) {
-    const pages = await at("pdf_text")(extractPdfLines(file.bytes));
+    const pages = await timer.step("pdf_text", pdfText(file.bytes));
     const fileSections = extractSections(file.fileName, pages);
     sections.push(...fileSections);
     const versionLabel = `sha256 ${file.sha256.slice(0, 12)}`;
@@ -177,54 +200,25 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   if (sections.length === 0) {
     throw new PipelineError("sections", new Error("no contract sections extracted"));
   }
-  timed("sections", started, null);
+  return { sections, excerpts };
+}
 
-  const blockedReasons: { reason: string; detail: string }[] = [];
-  const model = config.decisionModel ?? DEFAULT_MODEL;
-  const operativeFile = config.operativeFile ?? "03-second-amendment.pdf";
-  const decisionExcerpts = excerpts.filter((e) => e.source.fileName === operativeFile);
-  if (decisionExcerpts.length === 0) {
-    throw new PipelineError("sections", new Error(`no sections extracted from ${operativeFile}`));
-  }
-  const question: Question = {
-    spec: RELEASE_TIMING,
-    id: RELEASE_TIMING.id,
-    excerpts: decisionExcerpts,
-  };
-
-  // --- Typed decision -------------------------------------------------------------
-  started = performance.now();
-  const provider = new OpenRouterDecisionProvider({
-    gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
-    model,
-  });
-  const decision: DecisionOutcome = await provider.decide(question);
-  timed("release_timing", started, null);
-
-  // --- Typed extraction --------------------------------------------------------------
-  started = performance.now();
-  const extractor = new OpenRouterScheduleExtractor({
-    gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
-    model,
-  });
-  const schedule: ScheduleOutcome = await extractor.extract({
-    id: "escrow_schedule",
-    excerpts: decisionExcerpts,
-  });
-  timed("schedule", started, null);
-
-  // --- Flags --------------------------------------------------------------------------
-  started = performance.now();
-  const flags = detectFlags(sections);
-  timed("flags", started, null);
-
-  // --- Human review --------------------------------------------------------------------
-  started = performance.now();
+// The private human-review record plus any sourced overrides; failures block
+// the run rather than abort it.
+async function loadReviewArtifacts(
+  reviewsDir: string,
+  sections: ContractSection[],
+  blockedReasons: { reason: string; detail: string }[],
+): Promise<{
+  humanReview: RunReceipt["humanReview"];
+  review: RetainerReview | undefined;
+  overrides: SourcedOverride[];
+}> {
   let humanReview: RunReceipt["humanReview"];
   let review: RetainerReview | undefined;
   try {
     const raw: unknown = JSON.parse(
-      await readFile(`${config.reviewsDir}/retainer-review.json`, "utf8"),
+      await readFile(`${reviewsDir}/retainer-review.json`, "utf8"),
     );
     const validated = validateRetainerReview(raw, sections);
     if (validated.ok) {
@@ -250,7 +244,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   const overrides: SourcedOverride[] = [];
   try {
     const rawOverride: unknown = JSON.parse(
-      await readFile(`${config.reviewsDir}/release-timing-override.json`, "utf8"),
+      await readFile(`${reviewsDir}/release-timing-override.json`, "utf8"),
     );
     const validated = validateSourcedOverride(rawOverride, sections);
     if (validated.ok) overrides.push(validated.value);
@@ -260,100 +254,203 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   } catch {
     // No override supplied — the run stays blocked if the decision needs review.
   }
-  timed("human_review", started, null);
+  return { humanReview, review, overrides };
+}
 
-  // --- Effective action -----------------------------------------------------------------
+// Decide the effective release_timing action and collect the gate reasons that
+// block the run.
+function evaluateGates(
+  decision: DecisionOutcome,
+  schedule: ScheduleOutcome,
+  review: RetainerReview | undefined,
+  overrides: SourcedOverride[],
+): { effectiveAction: string | null; reasons: { reason: string; detail: string }[] } {
+  const reasons: { reason: string; detail: string }[] = [];
   const override = overrides.find((o) => o.questionId === RELEASE_TIMING.id);
   let effectiveAction: string | null = null;
   if (decision.status === "decided") {
     effectiveAction = decision.decision.action;
   } else {
-    blockedReasons.push({ reason: decision.reason, detail: decision.detail });
+    reasons.push({ reason: decision.reason, detail: decision.detail });
     if (override !== undefined) effectiveAction = override.answer;
   }
   if (effectiveAction !== null && !RELEASE_TIMING.actions.includes(effectiveAction)) {
-    blockedReasons.push({
+    reasons.push({
       reason: "unsupported_release_timing",
       detail: `action ${effectiveAction} is not a release_timing answer`,
     });
   } else if (effectiveAction !== null && effectiveAction !== "escrow_release") {
-    blockedReasons.push({
+    reasons.push({
       reason: "unsupported_release_timing",
       detail: `release_timing resolved to ${effectiveAction}; only escrow_release is modeled`,
     });
   }
   if (schedule.status === "needs_review") {
-    blockedReasons.push({ reason: schedule.reason, detail: schedule.detail });
+    reasons.push({ reason: schedule.reason, detail: schedule.detail });
   }
   if (review !== undefined && review.baseRetainer.answer !== "unresolved_compare_both") {
-    blockedReasons.push({
+    reasons.push({
       reason: "unsupported_review_answer",
       detail: `baseRetainer.answer is ${review.baseRetainer.answer}; only unresolved_compare_both is modeled`,
     });
   }
+  return { effectiveAction, reasons };
+}
 
-  // --- Assumptions + runner inputs ------------------------------------------------------
-  started = performance.now();
-  const assumptions = (await at("assumptions")(
-    readFile(`${config.fixturesDir}/plan/twinvee-demo-assumptions.json`, "utf8").then(
-      (t) => JSON.parse(t) as unknown,
-    ),
-  )) as TwinveeAssumptions;
-
+// Run both retainer readings through the deterministic runner and compare them
+// to the committed expected fixtures unless assertExpected is false — a
+// mismatch blocks the run rather than shipping wrong numbers.
+async function runReadings(
+  schedule: ScheduleOutcome,
+  review: RetainerReview | undefined,
+  effectiveAction: string | null,
+  assumptions: TwinveeAssumptions,
+  config: PipelineConfig,
+): Promise<{ readings: RunReceipt["readings"]; reasons: { reason: string; detail: string }[] }> {
   const readings: RunReceipt["readings"] = [];
-  const canRun =
-    schedule.status === "extracted" &&
-    review !== undefined &&
-    effectiveAction === "escrow_release";
-  if (canRun && schedule.status === "extracted" && review !== undefined) {
-    try {
-      const inputs = buildTwinveeInputs({ schedule: schedule.schedule, review, assumptions });
-      for (const [id, rawInput] of Object.entries(inputs)) {
-        const input = validateRunInput(rawInput);
-        const out = runFixture(input);
-        if (config.assertExpected !== false) {
-          const expectedRaw: unknown = JSON.parse(
-            await readFile(`${config.fixturesDir}/${EXPECTED_FILES[id]}`, "utf8"),
-          );
-          if (!isRecord(expectedRaw) || !isRecord(expectedRaw.results)) {
-            throw new Error(`expected fixture ${EXPECTED_FILES[id]} malformed`);
-          }
-          if (!isDeepStrictEqual(out.results, expectedRaw.results)) {
-            blockedReasons.push({
-              reason: "results_mismatch",
-              detail: `${id} results differ from ${EXPECTED_FILES[id]}`,
-            });
-          }
-          if (!isDeepStrictEqual(out.smallestPassingCandidate, expectedRaw.smallestPassingCandidate)) {
-            blockedReasons.push({
-              reason: "results_mismatch",
-              detail: `${id} smallestPassingCandidate differs from ${EXPECTED_FILES[id]}`,
-            });
-          }
+  const reasons: { reason: string; detail: string }[] = [];
+  if (!(schedule.status === "extracted" && review !== undefined && effectiveAction === "escrow_release")) {
+    return { readings, reasons };
+  }
+  try {
+    const inputs = buildTwinveeInputs({ schedule: schedule.schedule, review, assumptions });
+    for (const [id, rawInput] of Object.entries(inputs)) {
+      const input = validateRunInput(rawInput);
+      const out = runFixture(input);
+      if (config.assertExpected !== false) {
+        const expectedRaw: unknown = JSON.parse(
+          await readFile(`${config.fixturesDir}/${EXPECTED_FILES[id]}`, "utf8"),
+        );
+        if (!isRecord(expectedRaw) || !isRecord(expectedRaw.results)) {
+          throw new Error(`expected fixture ${EXPECTED_FILES[id]} malformed`);
         }
-        readings.push({
-          id,
-          label: READING_LABELS[id] ?? id,
-          inputDigest: out.inputDigest,
-          resultDigest: out.resultDigest,
-          smallestPassingCandidate: out.smallestPassingCandidate,
-          results: out.results,
-          adjustments: input.scenarios.map((s) => ({
-            scenarioId: s.id,
-            adjustments: policyAdjustments(input, s),
-          })),
-        });
+        if (!isDeepStrictEqual(out.results, expectedRaw.results)) {
+          reasons.push({
+            reason: "results_mismatch",
+            detail: `${id} results differ from ${EXPECTED_FILES[id]}`,
+          });
+        }
+        if (!isDeepStrictEqual(out.smallestPassingCandidate, expectedRaw.smallestPassingCandidate)) {
+          reasons.push({
+            reason: "results_mismatch",
+            detail: `${id} smallestPassingCandidate differs from ${EXPECTED_FILES[id]}`,
+          });
+        }
       }
-    } catch (error) {
-      const reason = error instanceof PlanError ? error.code : "runner_error";
-      blockedReasons.push({
-        reason,
-        detail: error instanceof Error ? error.message : String(error),
+      readings.push({
+        id,
+        label: READING_LABELS[id] ?? id,
+        inputDigest: out.inputDigest,
+        resultDigest: out.resultDigest,
+        smallestPassingCandidate: out.smallestPassingCandidate,
+        results: out.results,
+        adjustments: input.scenarios.map((s) => ({
+          scenarioId: s.id,
+          adjustments: policyAdjustments(input, s),
+        })),
       });
     }
+  } catch (error) {
+    const reason = error instanceof PlanError ? error.code : "runner_error";
+    reasons.push({
+      reason,
+      detail: error instanceof Error ? error.message : String(error),
+    });
   }
-  timed("runner", started, null);
-  timings.total = Math.round(performance.now() - totalStarted);
+  return { readings, reasons };
+}
+
+async function loadAssumptions(fixturesDir: string): Promise<TwinveeAssumptions> {
+  const raw = await readFile(`${fixturesDir}/plan/twinvee-demo-assumptions.json`, "utf8");
+  return JSON.parse(raw) as TwinveeAssumptions;
+}
+
+// The evidence->decision->runner pipeline. The typed questions cover the
+// operative (second) amendment; the other files' sections feed flags and
+// human-review citation verification.
+export async function runPipeline(config: PipelineConfig): Promise<PipelineResult> {
+  const timer = new StageTimer();
+  const blockedReasons: { reason: string; detail: string }[] = [];
+
+  // --- Connectors -------------------------------------------------------------
+  timer.begin();
+  const { boxConn, openrouterConn } = await connect(config, timer);
+  timer.record("gateway_list");
+
+  // --- Evidence: fetch all three PDFs -------------------------------------------
+  timer.begin();
+  const folderName = config.boxFolder ?? "caveat_TEST";
+  const { sourceTuple, fetched } = await fetchSources(boxConn, folderName, timer);
+  timer.record("box_fetch");
+
+  // --- PDF text -> sections ------------------------------------------------------
+  timer.begin();
+  const { sections, excerpts } = await sectionize(fetched, config.pdfText ?? extractPdfLines, timer);
+  timer.record("sections");
+
+  const model = config.decisionModel ?? DEFAULT_MODEL;
+  const operativeFile = config.operativeFile ?? "03-second-amendment.pdf";
+  const decisionExcerpts = excerpts.filter((e) => e.source.fileName === operativeFile);
+  if (decisionExcerpts.length === 0) {
+    throw new PipelineError("sections", new Error(`no sections extracted from ${operativeFile}`));
+  }
+  const question: Question = {
+    spec: RELEASE_TIMING,
+    id: RELEASE_TIMING.id,
+    excerpts: decisionExcerpts,
+  };
+
+  // --- Typed decision -------------------------------------------------------------
+  timer.begin();
+  const provider = new OpenRouterDecisionProvider({
+    gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
+    model,
+  });
+  const decision: DecisionOutcome = await provider.decide(question);
+  timer.record("release_timing");
+
+  // --- Typed extraction --------------------------------------------------------------
+  timer.begin();
+  const extractor = new OpenRouterScheduleExtractor({
+    gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
+    model,
+  });
+  const schedule: ScheduleOutcome = await extractor.extract({
+    id: "escrow_schedule",
+    excerpts: decisionExcerpts,
+  });
+  timer.record("schedule");
+
+  // --- Flags --------------------------------------------------------------------------
+  timer.begin();
+  const flags = detectFlags(sections);
+  timer.record("flags");
+
+  // --- Human review --------------------------------------------------------------------
+  timer.begin();
+  const { humanReview, review, overrides } = await loadReviewArtifacts(
+    config.reviewsDir,
+    sections,
+    blockedReasons,
+  );
+  timer.record("human_review");
+
+  // --- Gates + readings ------------------------------------------------------------
+  const { effectiveAction, reasons } = evaluateGates(decision, schedule, review, overrides);
+  blockedReasons.push(...reasons);
+
+  timer.begin();
+  const assumptions = await timer.step("assumptions", loadAssumptions(config.fixturesDir));
+  const { readings, reasons: runnerReasons } = await runReadings(
+    schedule,
+    review,
+    effectiveAction,
+    assumptions,
+    config,
+  );
+  blockedReasons.push(...runnerReasons);
+  timer.record("runner");
+  timer.finish();
 
   const receipt: RunReceipt = {
     receiptVersion: RECEIPT_VERSION,
@@ -377,5 +474,5 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     assumptions,
   };
 
-  return { receipt, sourceTuple, sections, timingsMs: timings };
+  return { receipt, sourceTuple, sections, timingsMs: timer.timings };
 }
