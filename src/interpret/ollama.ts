@@ -1,5 +1,6 @@
 import { DECISION_JSON_SCHEMA } from "./schema.ts";
 import { validateDecision } from "./validate.ts";
+import { DECISION_SYSTEM_PROMPT, buildDecisionUserPrompt } from "./prompt.ts";
 import type { DecisionProvider } from "./provider.ts";
 import type {
   BillingTriggerQuestion,
@@ -11,16 +12,6 @@ import type {
 const DEFAULT_THRESHOLD = 0.8;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-const SYSTEM_PROMPT = [
-  "You decide a billing-trigger question about supplied contract excerpts.",
-  "Answer only from the supplied excerpts; never use outside knowledge.",
-  "Quote the cited clause verbatim from one supplied excerpt.",
-  "Choose \"ambiguous\" whenever the excerpts do not clearly support a single action.",
-  "Do no arithmetic, set no prices, and do not predict payment behaviour.",
-  "confidence is your self-reported confidence from 0 to 1, not a calibrated probability.",
-  "Respond with a single JSON object matching the requested schema.",
-].join("\n");
-
 export type OllamaProviderConfig = {
   gatewayBaseUrl: string;
   model: string;
@@ -31,21 +22,6 @@ export type OllamaProviderConfig = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function buildUserPrompt(question: BillingTriggerQuestion): string {
-  const excerpts = question.excerpts
-    .map(
-      (e) =>
-        `<excerpt id="${e.id}" file="${e.source.fileName}" version="${e.source.versionLabel}" page="${e.source.page}">\n${e.text}\n</excerpt>`,
-    )
-    .join("\n");
-  return [
-    `Question ${question.questionId}: does the contract text trigger billing on delivery,`,
-    "on client acceptance, or is it ambiguous?",
-    "",
-    excerpts,
-  ].join("\n");
 }
 
 function classifyError(error: unknown): NeedsReviewReason {
@@ -105,8 +81,8 @@ export class OllamaDecisionProvider implements DecisionProvider {
       format: DECISION_JSON_SCHEMA,
       options: { temperature: 0 },
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: buildUserPrompt(question) },
+        { role: "system", content: DECISION_SYSTEM_PROMPT },
+        { role: "user", content: buildDecisionUserPrompt(question) },
       ],
     };
 
