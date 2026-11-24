@@ -1,8 +1,70 @@
 # Caveat
 
-Stress-test a freelancer's payment terms before signing. Compare one quote and
-two counteroffers under identical cash-flow scenarios, grounded in Box evidence
-and typed model decisions, with isolated Fly Sprite workers.
+Caveat reads a consultant's contract documents from Box, asks a model typed
+questions about the payment terms, and stress-tests the answers against a
+deterministic cash-flow model before anyone signs. Every run ends in a
+receipt that a human must approve; the export is a draft counteroffer note —
+never sent, never legal advice.
+
+## The demo story: Twin Vee escrow
+
+The live evidence is a text rendering of three public SEC EDGAR exhibits from
+Twin Vee PowerCats Co.: a consulting agreement and its two amendments.
+A Caveat run on them surfaces four things a reader can miss:
+
+- **Escrow is not cash.** The Second Amendment pays six months of compensation
+  into escrow; the first release to the consultant is months away. Under the
+  reading where the old retainer stops, the model shows cash falling below
+  the floor while $150,000 sits in escrow — so the first question to raise is
+  whether part of the escrowed amount can be released early.
+- **An impossible date.** Section 3(c) reads "from December 31, 2026 until
+  March 31, 2026" — flagged verbatim, never silently corrected.
+- **A retainer ambiguity.** The amendments never say whether the original
+  monthly retainer continues; Caveat runs the cash model under both readings
+  and reports each outcome separately rather than picking one.
+- **Stale approval.** Approvals pin the exact Box version of every source
+  file. When the amendment was re-uploaded as a new Box version (same bytes),
+  the next export was blocked as `stale` — the approval no longer covers the
+  folder as it exists now.
+
+## Architecture
+
+- **Coordinator Sprite** (`caveat-coord`): runs the `caveat` HTTP service
+  (`src/server/`, `node:http`, no framework, no added dependencies). Runs
+  live in a `node:sqlite` database (`src/store/db.ts`) — receipt and draft
+  fields are immutable once written (enforced by triggers), status flows
+  `running → reviewable → approved`, with `stale`, `needs_review`, `failed`
+  and `superseded` states kept visible. A run interrupted mid-flight becomes
+  a `failed` row on restart, not a silent disappearance.
+- **Connectors**: the only route to Box and OpenRouter is the coordinator's
+  Sprite connectors, scoped by an access policy (the proof folder's
+  `/2.0/folders/*` and `/2.0/files/*` endpoints, and `/v1/chat/completions`
+  for OpenRouter). No API tokens live in this repo or on the operator's
+  machine — proofs are driven through the Sprite CLI and `sprite proxy`.
+- **Worker Sprites** (`caveat-wa`, `caveat-wb`): hold no Box/OpenRouter
+  grants at all. The worker proof pushes a fixture bundle, runs it under a
+  per-worker overlay, checkpoints the Sprite, restores it, and replays —
+  showing deterministic digests, overlay isolation between workers, and that
+  only the pre-existing checkpoint remains afterwards.
+- **Controller**: the scripts under `scripts/` run on the operator's machine
+  and orchestrate the Sprites. Workers never approve or export; there is no
+  code path from a worker into those handlers.
+
+## What is live, synthetic, or assumed
+
+- **Live**: the three source PDFs in the Box test folder (text renderings of
+  the public EDGAR exhibits below), the model calls through OpenRouter, the
+  deterministic cash runner, the web app, and the export-time recheck that
+  detects Box drift.
+- **Synthetic**: the demo cash assumptions (opening cash, cash floor, monthly
+  costs on the 15th), the runner's next-business-day convention for weekend
+  payments, and the typed-decision fixture cases used by the M1 proof.
+- **Private, not in this repo**: the hand-maintained human review record
+  (`reviews/retainer-review.json`) and the proof evidence written under
+  `$CAVEAT_PRIVATE`.
+- **Self-reported confidence**: model confidence values are self-reported by
+  the model, not calibrated — a `1.00` is the model's own claim and is shown
+  as such.
 
 ## Requirements
 - Node.js >=24.10 <25 (see `.nvmrc`), npm 11.6.1
@@ -16,9 +78,37 @@ and typed model decisions, with isolated Fly Sprite workers.
 - `npm run check` — all of the above
 - `npm run fixture -- fixtures/runner/<name>.json` — run a cash-runner fixture and print the per-scenario summary and digests
 
-## Milestone-1 proofs (operator machine, sprite CLI authenticated)
-- `./scripts/m1/run-coord-proof.sh` — push + run the coordinator evidence proof
-- `./scripts/m1/isolation-proof.sh` — two-worker isolation + checkpoint/restore proof
+## Proofs and deploy (operator machine, `sprite` CLI authenticated)
+
+All evidence is written under `$CAVEAT_PRIVATE` (default
+`~/caveat-private`), never into the repo.
+
+- `scripts/m1/run-coord-proof.sh` — coordinator proof: reads a Box file
+  through the connector and runs one typed OpenRouter decision.
+- `scripts/m1/isolation-proof.sh` — worker isolation proof: two workers with
+  no connector grants, checkpoint/restore on worker A.
+- `scripts/m3/run-coord-m3.sh` — full pipeline on the coordinator: Box
+  sources, sectionizer, typed decisions, flags, both cash readings, receipt +
+  standalone review page. Needs `reviews/retainer-review.json` under
+  `$CAVEAT_PRIVATE`.
+- `scripts/m3/worker-replay.sh` — deterministic replay on both workers
+  (bundle, overlay, checkpoint, restore, replay digest comparison).
+- `scripts/m4/deploy.sh` — deploys `git archive HEAD` plus a REVISION file to
+  the coordinator and (re)creates the `caveat` service. Refuses a dirty tree;
+  needs the private review file.
+- `scripts/m4/proof-a.sh` — release proof against the deployed service:
+  signed-out checks, run → approve → export round-trip, Box-unavailable
+  handling via connector access policy (with a restore trap), persistence
+  across restart.
+- `scripts/m4/proof-b.sh` — stale-detection proof: re-uploaded Box version
+  blocks export of an approved run, redeploy migrates the schema, a new run
+  supersedes the old.
+
+Useful environment overrides: `CAVEAT_COORD_SPRITE`, `CAVEAT_WORKER_A`,
+`CAVEAT_WORKER_B`, `CAVEAT_SERVICE`, `CAVEAT_PRIVATE`, `CAVEAT_BOX_FOLDER`,
+`CAVEAT_OPERATIVE_FILE`, `CAVEAT_RUN_TIMEOUT_MS` (default 300000),
+`CAVEAT_RECHECK_TIMEOUT_MS` (default 30000), `CAVEAT_APPROVER` (required to
+approve a run), `CAVEAT_DATA_DIR` (service database location).
 
 ## Source documents
 The live evidence path reads text renderings of three public SEC EDGAR exhibits
@@ -41,3 +131,5 @@ The cash-runner arithmetic is checked against a fixed synthetic ledger.
 - `CAVEAT_DECISION_MODEL` — decision model id for the coord proof (default
   `nvidia/nemotron-3.5-super-vl:free`); set to `typesafe/jev-router` to route the
   same typed question through Jev with no code change.
+
+**Not legal advice. Drafts are never sent.**
