@@ -9,12 +9,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 EVIDENCE_DIR="${CAVEAT_PRIVATE:-$HOME/caveat-private}/m1"
 
 sprite exec --no-stdin -s "$SPRITE" -- rm -rf "$REMOTE_DIR"
-sprite exec --no-stdin -s "$SPRITE" -- mkdir -p "$REMOTE_DIR"
-sprite file push -s "$SPRITE" -r \
-  "$REPO_ROOT/src" \
-  "$REPO_ROOT/scripts" \
-  "$REPO_ROOT/fixtures" \
-  "$REMOTE_DIR/"
+for DIR in src scripts fixtures; do
+  sprite file push -p -s "$SPRITE" -r "$REPO_ROOT/$DIR" "$REMOTE_DIR/$DIR" >/dev/null
+done
 
 ENV_VARS=""
 if [ -n "${CAVEAT_BOX_FOLDER:-}" ]; then ENV_VARS="CAVEAT_BOX_FOLDER=$CAVEAT_BOX_FOLDER"; fi
