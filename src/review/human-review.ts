@@ -220,7 +220,10 @@ export function validateRetainerReview(
     return invalid("note, cashEffectInWindow and revisionNote must be non-empty strings when present");
   }
   const revision = raw.revision;
-  if (revision !== undefined && (!Number.isInteger(revision) || revision < 1)) {
+  if (
+    revision !== undefined &&
+    (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1)
+  ) {
     return invalid("revision must be a positive integer when present");
   }
 
@@ -230,7 +233,7 @@ export function validateRetainerReview(
       questionId,
       reviewer,
       reviewedAt,
-      revision: revision as number | undefined,
+      revision,
       revisionNote: revisionNote.value,
       baseRetainer: {
         answer: baseAnswer,
