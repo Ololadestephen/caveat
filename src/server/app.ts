@@ -202,7 +202,7 @@ async function handleExport(ctx: Ctx, res: ServerResponse, runId: string): Promi
   if (run.status !== "approved" || approval === undefined) {
     return html(res, 409, pageShell("Export failed", deps.revision, `<h1>Export failed</h1><p>This run is ${escapeHtml(run.status)}; only approved runs can be exported.</p><p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
   }
-  const fail = (status: number, result: "blocked_stale" | "blocked_unavailable", detail: string, body: string): void => {
+  const fail = (status: number, result: "blocked_stale" | "blocked_unavailable", detail: unknown, body: string): void => {
     recordExport(db, {
       runId,
       approvalId: approval.id,
@@ -216,7 +216,9 @@ async function handleExport(ctx: Ctx, res: ServerResponse, runId: string): Promi
 
   let tuple: SourceTuple;
   try {
-    tuple = JSON.parse(run.source_tuple_json) as SourceTuple;
+    const parsed: unknown = JSON.parse(run.source_tuple_json);
+    if (!Array.isArray(parsed)) throw new Error("not an array");
+    tuple = parsed as SourceTuple;
   } catch {
     return fail(503, "blocked_unavailable", "stored source tuple unreadable", "<h1>Export blocked</h1><p>The stored source tuple is unreadable.</p>");
   }
@@ -238,7 +240,7 @@ async function handleExport(ctx: Ctx, res: ServerResponse, runId: string): Promi
       const items = outcome.changes
         .map((c) => `<li>${escapeHtml(c.fileName)}: ${escapeHtml(c.kind)}</li>`)
         .join("");
-      return fail(409, "blocked_stale", JSON.stringify(outcome.changes), `<h1>Export blocked</h1><p>The source files changed since approval:</p><ul>${items}</ul>`);
+      return fail(409, "blocked_stale", outcome.changes, `<h1>Export blocked</h1><p>The source files changed since approval:</p><ul>${items}</ul>`);
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
