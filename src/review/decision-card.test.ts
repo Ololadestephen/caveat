@@ -21,9 +21,10 @@ const DECIDED: DecisionOutcome = {
     cited_clause: { excerpt_id: "ex-1", quote: "due upon the Client's written acceptance" },
     confidence: 0.92,
   },
-  provider: "gemini",
-  model: "gemini-flash-latest",
-  modelVersion: "gemini-3-flash",
+  provider: "openrouter",
+  model: "nvidia/nemotron-3.5-super-vl:free",
+  modelVersion: "nvidia/nemotron-3.5-super-vl",
+  servedBy: "Nvidia",
   latencyMs: 812,
 };
 
@@ -36,9 +37,10 @@ describe("renderDecisionCard", () => {
     expect(html).toContain("sow.pdf");
     expect(html).toContain("v1");
     expect(html).toContain("page 3");
-    expect(html).toContain("model gemini-flash-latest &rarr; gemini-3-flash");
+    expect(html).toContain("model nvidia/nemotron-3.5-super-vl:free &rarr; nvidia/nemotron-3.5-super-vl");
+    expect(html).toContain("served by Nvidia");
     expect(html).toContain("self-reported confidence 0.92");
-    expect(html).toContain('data-provider="gemini"');
+    expect(html).toContain('data-provider="openrouter"');
   });
 
   it("labels the confidence as self-reported, never as accuracy or probability", () => {
@@ -74,9 +76,9 @@ describe("renderDecisionCard", () => {
       status: "needs_review",
       reason: "low_confidence",
       detail: "self-reported confidence 0.60 is below threshold 0.8",
-      provider: "gemini",
-      model: "gemini-flash-latest",
-      modelVersion: "gemini-3-flash",
+      provider: "openrouter",
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      modelVersion: "nvidia/nemotron-3.5-super-vl",
       decision: {
         action: "acceptance_triggered",
         reason: "Unsure which clause applies.",
@@ -88,8 +90,8 @@ describe("renderDecisionCard", () => {
     expect(html).toContain("Needs human review");
     expect(html).toContain("Self-reported confidence below threshold");
     expect(html).toContain("below threshold 0.8");
-    expect(html).toContain("gemini-flash-latest");
-    expect(html).toContain("gemini-3-flash");
+    expect(html).toContain("nvidia/nemotron-3.5-super-vl:free");
+    expect(html).toContain("nvidia/nemotron-3.5-super-vl");
     expect(html).toContain("Unsure which clause applies.");
   });
 
@@ -98,7 +100,7 @@ describe("renderDecisionCard", () => {
       status: "needs_review",
       reason: "malformed_json",
       detail: 'content was "<b>not json</b>"',
-      provider: "ollama",
+      provider: "openrouter",
     };
     const html = renderDecisionCard(review);
     expect(html).toContain("Needs human review");
@@ -120,6 +122,7 @@ describe("renderDecisionCard", () => {
       "blocked",
       "truncated",
       "rate_limited",
+      "provider_error",
       "http_error",
       "timeout",
       "network_error",
@@ -129,7 +132,7 @@ describe("renderDecisionCard", () => {
         status: "needs_review",
         reason,
         detail: `detail for ${reason}`,
-        provider: "gemini",
+        provider: "openrouter",
       });
       expect(html).toContain("Needs human review");
       expect(html).toContain(`detail for ${reason}`);

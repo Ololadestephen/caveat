@@ -14,7 +14,7 @@ for DIR in src scripts fixtures; do
 done
 
 ENV_VARS=""
-for VAR in CAVEAT_BOX_FOLDER CAVEAT_GEMINI_MODEL CAVEAT_PROOF_CASE; do
+for VAR in CAVEAT_BOX_FOLDER CAVEAT_DECISION_MODEL CAVEAT_PROOF_CASE; do
   if [ -n "${!VAR:-}" ]; then
     ENV_VARS="${ENV_VARS:+$ENV_VARS,}$VAR=${!VAR}"
   fi

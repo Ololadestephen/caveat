@@ -35,3 +35,8 @@ regenerated page numbers.
 Source: U.S. Securities and Exchange Commission, EDGAR. Any opening cash,
 costs or modeled extensions are demo assumptions, not facts about the parties.
 The cash-runner arithmetic is checked against a fixed synthetic ledger.
+
+## Environment
+- `CAVEAT_DECISION_MODEL` — decision model id for the coord proof (default
+  `nvidia/nemotron-3.5-super-vl:free`); set to `typesafe/jev-router` to route the
+  same typed question through Jev with no code change.

@@ -67,7 +67,7 @@ GW_OF() {
     });' "$1" 2>/dev/null
 }
 BOX_GW="$(GW_OF box)"
-GEMINI_GW="$(GW_OF gemini)"
+OPENROUTER_GW="$(GW_OF openrouter)"
 
 for W in "$WORKER_A" "$WORKER_B"; do
   # /v1/gateway/list is scoped to the calling sprite: a worker must not see the
@@ -89,13 +89,13 @@ for W in "$WORKER_A" "$WORKER_B"; do
     check "box_gateway_denied_$W" fail
   fi
 
-  if [ -n "$GEMINI_GW" ]; then
-    CODE=$(remote "$W" "curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST '$GEMINI_GW/v1beta/models/gemini-flash-latest:generateContent' -H 'Content-Type: application/json' -d '{\"contents\":[{\"parts\":[{\"text\":\"hi\"}]}]}'" || echo "000")
-    eval "GEMINI_CODE_${W#caveat-}=$CODE"
-    check "gemini_gateway_denied_$W" "$([ "$CODE" = 403 ] && echo pass || echo fail)"
+  if [ -n "$OPENROUTER_GW" ]; then
+    CODE=$(remote "$W" "curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST '$OPENROUTER_GW/v1/chat/completions' -H 'Content-Type: application/json' -d '{\"model\":\"probe\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'" || echo "000")
+    eval "OPENROUTER_CODE_${W#caveat-}=$CODE"
+    check "openrouter_gateway_denied_$W" "$([ "$CODE" = 403 ] && echo pass || echo fail)"
   else
-    eval "GEMINI_CODE_${W#caveat-}=not_configured"
-    check "gemini_gateway_denied_$W" skipped_not_configured
+    eval "OPENROUTER_CODE_${W#caveat-}=not_configured"
+    check "openrouter_gateway_denied_$W" skipped_not_configured
   fi
 done
 
@@ -176,8 +176,8 @@ cat > "$OUT" <<JSON
     "listedProvidersB": "${LISTED_PROVIDERS_wb:-n/a}",
     "boxHttpA": "${BOX_CODE_wa:-n/a}",
     "boxHttpB": "${BOX_CODE_wb:-n/a}",
-    "geminiHttpA": "${GEMINI_CODE_wa:-n/a}",
-    "geminiHttpB": "${GEMINI_CODE_wb:-n/a}"
+    "openrouterHttpA": "${OPENROUTER_CODE_wa:-n/a}",
+    "openrouterHttpB": "${OPENROUTER_CODE_wb:-n/a}"
   },
   "checkpoint": {
     "version": "${VER:-none}",

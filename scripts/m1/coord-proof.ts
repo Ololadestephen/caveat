@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { BoxError, fetchBoxFile, findFolderByName, listFolder } from "../../src/evidence/box.ts";
-import { GeminiDecisionProvider } from "../../src/interpret/gemini.ts";
+import { OpenRouterDecisionProvider } from "../../src/interpret/openrouter.ts";
 import { renderDecisionCard } from "../../src/review/decision-card.ts";
 import type { BillingTriggerQuestion, DecisionOutcome } from "../../src/interpret/types.ts";
 
@@ -24,18 +24,20 @@ type BoxProof =
     }
   | { status: string; connector: "box"; detail?: string };
 
-type GeminiProof = {
+type OpenRouterProof = {
   status: string;
-  connector: "gemini";
+  connector: "openrouter";
   caseId?: string;
   model?: string;
   modelVersion?: string;
+  servedBy?: string;
   action?: string;
   reason?: string;
   citedClause?: { excerpt_id: string; quote: string };
   confidence?: number;
   outcomeStatus?: string;
   reviewReason?: string;
+  reviewDetail?: string;
   latencyMs?: number;
   detail?: string;
   decisionCardHtml?: string;
@@ -135,14 +137,14 @@ async function loadProofCase(): Promise<{
   };
 }
 
-async function proveGemini(connections: Connection[]): Promise<GeminiProof> {
-  const conn = connections.find((c) => c.provider === "gemini");
+async function proveOpenRouter(connections: Connection[]): Promise<OpenRouterProof> {
+  const conn = connections.find((c) => c.provider === "openrouter");
   if (conn === undefined) {
-    return { status: "not_configured", connector: "gemini" };
+    return { status: "not_configured", connector: "openrouter" };
   }
 
-  const model = process.env.CAVEAT_GEMINI_MODEL;
-  const provider = new GeminiDecisionProvider({
+  const model = process.env.CAVEAT_DECISION_MODEL;
+  const provider = new OpenRouterDecisionProvider({
     gatewayBaseUrl: conn.gatewayBaseUrl,
     ...(model !== undefined && model.length > 0 ? { model } : {}),
   });
@@ -153,7 +155,7 @@ async function proveGemini(connections: Connection[]): Promise<GeminiProof> {
     const outcome: DecisionOutcome = await provider.decide(question);
     const latencyMs = Math.round(performance.now() - decideStarted);
     const decision = outcome.decision;
-    const proof: GeminiProof = {
+    const proof: OpenRouterProof = {
       caseId,
       status:
         outcome.status === "decided"
@@ -161,23 +163,27 @@ async function proveGemini(connections: Connection[]): Promise<GeminiProof> {
             ? "ok"
             : "unexpected_action"
           : "needs_review",
-      connector: "gemini",
-      model: outcome.model ?? model ?? "gemini-flash-latest",
+      connector: "openrouter",
+      model: outcome.model ?? model ?? "nvidia/nemotron-3.5-super-vl:free",
       outcomeStatus: outcome.status,
       latencyMs,
       decisionCardHtml: renderDecisionCard(outcome, question),
     };
     if (outcome.modelVersion !== undefined) proof.modelVersion = outcome.modelVersion;
+    if (outcome.servedBy !== undefined) proof.servedBy = outcome.servedBy;
     if (decision !== undefined) {
       proof.action = decision.action;
       proof.reason = decision.reason;
       proof.citedClause = decision.cited_clause;
       proof.confidence = decision.confidence;
     }
-    if (outcome.status === "needs_review") proof.reviewReason = outcome.reason;
+    if (outcome.status === "needs_review") {
+      proof.reviewReason = outcome.reason;
+      proof.reviewDetail = outcome.detail;
+    }
     return proof;
   } catch (error) {
-    return { status: "error", connector: "gemini", detail: errorDetail(error) };
+    return { status: "error", connector: "openrouter", detail: errorDetail(error) };
   }
 }
 
@@ -189,7 +195,7 @@ try {
   console.log(
     JSON.stringify({
       box: { status: "error", connector: "box", detail: errorDetail(error) },
-      gemini: { status: "error", connector: "gemini", detail: errorDetail(error) },
+      openrouter: { status: "error", connector: "openrouter", detail: errorDetail(error) },
       timingsMs: { total: Math.round(performance.now() - started) },
     }),
   );
@@ -200,17 +206,17 @@ const boxStarted = performance.now();
 const box = await proveBox(connections);
 const boxMs = Math.round(performance.now() - boxStarted);
 
-const geminiStarted = performance.now();
-const gemini = await proveGemini(connections);
-const geminiMs = Math.round(performance.now() - geminiStarted);
+const openrouterStarted = performance.now();
+const openrouter = await proveOpenRouter(connections);
+const openrouterMs = Math.round(performance.now() - openrouterStarted);
 
 console.log(
   JSON.stringify({
     box,
-    gemini,
+    openrouter,
     timingsMs: {
       box: boxMs,
-      gemini: geminiMs,
+      openrouter: openrouterMs,
       total: Math.round(performance.now() - started),
     },
   }),
