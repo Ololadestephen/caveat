@@ -75,12 +75,12 @@ const SECURITY_HEADERS = {
   "referrer-policy": "no-referrer",
 };
 
-function html(res: ServerResponse, status: number, body: string): void {
+function sendHtml(res: ServerResponse, status: number, body: string): void {
   res.writeHead(status, { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS });
   res.end(body);
 }
 
-function text(res: ServerResponse, status: number, body: string): void {
+function sendText(res: ServerResponse, status: number, body: string): void {
   res.writeHead(status, { "content-type": "text/plain; charset=utf-8", ...SECURITY_HEADERS });
   res.end(body);
 }
@@ -166,9 +166,9 @@ async function handleApprove(
 ): Promise<void> {
   const { db, deps } = ctx;
   const run = getRun(db, runId);
-  if (run === undefined) return html(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1>"));
+  if (run === undefined) return sendHtml(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1>"));
   if (deps.approver === undefined) {
-    return html(res, 503, pageShell("Approver not configured", deps.revision, "<h1>Approver not configured</h1>"));
+    return sendHtml(res, 503, pageShell("Approver not configured", deps.revision, "<h1>Approver not configured</h1>"));
   }
   const body = new URLSearchParams(await readBody(req));
   const rHash = body.get("receiptHash") ?? "";
@@ -188,7 +188,7 @@ async function handleApprove(
         : outcome.error === "wrong_status"
           ? `this run is ${outcome.status ?? "not reviewable"}`
           : "run not found";
-    return html(res, status, pageShell("Approve failed", deps.revision, `<h1>Approve failed</h1><p>${escapeHtml(detail)}</p><p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
+    return sendHtml(res, status, pageShell("Approve failed", deps.revision, `<h1>Approve failed</h1><p>${escapeHtml(detail)}</p><p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
   }
   redirect(res, `/runs/${runId}`);
 }
@@ -196,10 +196,10 @@ async function handleApprove(
 async function handleExport(ctx: Ctx, res: ServerResponse, runId: string): Promise<void> {
   const { db, deps, connections, recheck } = ctx;
   const run = getRun(db, runId);
-  if (run === undefined) return html(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1>"));
+  if (run === undefined) return sendHtml(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1>"));
   const approval = getApproval(db, runId);
   if (run.status !== "approved" || approval === undefined) {
-    return html(res, 409, pageShell("Export failed", deps.revision, `<h1>Export failed</h1><p>This run is ${escapeHtml(run.status)}; only approved runs can be exported.</p><p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
+    return sendHtml(res, 409, pageShell("Export failed", deps.revision, `<h1>Export failed</h1><p>This run is ${escapeHtml(run.status)}; only approved runs can be exported.</p><p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
   }
   const fail = (status: number, result: "blocked_stale" | "blocked_unavailable", detail: unknown, body: string): void => {
     recordExport(db, {
@@ -210,7 +210,7 @@ async function handleExport(ctx: Ctx, res: ServerResponse, runId: string): Promi
       detailJson: JSON.stringify(detail),
       draftHash: run.draft_hash,
     });
-    html(res, status, pageShell("Export blocked", deps.revision, `${body}<p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
+    sendHtml(res, status, pageShell("Export blocked", deps.revision, `${body}<p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
   };
 
   let tuple: SourceTuple;
@@ -269,7 +269,7 @@ function routeRequest(ctx: Ctx, req: IncomingMessage, res: ServerResponse): Prom
   const path = url.pathname;
 
   if (method === "GET" && path === "/healthz") {
-    return text(res, 200, "ok");
+    return sendText(res, 200, "ok");
   }
   if (method === "GET" && path === "/app.css") {
     res.writeHead(200, {
@@ -281,7 +281,7 @@ function routeRequest(ctx: Ctx, req: IncomingMessage, res: ServerResponse): Prom
     return;
   }
   if (method === "POST" && !sameOrigin(req)) {
-    return html(res, 403, pageShell("Forbidden", deps.revision, "<h1>Forbidden</h1><p>Origin check failed.</p>"));
+    return sendHtml(res, 403, pageShell("Forbidden", deps.revision, "<h1>Forbidden</h1><p>Origin check failed.</p>"));
   }
   if (method === "POST" && path === "/runs") {
     const runId = newRunId();
@@ -301,9 +301,9 @@ function routeRequest(ctx: Ctx, req: IncomingMessage, res: ServerResponse): Prom
   if (method === "GET" && runMatch !== null) {
     const run = getRun(db, runMatch[1]!);
     if (run === undefined) {
-      return html(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1><p><a href=\"/\">Runs</a></p>"));
+      return sendHtml(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1><p><a href=\"/\">Runs</a></p>"));
     }
-    return html(res, 200, renderRun(run, {
+    return sendHtml(res, 200, renderRun(run, {
       revision: deps.revision,
       approver: deps.approver,
       approval: getApproval(db, run.id),
@@ -319,9 +319,9 @@ function routeRequest(ctx: Ctx, req: IncomingMessage, res: ServerResponse): Prom
     return handleExport(ctx, res, exportMatch[1]!);
   }
   if (method === "GET" && path === "/") {
-    return html(res, 200, renderRunList(listRuns(db), deps.revision));
+    return sendHtml(res, 200, renderRunList(listRuns(db), deps.revision));
   }
-  return html(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1><p><a href=\"/\">Runs</a></p>"));
+  return sendHtml(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1><p><a href=\"/\">Runs</a></p>"));
 }
 
 export function createApp(deps: AppDeps): Server {
@@ -337,7 +337,7 @@ export function createApp(deps: AppDeps): Server {
     Promise.resolve(routeRequest(ctx, req, res)).catch((error: unknown) => {
       const detail = error instanceof Error ? error.message : String(error);
       try {
-        html(res, 500, pageShell("Error", deps.revision, `<h1>Server error</h1><p>${escapeHtml(detail)}</p>`));
+        sendHtml(res, 500, pageShell("Error", deps.revision, `<h1>Server error</h1><p>${escapeHtml(detail)}</p>`));
       } catch {
         // response already sent
       }
