@@ -21,8 +21,11 @@ describe("excerptTags", () => {
   });
 
   it("omits the section attribute when absent", () => {
-    const e: Excerpt = { ...EXCERPT, source: { ...EXCERPT.source, section: undefined } };
-    expect(excerptTags([e])).not.toContain('section=');
+    const e: Excerpt = {
+      ...EXCERPT,
+      source: { fileName: "file.pdf", versionLabel: "sha256 abc123def456", page: 2 },
+    };
+    expect(excerptTags([e])).not.toContain("section=");
   });
 });
 
