@@ -1,0 +1,13 @@
+{
+  "bundleId": "caveat-m1-bundle",
+  "bundleVersion": 1,
+  "kind": "evidence+scenario manifest",
+  "questionFixture": "fixtures/m1/billing-trigger.json",
+  "scenario": {
+    "name": "m1-isolation-smoke",
+    "openingCents": 500000,
+    "floorCents": 200000,
+    "weeklyCostsCents": [80000, 80000, 80000, 80000, 80000, 84000],
+    "notes": "synthetic milestone-1 bundle; the deterministic cash runner lands in milestone 2"
+  }
+}
