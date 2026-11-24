@@ -1,0 +1,68 @@
+{
+  "label": "twinvee-escrow",
+  "description": "Derived from the public Twin Vee second amendment (SEC EDGAR Exhibit 10.1, https://www.sec.gov/Archives/edgar/data/1855509/000173112226001331/e8000_ex10-1.htm), §3(a)–(b): a $150,000 escrow funded at signing, $75,000 released on 2027-01-02, and three conditional $25,000 releases (2027-01-02, 2027-02-02, 2027-03-02) that each require a monthly extension to be granted. The base $6k/month retainer and the first-amendment payments are deliberately excluded pending sourced human interpretation (milestone 3). The contractual release date 2027-01-02 is a Saturday and is modeled as received 2027-01-04 under the weekend rule (Saturday/Sunday receipts roll to the next Monday; escrow deposits and costs never move). Scenario no_extensions grants none of the extensions; all_extensions grants all three. Escrow is not cash: the $15M deposit does not touch the cash balance, so the firm breaches its floor while the escrow sits funded.",
+  "startDate": "2026-10-01",
+  "demoAssumptions": {
+    "note": "Demo assumptions, not facts about the parties",
+    "openingCents": 2000000,
+    "floorCents": 1000000,
+    "costs": [
+      { "id": "cost-2026-10", "date": "2026-10-15", "amountCents": 600000 },
+      { "id": "cost-2026-11", "date": "2026-11-15", "amountCents": 600000 },
+      { "id": "cost-2026-12", "date": "2026-12-15", "amountCents": 600000 },
+      { "id": "cost-2027-01", "date": "2027-01-15", "amountCents": 600000 },
+      { "id": "cost-2027-02", "date": "2027-02-15", "amountCents": 600000 },
+      { "id": "cost-2027-03", "date": "2027-03-15", "amountCents": 600000 }
+    ]
+  },
+  "candidates": [
+    {
+      "id": "as_signed",
+      "rankCents": 0,
+      "totalCents": 15000000,
+      "paymentRules": [
+        {
+          "id": "escrow-funding",
+          "kind": "escrow_deposit",
+          "amountCents": 15000000,
+          "date": "2026-10-01"
+        },
+        {
+          "id": "release-1",
+          "kind": "escrow_release",
+          "amountCents": 7500000,
+          "date": "2027-01-02"
+        },
+        {
+          "id": "release-ext-1",
+          "kind": "escrow_release",
+          "amountCents": 2500000,
+          "date": "2027-01-02",
+          "requiresExtension": "ext-jan-31"
+        },
+        {
+          "id": "release-ext-2",
+          "kind": "escrow_release",
+          "amountCents": 2500000,
+          "date": "2027-02-02",
+          "requiresExtension": "ext-feb-28"
+        },
+        {
+          "id": "release-ext-3",
+          "kind": "escrow_release",
+          "amountCents": 2500000,
+          "date": "2027-03-02",
+          "requiresExtension": "ext-mar-31"
+        }
+      ]
+    }
+  ],
+  "scenarios": [
+    { "id": "no_extensions" },
+    {
+      "id": "all_extensions",
+      "extensionsGranted": ["ext-jan-31", "ext-feb-28", "ext-mar-31"]
+    }
+  ],
+  "passingScenarios": ["no_extensions", "all_extensions"]
+}

@@ -1,0 +1,74 @@
+{
+  "label": "synthetic",
+  "description": "Synthetic $12,000 fixed-price engagement comparing a quote with no deposit against two counteroffers. Costs: $800/wk for five weeks then $840, floor $2,000 against $5,000 opening cash. Every final payment is on_acceptance with delivery 2027-01-22, a 3-day acceptance window and net-7 terms; the three delays (acceptance window, scenario acceptanceDelayDays, scenario paymentLagDays) stay separate components. Scenarios: on_time (no adjustments); acceptance_delay_21d (client accepts 21 days late); payment_lag_14d (client pays 14 days after the due date); extra_cost_500 (a $500 unplanned cost on 2027-01-22). Client payments and escrow releases landing on a Saturday or Sunday are received the next Monday; costs never move. A candidate passes only if the cash balance never drops below the floor in all four scenarios; smallestPassingCandidate is the passing candidate with the smallest deposit (rankCents). All amounts are integer cents.",
+  "startDate": "2027-01-04",
+  "openingCents": 500000,
+  "floorCents": 200000,
+  "costs": [
+    { "id": "cost-w1", "date": "2027-01-08", "amountCents": 80000 },
+    { "id": "cost-w2", "date": "2027-01-15", "amountCents": 80000 },
+    { "id": "cost-w3", "date": "2027-01-22", "amountCents": 80000 },
+    { "id": "cost-w4", "date": "2027-01-29", "amountCents": 80000 },
+    { "id": "cost-w5", "date": "2027-02-05", "amountCents": 80000 },
+    { "id": "cost-w6", "date": "2027-02-12", "amountCents": 84000 }
+  ],
+  "candidates": [
+    {
+      "id": "quote_no_deposit",
+      "rankCents": 0,
+      "totalCents": 1200000,
+      "paymentRules": [
+        {
+          "id": "final-payment",
+          "kind": "on_acceptance",
+          "amountCents": 1200000,
+          "deliveryDate": "2027-01-22",
+          "acceptanceWindowDays": 3,
+          "netDays": 7
+        }
+      ]
+    },
+    {
+      "id": "deposit_1000",
+      "rankCents": 100000,
+      "totalCents": 1200000,
+      "paymentRules": [
+        { "id": "deposit", "kind": "on_date", "amountCents": 100000, "date": "2027-01-04" },
+        {
+          "id": "final-payment",
+          "kind": "on_acceptance",
+          "amountCents": 1100000,
+          "deliveryDate": "2027-01-22",
+          "acceptanceWindowDays": 3,
+          "netDays": 7
+        }
+      ]
+    },
+    {
+      "id": "deposit_2000",
+      "rankCents": 200000,
+      "totalCents": 1200000,
+      "paymentRules": [
+        { "id": "deposit", "kind": "on_date", "amountCents": 200000, "date": "2027-01-04" },
+        {
+          "id": "final-payment",
+          "kind": "on_acceptance",
+          "amountCents": 1000000,
+          "deliveryDate": "2027-01-22",
+          "acceptanceWindowDays": 3,
+          "netDays": 7
+        }
+      ]
+    }
+  ],
+  "scenarios": [
+    { "id": "on_time" },
+    { "id": "acceptance_delay_21d", "acceptanceDelayDays": 21 },
+    { "id": "payment_lag_14d", "paymentLagDays": 14 },
+    {
+      "id": "extra_cost_500",
+      "extraCosts": [{ "id": "extra-cost", "date": "2027-01-22", "amountCents": 50000 }]
+    }
+  ],
+  "passingScenarios": ["on_time", "acceptance_delay_21d", "payment_lag_14d", "extra_cost_500"]
+}

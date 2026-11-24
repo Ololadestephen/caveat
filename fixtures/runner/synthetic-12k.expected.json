@@ -1,0 +1,1131 @@
+{
+  "_note": "Authoritative hand-calculated expected results (owner/lead authored). Do not regenerate from the runner.",
+  "fixture": "synthetic-12k",
+  "smallestPassingCandidate": "deposit_2000",
+  "results": {
+    "quote_no_deposit": {
+      "on_time": {
+        "passes": false,
+        "firstBreach": {
+          "date": "2027-01-29",
+          "week": 4,
+          "balanceCents": 180000
+        },
+        "lowest": {
+          "date": "2027-01-29",
+          "balanceCents": 180000
+        },
+        "endBalanceCents": 1216000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 420000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 340000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 260000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 180000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-01",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1200000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1380000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1300000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1216000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          }
+        ]
+      },
+      "acceptance_delay_21d": {
+        "passes": false,
+        "firstBreach": {
+          "date": "2027-01-29",
+          "week": 4,
+          "balanceCents": 180000
+        },
+        "lowest": {
+          "date": "2027-02-12",
+          "balanceCents": 16000
+        },
+        "endBalanceCents": 1216000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 420000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 340000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 260000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 180000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 100000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 16000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          },
+          {
+            "date": "2027-02-22",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1200000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1216000,
+            "escrowBalanceCents": 0,
+            "week": 8
+          }
+        ]
+      },
+      "payment_lag_14d": {
+        "passes": false,
+        "firstBreach": {
+          "date": "2027-01-29",
+          "week": 4,
+          "balanceCents": 180000
+        },
+        "lowest": {
+          "date": "2027-02-12",
+          "balanceCents": 16000
+        },
+        "endBalanceCents": 1216000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 420000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 340000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 260000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 180000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 100000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 16000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          },
+          {
+            "date": "2027-02-15",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1200000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1216000,
+            "escrowBalanceCents": 0,
+            "week": 7
+          }
+        ]
+      },
+      "extra_cost_500": {
+        "passes": false,
+        "firstBreach": {
+          "date": "2027-01-29",
+          "week": 4,
+          "balanceCents": 130000
+        },
+        "lowest": {
+          "date": "2027-01-29",
+          "balanceCents": 130000
+        },
+        "endBalanceCents": 1166000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 420000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 340000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 260000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "extra-cost",
+            "cashDeltaCents": -50000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 210000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 130000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-01",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1200000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1330000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1250000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1166000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          }
+        ]
+      }
+    },
+    "deposit_1000": {
+      "on_time": {
+        "passes": true,
+        "firstBreach": null,
+        "lowest": {
+          "date": "2027-01-29",
+          "balanceCents": 280000
+        },
+        "endBalanceCents": 1216000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-04",
+            "kind": "payment",
+            "id": "deposit",
+            "cashDeltaCents": 100000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 600000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 520000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 440000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 360000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 280000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-01",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1100000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1380000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1300000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1216000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          }
+        ]
+      },
+      "acceptance_delay_21d": {
+        "passes": false,
+        "firstBreach": {
+          "date": "2027-02-12",
+          "week": 6,
+          "balanceCents": 116000
+        },
+        "lowest": {
+          "date": "2027-02-12",
+          "balanceCents": 116000
+        },
+        "endBalanceCents": 1216000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-04",
+            "kind": "payment",
+            "id": "deposit",
+            "cashDeltaCents": 100000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 600000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 520000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 440000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 360000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 280000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 200000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 116000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          },
+          {
+            "date": "2027-02-22",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1100000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1216000,
+            "escrowBalanceCents": 0,
+            "week": 8
+          }
+        ]
+      },
+      "payment_lag_14d": {
+        "passes": false,
+        "firstBreach": {
+          "date": "2027-02-12",
+          "week": 6,
+          "balanceCents": 116000
+        },
+        "lowest": {
+          "date": "2027-02-12",
+          "balanceCents": 116000
+        },
+        "endBalanceCents": 1216000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-04",
+            "kind": "payment",
+            "id": "deposit",
+            "cashDeltaCents": 100000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 600000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 520000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 440000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 360000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 280000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 200000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 116000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          },
+          {
+            "date": "2027-02-15",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1100000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1216000,
+            "escrowBalanceCents": 0,
+            "week": 7
+          }
+        ]
+      },
+      "extra_cost_500": {
+        "passes": true,
+        "firstBreach": null,
+        "lowest": {
+          "date": "2027-01-29",
+          "balanceCents": 230000
+        },
+        "endBalanceCents": 1166000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-04",
+            "kind": "payment",
+            "id": "deposit",
+            "cashDeltaCents": 100000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 600000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 520000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 440000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 360000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "extra-cost",
+            "cashDeltaCents": -50000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 310000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 230000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-01",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1100000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1330000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1250000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1166000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          }
+        ]
+      }
+    },
+    "deposit_2000": {
+      "on_time": {
+        "passes": true,
+        "firstBreach": null,
+        "lowest": {
+          "date": "2027-01-29",
+          "balanceCents": 380000
+        },
+        "endBalanceCents": 1216000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-04",
+            "kind": "payment",
+            "id": "deposit",
+            "cashDeltaCents": 200000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 700000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 620000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 540000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 460000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 380000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-01",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1000000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1380000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1300000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1216000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          }
+        ]
+      },
+      "acceptance_delay_21d": {
+        "passes": true,
+        "firstBreach": null,
+        "lowest": {
+          "date": "2027-02-12",
+          "balanceCents": 216000
+        },
+        "endBalanceCents": 1216000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-04",
+            "kind": "payment",
+            "id": "deposit",
+            "cashDeltaCents": 200000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 700000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 620000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 540000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 460000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 380000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 300000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 216000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          },
+          {
+            "date": "2027-02-22",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1000000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1216000,
+            "escrowBalanceCents": 0,
+            "week": 8
+          }
+        ]
+      },
+      "payment_lag_14d": {
+        "passes": true,
+        "firstBreach": null,
+        "lowest": {
+          "date": "2027-02-12",
+          "balanceCents": 216000
+        },
+        "endBalanceCents": 1216000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-04",
+            "kind": "payment",
+            "id": "deposit",
+            "cashDeltaCents": 200000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 700000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 620000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 540000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 460000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 380000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 300000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 216000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          },
+          {
+            "date": "2027-02-15",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1000000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1216000,
+            "escrowBalanceCents": 0,
+            "week": 7
+          }
+        ]
+      },
+      "extra_cost_500": {
+        "passes": true,
+        "firstBreach": null,
+        "lowest": {
+          "date": "2027-01-29",
+          "balanceCents": 330000
+        },
+        "endBalanceCents": 1166000,
+        "endEscrowCents": 0,
+        "ledger": [
+          {
+            "date": "2027-01-04",
+            "kind": "payment",
+            "id": "deposit",
+            "cashDeltaCents": 200000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 700000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-08",
+            "kind": "cost",
+            "id": "cost-w1",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 620000,
+            "escrowBalanceCents": 0,
+            "week": 1
+          },
+          {
+            "date": "2027-01-15",
+            "kind": "cost",
+            "id": "cost-w2",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 540000,
+            "escrowBalanceCents": 0,
+            "week": 2
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "cost-w3",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 460000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-22",
+            "kind": "cost",
+            "id": "extra-cost",
+            "cashDeltaCents": -50000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 410000,
+            "escrowBalanceCents": 0,
+            "week": 3
+          },
+          {
+            "date": "2027-01-29",
+            "kind": "cost",
+            "id": "cost-w4",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 330000,
+            "escrowBalanceCents": 0,
+            "week": 4
+          },
+          {
+            "date": "2027-02-01",
+            "kind": "payment",
+            "id": "final-payment",
+            "cashDeltaCents": 1000000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1330000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-05",
+            "kind": "cost",
+            "id": "cost-w5",
+            "cashDeltaCents": -80000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1250000,
+            "escrowBalanceCents": 0,
+            "week": 5
+          },
+          {
+            "date": "2027-02-12",
+            "kind": "cost",
+            "id": "cost-w6",
+            "cashDeltaCents": -84000,
+            "escrowDeltaCents": 0,
+            "balanceCents": 1166000,
+            "escrowBalanceCents": 0,
+            "week": 6
+          }
+        ]
+      }
+    }
+  }
+}
