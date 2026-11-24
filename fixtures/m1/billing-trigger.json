@@ -1,0 +1,53 @@
+{
+  "questionId": "m1-billing-trigger",
+  "cases": [
+    {
+      "id": "acceptance_clear",
+      "expectedAction": "acceptance_triggered",
+      "excerpts": [
+        {
+          "id": "sow-clause-4-2",
+          "text": "Clause 4.2 — Billing trigger. The Milestone Fee becomes payable only upon the Client's written acceptance of the Deliverables for that milestone. Delivery of the Deliverables alone does not trigger invoicing, and no amount is due before written acceptance is received.",
+          "source": {
+            "fileName": "01-consulting-agreement.pdf",
+            "versionLabel": "v1",
+            "page": 4
+          }
+        },
+        {
+          "id": "amd-clause-2-1",
+          "text": "Clause 2.1 — Reminder notices. If the Client fails to return a signed acceptance certificate within ten business days of delivery, the Consultant may issue a reminder notice. A reminder notice does not itself constitute acceptance and does not trigger payment.",
+          "source": {
+            "fileName": "02-first-amendment.pdf",
+            "versionLabel": "v1",
+            "page": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "conflicting_terms",
+      "expectedAction": "ambiguous",
+      "excerpts": [
+        {
+          "id": "sow-clause-4-2b",
+          "text": "Clause 4.2 — Billing trigger. Milestone fees are payable upon completion of the milestone deliverables, subject to the Client's ongoing review of the work performed.",
+          "source": {
+            "fileName": "01-consulting-agreement.pdf",
+            "versionLabel": "v1",
+            "page": 4
+          }
+        },
+        {
+          "id": "amd-clause-4-2c",
+          "text": "Clause 4.2 — Amendment. Fees accrue as work is performed and are invoiced at such times as the parties may reasonably agree, without altering any other provision of the agreement.",
+          "source": {
+            "fileName": "02-first-amendment.pdf",
+            "versionLabel": "v1",
+            "page": 3
+          }
+        }
+      ]
+    }
+  ]
+}
