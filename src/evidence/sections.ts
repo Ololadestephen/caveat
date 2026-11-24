@@ -41,146 +41,172 @@ type OpenSection = {
   lastPage: number;
 };
 
-// Turn extracted page lines into labelled contract sections. Sections end at
-// "IN WITNESS WHEREOF" so signature blocks never become sections, and lone
-// page-number lines are dropped. Letter and roman markers are only accepted in
-// sequence under the current top-level section.
-export function extractSections(fileName: string, pages: PdfPageLines[]): ContractSection[] {
-  const sections: ContractSection[] = [];
-  let current: OpenSection | undefined;
-  let expectedTop = 0;
-  let expectedLetterCode = "a".charCodeAt(0);
-  let expectedRoman = 1;
-  let currentTop = 0;
-  let currentLetter = "";
-  let done = false;
+// Per-file parser state: the current open section plus the marker sequences
+// expected under it. Letter and roman markers are only accepted in sequence
+// under the current top-level section.
+class Sectionizer {
+  readonly sections: ContractSection[] = [];
+  done = false;
+  private current: OpenSection | undefined;
+  private expectedTop = 0;
+  private expectedLetterCode = "a".charCodeAt(0);
+  private expectedRoman = 1;
+  private currentTop = 0;
+  private currentLetter = "";
+  private readonly fileName: string;
 
-  const close = (): void => {
-    if (current === undefined) return;
-    const text = normalizeWhitespace(current.lines.join(" "));
+  constructor(fileName: string) {
+    this.fileName = fileName;
+  }
+
+  feed(line: string, page: number): void {
+    const trimmed = line.trim();
+    if (WITNESS_RE.test(trimmed)) {
+      this.done = true;
+      return;
+    }
+    if (trimmed.length === 0 || LONE_NUMBER_RE.test(trimmed)) return;
+    if (this.decimalClause(trimmed, page)) return;
+    if (this.topHeading(trimmed, page)) return;
+    if (this.standaloneLetter(trimmed, page)) return;
+    if (this.standaloneRoman(trimmed, page)) return;
+    if (this.inlineLetters(trimmed, page)) return;
+    // Leading text before the first numbered section is the preamble
+    // (recitals, title lines); it becomes a "Recitals" section so citations
+    // can point at it.
+    if (this.current === undefined) {
+      this.open("Recitals", page, "Recitals");
+    }
+    this.append(trimmed, page);
+  }
+
+  finish(): ContractSection[] {
+    this.close();
+    return this.sections;
+  }
+
+  private close(): void {
+    if (this.current === undefined) return;
+    const text = normalizeWhitespace(this.current.lines.join(" "));
     if (text.length > 0) {
       const section: ContractSection = {
-        fileName,
-        sectionId: current.id,
+        fileName: this.fileName,
+        sectionId: this.current.id,
         text,
-        pages: [current.startPage, current.lastPage],
+        pages: [this.current.startPage, this.current.lastPage],
       };
-      if (current.title !== undefined) section.title = current.title;
-      sections.push(section);
+      if (this.current.title !== undefined) section.title = this.current.title;
+      this.sections.push(section);
     }
-    current = undefined;
-  };
+    this.current = undefined;
+  }
 
-  const open = (id: string, page: number, title?: string): OpenSection => {
-    close();
-    const next: OpenSection = { id, title, lines: [], startPage: page, lastPage: page };
-    current = next;
-    return next;
-  };
+  private open(id: string, page: number, title?: string): void {
+    this.close();
+    this.current = { id, title, lines: [], startPage: page, lastPage: page };
+  }
 
-  const append = (line: string, page: number): void => {
-    if (current === undefined) return;
-    current.lines.push(line);
-    current.lastPage = page;
-  };
+  private append(line: string, page: number): void {
+    if (this.current === undefined) return;
+    this.current.lines.push(line);
+    this.current.lastPage = page;
+  }
 
-  for (const { page, lines } of pages) {
-    if (done) break;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (WITNESS_RE.test(trimmed)) {
-        done = true;
+  private openLetter(letter: string, page: number): void {
+    this.open(`§${this.currentTop}(${letter})`, page);
+    this.currentLetter = letter;
+    this.expectedLetterCode += 1;
+    this.expectedRoman = 1;
+  }
+
+  private decimalClause(trimmed: string, page: number): boolean {
+    const decimal = DECIMAL_CLAUSE_RE.exec(trimmed);
+    if (decimal === null) return false;
+    this.open(`§${decimal[1]}.${decimal[2]}`, page);
+    this.append(trimmed, page);
+    return true;
+  }
+
+  private topHeading(trimmed: string, page: number): boolean {
+    const top = TOP_HEADING_RE.exec(trimmed);
+    if (top === null) return false;
+    const number = Number(top[1]);
+    // The first heading anchors the sequence at whatever number the
+    // document starts with; later headings must continue it (+1).
+    if (number > 20 || (this.expectedTop !== 0 && number !== this.expectedTop)) {
+      return false;
+    }
+    this.open(`§${number}`, page, trimmed.slice(top[0].length - 1));
+    this.expectedTop = number + 1;
+    this.currentTop = number;
+    this.currentLetter = "";
+    this.expectedLetterCode = "a".charCodeAt(0);
+    this.expectedRoman = 1;
+    this.append(trimmed, page);
+    return true;
+  }
+
+  private standaloneLetter(trimmed: string, page: number): boolean {
+    const standalone = STANDALONE_LETTER_RE.exec(trimmed);
+    if (
+      standalone === null ||
+      this.currentTop === 0 ||
+      standalone[1] !== String.fromCharCode(this.expectedLetterCode)
+    ) {
+      return false;
+    }
+    this.openLetter(standalone[1] ?? "", page);
+    return true;
+  }
+
+  private standaloneRoman(trimmed: string, page: number): boolean {
+    const roman = STANDALONE_ROMAN_RE.exec(trimmed);
+    if (
+      roman === null ||
+      this.currentLetter.length === 0 ||
+      ROMAN_VALUES[roman[1] ?? ""] !== this.expectedRoman
+    ) {
+      return false;
+    }
+    this.open(`§${this.currentTop}(${this.currentLetter})(${roman[1]})`, page);
+    this.expectedRoman += 1;
+    return true;
+  }
+
+  // Inline letter markers "(a)" split the line: text before the marker
+  // stays in the current section, the marker opens the next letter section.
+  private inlineLetters(trimmed: string, page: number): boolean {
+    if (this.currentTop === 0) return false;
+    let remainder = trimmed;
+    let handled = false;
+    for (;;) {
+      INLINE_LETTER_RE.lastIndex = 0;
+      const match = INLINE_LETTER_RE.exec(remainder);
+      if (match === null || match[1] !== String.fromCharCode(this.expectedLetterCode)) {
         break;
       }
-      if (trimmed.length === 0 || LONE_NUMBER_RE.test(trimmed)) continue;
+      const before = remainder.slice(0, match.index).trim();
+      if (before.length > 0) this.append(before, page);
+      this.openLetter(match[1] ?? "", page);
+      remainder = remainder.slice(match.index + match[0].length).trim();
+      handled = true;
+    }
+    if (handled && remainder.length > 0) this.append(remainder, page);
+    return handled;
+  }
+}
 
-      const decimal = DECIMAL_CLAUSE_RE.exec(trimmed);
-      if (decimal !== null) {
-        open(`§${decimal[1]}.${decimal[2]}`, page);
-        append(trimmed, page);
-        continue;
-      }
-
-      const top = TOP_HEADING_RE.exec(trimmed);
-      if (top !== null) {
-        const number = Number(top[1]);
-        // The first heading anchors the sequence at whatever number the
-        // document starts with; later headings must continue it (+1).
-        if (number <= 20 && (expectedTop === 0 || number === expectedTop)) {
-          open(`§${number}`, page, trimmed.slice(top[0].length - 1));
-          expectedTop = number + 1;
-          currentTop = number;
-          currentLetter = "";
-          expectedLetterCode = "a".charCodeAt(0);
-          expectedRoman = 1;
-          append(trimmed, page);
-          continue;
-        }
-      }
-
-      const standalone = STANDALONE_LETTER_RE.exec(trimmed);
-      if (
-        standalone !== null &&
-        currentTop > 0 &&
-        standalone[1] === String.fromCharCode(expectedLetterCode)
-      ) {
-        open(`§${currentTop}(${standalone[1]})`, page);
-        currentLetter = standalone[1] ?? "";
-        expectedLetterCode += 1;
-        expectedRoman = 1;
-        continue;
-      }
-
-      const roman = STANDALONE_ROMAN_RE.exec(trimmed);
-      if (
-        roman !== null &&
-        currentLetter.length > 0 &&
-        ROMAN_VALUES[roman[1] ?? ""] === expectedRoman
-      ) {
-        open(`§${currentTop}(${currentLetter})(${roman[1]})`, page);
-        expectedRoman += 1;
-        continue;
-      }
-
-      // Inline letter markers "(a)" split the line: text before the marker
-      // stays in the current section, the marker opens the next letter section.
-      if (currentTop > 0) {
-        let remainder = trimmed;
-        let handled = false;
-        for (;;) {
-          INLINE_LETTER_RE.lastIndex = 0;
-          const match = INLINE_LETTER_RE.exec(remainder);
-          if (
-            match === null ||
-            match[1] !== String.fromCharCode(expectedLetterCode)
-          ) {
-            break;
-          }
-          const before = remainder.slice(0, match.index).trim();
-          if (before.length > 0) append(before, page);
-          const letter = match[1] ?? "";
-          open(`§${currentTop}(${letter})`, page);
-          currentLetter = letter;
-          expectedLetterCode += 1;
-          expectedRoman = 1;
-          remainder = remainder.slice(match.index + match[0].length).trim();
-          handled = true;
-        }
-        if (handled) {
-          if (remainder.length > 0) append(remainder, page);
-          continue;
-        }
-      }
-
-      // Leading text before the first numbered section is the preamble
-      // (recitals, title lines); it becomes a "Recitals" section so citations
-      // can point at it.
-      if (current === undefined) {
-        open("Recitals", page, "Recitals");
-      }
-      append(trimmed, page);
+// Turn extracted page lines into labelled contract sections. Sections end at
+// "IN WITNESS WHEREOF" so signature blocks never become sections, and lone
+// page-number lines are dropped.
+export function extractSections(fileName: string, pages: PdfPageLines[]): ContractSection[] {
+  const sectionizer = new Sectionizer(fileName);
+  for (const { page, lines } of pages) {
+    if (sectionizer.done) break;
+    for (const line of lines) {
+      sectionizer.feed(line, page);
+      if (sectionizer.done) break;
     }
   }
-  close();
-  return sections;
+  return sectionizer.finish();
 }
