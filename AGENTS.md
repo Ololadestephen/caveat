@@ -14,7 +14,7 @@ flow working. Export drafts only.
   evidence may enter the runner. Show citations and route unclear terms to
   human review. Verify current evidence and the exact approved hash on export.
 - Keep speculative workers free of provider secrets and external write authority.
-  Use synthetic fixtures only. Do not execute automatic sending, buying,
+  Use synthetic fixtures only. Do not implement automatic sending, buying,
   signing, or committing anything to an external service.
 - Commit after every working change with a plain message, no AI co-author
   lines, and explicit staged paths. Run relevant tests and inspect the diff
