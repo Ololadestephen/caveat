@@ -39,7 +39,8 @@ describe("callStructuredChat", () => {
     });
     const call = calls[0];
     expect(call?.url).toBe("http://gw.invalid/v1/chat/completions");
-    const body = JSON.parse(String(call?.init?.body)) as Record<string, unknown>;
+    const bodyText = typeof call?.init?.body === "string" ? call.init.body : "";
+    const body = JSON.parse(bodyText) as Record<string, unknown>;
     expect(body).toMatchObject({
       model: "test-model",
       response_format: {
@@ -122,18 +123,18 @@ describe("callStructuredChat", () => {
     const timeout = await callStructuredChat(
       {
         ...CONFIG,
-        fetch: (() => {
+        fetch: () => {
           const e = new Error("aborted");
           e.name = "TimeoutError";
           return Promise.reject(e);
-        }) as typeof fetch,
+        },
       },
       REQUEST,
     );
     expect(timeout).toMatchObject({ ok: false, reason: "timeout" });
 
     const net = await callStructuredChat(
-      { ...CONFIG, fetch: (() => Promise.reject(new Error("dns"))) as typeof fetch },
+      { ...CONFIG, fetch: () => Promise.reject(new Error("dns")) },
       REQUEST,
     );
     expect(net).toMatchObject({ ok: false, reason: "network_error" });
