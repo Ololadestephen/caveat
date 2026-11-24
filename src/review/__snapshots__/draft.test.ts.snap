@@ -1,0 +1,23 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderDraft > renders the full draft from the expected fixtures 1`] = `
+"DRAFT - NOT SENT - NOT LEGAL ADVICE
+Caveat counteroffer notes (caveat-draft/1)
+Run: run-20261124-120000-ab12
+Receipt: sha256 a3106f2fb19db00e368d82c1d69dfb3088c1d3481a29d13e69e5d4265fc478f3
+Prepared from these Box files (text renderings of public SEC EDGAR exhibits):
+- 01-consulting-agreement.pdf (sha256 860043ebb685) https://www.sec.gov/Archives/edgar/data/1855509/000173112226000931/e7774_ex10-1.htm
+- 02-first-amendment.pdf (sha256 b0ebd4e2f98f) https://www.sec.gov/Archives/edgar/data/1855509/000173112226000931/e7774_ex10-1.htm
+- 03-second-amendment.pdf (sha256 a36ff3a50c18) https://www.sec.gov/Archives/edgar/data/1855509/000173112226001331/e8000_ex10-1.htm
+
+Points to raise before relying on the Second Amendment:
+
+1. Escrow is not cash yet. Section 3(b) of the Second Amendment pays compensation for the 6-month period into escrow; the first release to the consultant is $75,000 on January 2, 2027 (Section 3(b)(i)). If the base retainer does not continue, cash first falls below the floor on November 15, 2026 ($8,000) while $150,000 is held in escrow. If the base retainer continues, cash stays at or above the floor; the lowest balance is $20,000 on October 1, 2026.
+   Ask: whether part of the escrowed amount can be released before January 2, 2027.
+2. Base retainer. Please confirm in writing whether the $6,000 per month in Section 1.3 of the Consulting Agreement continues after the Second Amendment. Section 4 of the Second Amendment says: "Except as expressly amended, all terms of the Consulting Agreement remain unchanged and in full force and effect."
+3. Date in Section 3(c) of 03-second-amendment.pdf. It reads "from December 31, 2026 until March 31, 2026". Please confirm the intended end date.
+4. First Amendment payment. The $25,000 due upon execution of the Agreement and Plan of Merger has no stated date in these documents. Please confirm when it was or will be paid.
+
+Cash figures use demo assumptions, not facts about the parties: opening cash $20,000, cash floor $10,000, costs of $6,000 on the 15th of each month from October 2026 to March 2027. Payments due on a weekend are counted on the next business day (runner policy; for example, January 2, 2027 is modeled as January 4, 2027).
+"
+`;

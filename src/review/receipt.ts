@@ -1,7 +1,7 @@
 import type { EvidenceFlag } from "../evidence/flags.ts";
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import type { DecisionOutcome, Excerpt, Question } from "../interpret/types.ts";
-import type { PolicyAdjustment } from "../plan/twinvee.ts";
+import type { PolicyAdjustment, TwinveeAssumptions } from "../plan/twinvee.ts";
 import type { ScenarioResult } from "../runner/types.ts";
 import type { RetainerReview, SourcedOverride } from "./human-review.ts";
 
@@ -49,4 +49,5 @@ export type RunReceipt = {
   humanReview: HumanReviewReceipt;
   flags: EvidenceFlag[];
   readings: ReceiptReading[];
+  assumptions: TwinveeAssumptions;
 };

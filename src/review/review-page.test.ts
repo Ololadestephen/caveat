@@ -250,6 +250,14 @@ const RECEIPT: RunReceipt = {
       ],
     },
   ],
+  assumptions: {
+    note: "Demo assumptions, not facts about the parties",
+    startDate: "2026-10-01",
+    escrowFundingDate: "2026-10-01",
+    openingCents: 2000000,
+    floorCents: 1000000,
+    costs: [{ id: "cost-2026-10", date: "2026-10-15", amountCents: 600000 }],
+  },
 };
 
 describe("renderReviewPage — reviewable run", () => {

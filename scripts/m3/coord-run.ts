@@ -276,6 +276,14 @@ if (review !== undefined && review.baseRetainer.answer !== "unresolved_compare_b
 
 // --- Runner inputs + results ---------------------------------------------------
 started = performance.now();
+let assumptions: TwinveeAssumptions;
+try {
+  assumptions = JSON.parse(
+    await readFile("fixtures/plan/twinvee-demo-assumptions.json", "utf8"),
+  ) as TwinveeAssumptions;
+} catch (error) {
+  stepError("assumptions", error);
+}
 const readings: RunReceipt["readings"] = [];
 const canRun =
   schedule.status === "extracted" &&
@@ -283,13 +291,10 @@ const canRun =
   effectiveAction === "escrow_release";
 if (canRun && schedule.status === "extracted" && review !== undefined) {
   try {
-    const assumptions: unknown = JSON.parse(
-      await readFile("fixtures/plan/twinvee-demo-assumptions.json", "utf8"),
-    );
     const inputs = buildTwinveeInputs({
       schedule: schedule.schedule,
       review,
-      assumptions: assumptions as TwinveeAssumptions,
+      assumptions,
     });
     for (const [id, rawInput] of Object.entries(inputs)) {
       const input = validateRunInput(rawInput);
@@ -354,6 +359,7 @@ const receipt: RunReceipt = {
   humanReview,
   flags,
   readings,
+  assumptions,
 };
 
 await mkdir(outDir, { recursive: true });
