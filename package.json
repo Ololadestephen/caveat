@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "build": "tsc -p tsconfig.build.json",
-    "check": "npm run test && npm run typecheck && npm run lint && npm run build"
+    "check": "npm run test && npm run typecheck && npm run lint && npm run build",
+    "fixture": "node scripts/run-fixture.ts"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -14,6 +14,7 @@ and typed model decisions, with isolated Fly Sprite workers.
 - `npm run lint` — eslint
 - `npm run build` — emit to `dist/`
 - `npm run check` — all of the above
+- `npm run fixture -- fixtures/runner/<name>.json` — run a cash-runner fixture and print the per-scenario summary and digests
 
 ## Milestone-1 proofs (operator machine, sprite CLI authenticated)
 - `./scripts/m1/run-coord-proof.sh` — push + run the coordinator evidence proof
