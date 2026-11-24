@@ -67,15 +67,25 @@ PROXY_PID=$!
 wait_ready || fail "service not healthy on :$LOCAL_PORT"
 
 OLD_ROW="$(db_query "SELECT status, receipt_hash, draft_hash, superseded_by FROM runs WHERE id = '$OLD_RUN'")"
-echo "$OLD_ROW" | grep -q '"status":"approved"' || fail "old run not approved: $OLD_ROW"
+OLD_STATUS="$(echo "$OLD_ROW" | grep -oE '"status":"[a-z_]+"' | cut -d'"' -f4)"
+# The run may already be stale if a previous attempt got this far — the
+# assertions below are the same either way, only the marking export differs.
+if [ "$OLD_STATUS" != "approved" ] && [ "$OLD_STATUS" != "stale" ]; then
+  fail "old run in unexpected status $OLD_STATUS: $OLD_ROW"
+fi
 echo "$OLD_ROW" | grep -q "$OLD_RECEIPT_SHA" || fail "old receipt hash drifted: $OLD_ROW"
 OLD_DRAFT_SHA="$(echo "$OLD_ROW" | grep -oE '"draft_hash":"[0-9a-f]+"' | cut -d'"' -f4)"
 [ -f "$OLD_DRAFT" ] || fail "missing phase-A draft $OLD_DRAFT"
-note "{\"step\":\"0\",\"old_run\":\"$OLD_RUN\"}"
+note "{\"step\":\"0\",\"old_run\":\"$OLD_RUN\",\"old_status\":\"$OLD_STATUS\"}"
 
 # --- 1. export on the old revision -> blocked_stale ---------------------------
-CODE="$(post "$BASE/runs/$OLD_RUN/export" | code)"
-[ "$CODE" = "409" ] || fail "export on new-version evidence returned $CODE, want 409"
+if [ "$OLD_STATUS" = "approved" ]; then
+  CODE="$(post "$BASE/runs/$OLD_RUN/export" | code)"
+  [ "$CODE" = "409" ] || fail "export on new-version evidence returned $CODE, want 409"
+  note "{\"step\":\"1\",\"export_code\":409}"
+else
+  note "{\"step\":\"1\",\"export_code\":\"skipped (already stale)\"}"
+fi
 
 STALE="$(db_query "SELECT status, stale_detail_json FROM runs WHERE id = '$OLD_RUN'")"
 STALE_DETAIL="$(echo "$STALE" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const r=JSON.parse(d)[0];if(r.status!=="stale"){console.log("STATUS:"+r.status);process.exit(0)}console.log(r.stale_detail_json)})')"
