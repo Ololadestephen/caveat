@@ -122,26 +122,36 @@ function sameOrigin(req: IncomingMessage): boolean {
   }
 }
 
-function kickRun(ctx: Ctx, runId: string): void {
-  const { db, deps, pipeline, holdTask } = ctx;
-  const hold = holdTask(`caveat-run-${runId}`);
+// A once-only run finisher: the pipeline result, a thrown error and the
+// timeout all race here — the first call wins and releases the task hold.
+function makeFinisher(
+  ctx: Ctx,
+  runId: string,
+  hold: { stop: () => void },
+): (
+  status: "reviewable" | "needs_review" | "failed",
+  reason: string | null,
+  fields?: Parameters<typeof finishRun>[4],
+) => void {
   let settled = false;
-  const finish = (
-    status: "reviewable" | "needs_review" | "failed",
-    reason: string | null,
-    fields?: Parameters<typeof finishRun>[4],
-  ) => {
+  return (status, reason, fields) => {
     if (settled) return;
     settled = true;
     try {
-      const run = getRun(db, runId);
+      const run = getRun(ctx.db, runId);
       if (run === undefined || run.status !== "running") return;
-      finishRun(db, runId, status, reason, fields);
-      if (status === "reviewable" || status === "needs_review") supersedeOthers(db, runId);
+      finishRun(ctx.db, runId, status, reason, fields);
+      if (status === "reviewable" || status === "needs_review") supersedeOthers(ctx.db, runId);
     } finally {
       hold.stop();
     }
   };
+}
+
+function kickRun(ctx: Ctx, runId: string): void {
+  const { deps, pipeline, holdTask } = ctx;
+  const hold = holdTask(`caveat-run-${runId}`);
+  const finish = makeFinisher(ctx, runId, hold);
   const work = (async () => {
     const { receipt, sourceTuple } = await pipeline({
       runId,

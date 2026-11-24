@@ -56,22 +56,32 @@ ${rows}
 </table>`);
 }
 
+type StaleChange = {
+  fileName: string;
+  kind: string;
+  oldVersionTag?: string;
+  newVersionTag?: string;
+  oldSha12?: string;
+  newSha12?: string;
+};
+
+function renderStaleChange(c: StaleChange): string {
+  const versions =
+    c.oldVersionTag !== undefined || c.newVersionTag !== undefined
+      ? ` (version ${escapeHtml(c.oldVersionTag ?? "—")} → ${escapeHtml(c.newVersionTag ?? "—")})`
+      : "";
+  const hashes =
+    c.oldSha12 !== c.newSha12
+      ? ` (sha ${escapeHtml(c.oldSha12 ?? "—")} → ${escapeHtml(c.newSha12 ?? "—")})`
+      : "";
+  return `<li>${escapeHtml(c.fileName)}: ${escapeHtml(c.kind)}${versions}${hashes}</li>`;
+}
+
 function renderStaleBanner(run: RunRow): string {
   let changes: string[] = [];
   if (run.stale_detail_json !== null) {
     try {
-      const parsed = JSON.parse(run.stale_detail_json) as {
-        fileName: string;
-        kind: string;
-        oldVersionTag?: string;
-        newVersionTag?: string;
-        oldSha12?: string;
-        newSha12?: string;
-      }[];
-      changes = parsed.map(
-        (c) =>
-          `<li>${escapeHtml(c.fileName)}: ${escapeHtml(c.kind)}${c.oldVersionTag !== undefined || c.newVersionTag !== undefined ? ` (version ${escapeHtml(c.oldVersionTag ?? "—")} → ${escapeHtml(c.newVersionTag ?? "—")})` : ""}${c.oldSha12 !== c.newSha12 ? ` (sha ${escapeHtml(c.oldSha12 ?? "—")} → ${escapeHtml(c.newSha12 ?? "—")})` : ""}</li>`,
-      );
+      changes = (JSON.parse(run.stale_detail_json) as StaleChange[]).map(renderStaleChange);
     } catch {
       changes = [];
     }
