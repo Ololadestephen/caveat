@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RunReceipt } from "./receipt.ts";
-import { renderReviewPage } from "./review-page.ts";
+import { renderReviewBody, renderReviewPage } from "./review-page.ts";
 import { fixtureReceipt } from "./fixture-receipt.ts";
 
 const DECIDED_OUTCOME = {
@@ -558,5 +558,58 @@ describe("renderReviewPage — counteroffer search", () => {
     const v1 = renderReviewPage(RECEIPT);
     expect(v1).not.toContain("Counteroffer search");
     expect(v1).not.toContain("Model's note");
+  });
+});
+
+describe("renderReviewPage — What changed in Box", () => {
+  it("renders the incremental section when present and omits it otherwise", () => {
+    const incremental = {
+      previousRunId: "run-prev",
+      mode: "incremental" as const,
+      changedFiles: [
+        {
+          fileName: "03-second-amendment.pdf",
+          fromVersionTag: "aaa111",
+          toVersionTag: "bbb222",
+          contentChanged: true,
+        },
+      ],
+      changedSections: {
+        added: [] as string[],
+        removed: [] as string[],
+        changed: ["03-second-amendment.pdf#§3"],
+      },
+      totalSections: 12,
+      reran: ["release_timing", "escrow_schedule"],
+      carriedForward: ["counteroffer_search"],
+    };
+    const receipt: RunReceipt = {
+      ...RECEIPT,
+      trigger: "watcher",
+      incremental,
+      counteroffer: {
+        status: "found",
+        stopReason: "model_done",
+        model: "m",
+        rounds: [],
+        best: null,
+        humanReview: [],
+        carriedFrom: "run-prev",
+        reverifiedOn: "caveat-wa",
+      },
+    };
+    const html = renderReviewBody(receipt);
+    expect(html).toContain("What changed in Box");
+    expect(html).toContain("aaa111");
+    expect(html).toContain("bbb222");
+    expect(html).toContain("bytes changed");
+    expect(html).toContain("Clauses changed: 1 of 12");
+    expect(html).toContain("03-second-amendment.pdf#§3");
+    expect(html).toContain("Re-asked the model: release timing, escrow schedule");
+    expect(html).toContain("carried forward from run-prev");
+    expect(html).toContain("best candidate re-verified on caveat-wa");
+
+    // Old receipts (no incremental) never show the section.
+    expect(renderReviewBody(RECEIPT)).not.toContain("What changed in Box");
   });
 });

@@ -90,6 +90,67 @@ function sectionName(excerpts: readonly Excerpt[], excerptId: string): string {
   return `${escapeHtml(fileName)}${sectionPart}, page ${page}`;
 }
 
+const INCREMENTAL_LABELS: Record<string, string> = {
+  release_timing: "release timing",
+  escrow_schedule: "escrow schedule",
+  counteroffer_search: "counteroffer search",
+};
+
+// The "What changed in Box" section — only on runs that were based on a
+// previous run (the watcher's incremental reruns).
+function renderIncremental(receipt: RunReceipt): string {
+  const inc = receipt.incremental;
+  if (inc === undefined) return "";
+
+  const files =
+    inc.changedFiles.length === 0
+      ? "<p>No file-level changes.</p>"
+      : `<ul>${inc.changedFiles
+          .map((f) => {
+            const bytes = f.contentChanged ? "bytes changed" : "bytes unchanged";
+            return `<li>${escapeHtml(f.fileName)}: version ${escapeHtml(f.fromVersionTag ?? "—")} → ${escapeHtml(f.toVersionTag ?? "—")} (${bytes})</li>`;
+          })
+          .join("")}</ul>`;
+
+  const sectionIds = [
+    ...inc.changedSections.changed,
+    ...inc.changedSections.added,
+    ...inc.changedSections.removed,
+  ];
+  const clauses =
+    sectionIds.length === 0
+      ? `Clauses changed: 0 of ${inc.totalSections}`
+      : `Clauses changed: ${sectionIds.length} of ${inc.totalSections} — ${sectionIds
+          .map((id) => escapeHtml(id))
+          .join(", ")}`;
+
+  const label = (id: string): string => INCREMENTAL_LABELS[id] ?? id;
+  const reran =
+    inc.reran.length === 0
+      ? "none"
+      : inc.reran.map((id) => escapeHtml(label(id))).join(", ");
+  const carried =
+    inc.carriedForward.length === 0
+      ? `nothing carried forward from ${escapeHtml(inc.previousRunId)}`
+      : `carried forward from ${escapeHtml(inc.previousRunId)}: ${inc.carriedForward
+          .map((id) => escapeHtml(label(id)))
+          .join(", ")}`;
+  const reverify =
+    receipt.counteroffer?.reverifiedOn !== undefined
+      ? `; best candidate re-verified on ${escapeHtml(receipt.counteroffer.reverifiedOn)}`
+      : "";
+
+  return `<section class="incremental">
+  <h2>What changed in Box</h2>
+  <p>Compared to ${escapeHtml(inc.previousRunId)}${
+    inc.mode === "full_no_baseline" ? " (full run — that run had no digests to compare)" : ""
+  }.</p>
+  ${files}
+  <p>${clauses}.</p>
+  <p>Re-asked the model: ${reran}. ${carried}${reverify}.</p>
+</section>`;
+}
+
 function renderSources(receipt: RunReceipt): string {
   const items = receipt.sources
     .map((s) => {
@@ -487,6 +548,7 @@ export function renderReviewBody(receipt: RunReceipt): string {
 <p>Run <code>${escapeHtml(receipt.runId)}</code>. Questions: ${receipt.questionIds.map((q) => escapeHtml(q)).join(", ")}.</p>
 ${banner}
 ${renderHeadline(receipt)}
+${renderIncremental(receipt)}
 ${renderSources(receipt)}
 ${renderReleaseTiming(receipt)}
 ${renderSchedule(receipt)}

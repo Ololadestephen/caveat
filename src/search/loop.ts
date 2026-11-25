@@ -65,6 +65,11 @@ export type CounterofferReceipt = {
   rounds: SearchRound[];
   best: string | null;
   humanReview: string[];
+  // Set when the whole search outcome was reused verbatim from an earlier run
+  // (the best candidate was re-verified on a worker, not re-searched).
+  carriedFrom?: string;
+  // The worker a carried "found" outcome was re-verified on.
+  reverifiedOn?: string;
 };
 
 export type SearchReading = {
@@ -473,4 +478,123 @@ export async function runCounterofferSearch(args: SearchArgs): Promise<Counterof
     rounds,
     best: best?.id ?? null,
   });
+}
+
+// The digest that decides whether a previous run's counteroffer outcome can be
+// carried forward: everything that determines the search's inputs.
+export function counterofferCallDigest(args: {
+  base: SearchBase;
+  readings: SearchReading[];
+  model: string;
+}): string {
+  return digestValue({
+    base: args.base,
+    inputs: args.readings.map((r) => ({ id: r.id, input: r.rawInput })),
+    model: args.model,
+    systemPrompt: COUNTEROFFER_SYSTEM_PROMPT,
+    schema: PROPOSAL_SCHEMA,
+  });
+}
+
+// Re-verifies a carried-forward best candidate: recompile the same lever, run
+// it once on the first worker for both readings, and require the worker's
+// result digests to match the previous run's records.
+export async function reverifyBestCandidate(args: {
+  base: SearchBase;
+  readings: SearchReading[];
+  record: SearchCandidateRecord;
+  pool: WorkerPool;
+}): Promise<
+  | { ok: true; worker: string }
+  | { ok: false; reason: "carried_search_mismatch" | "workers_unavailable"; detail: string }
+> {
+  const { base, readings, record, pool } = args;
+  const worker = pool.workers[0];
+  if (worker === undefined) {
+    return {
+      ok: false,
+      reason: "workers_unavailable",
+      detail: "the worker pool has no workers",
+    };
+  }
+  const compiled = compileCandidate(base, {
+    lever: record.lever,
+    amount_cents: record.params.amount_cents,
+    date: record.params.date,
+    split_count: record.params.split_count,
+    net_days: record.params.net_days,
+    rationale: record.rationale,
+  });
+  if (!compiled.ok) {
+    return {
+      ok: false,
+      reason: "carried_search_mismatch",
+      detail: `carried candidate ${record.id} no longer compiles: ${compiled.detail}`,
+    };
+  }
+  const escrowIds = new Set(base.rules.map((r) => r.id));
+  const jobs: WorkerJob[] = readings.map((reading) => {
+    const asSigned = reading.rawInput.candidates[0];
+    const nonEscrow = (asSigned?.paymentRules ?? []).filter((r) => !escrowIds.has(r.id));
+    return {
+      jobId: `${record.id}@${reading.id}`,
+      input: {
+        ...reading.rawInput,
+        candidates: [
+          {
+            id: record.id,
+            rankCents: compiled.rankCents,
+            totalCents: asSigned?.totalCents ?? 0,
+            paymentRules: [...compiled.escrowRules, ...nonEscrow],
+          },
+        ],
+      },
+    };
+  });
+  const localDigests = new Map(jobs.map((j) => [j.jobId, digestValue(j.input)]));
+  let results: WorkerJobResult[];
+  try {
+    results = await pool.runBatch(worker, jobs);
+  } catch (error) {
+    if (error instanceof WorkerUnavailableError) {
+      return { ok: false, reason: "workers_unavailable", detail: error.message };
+    }
+    throw error;
+  }
+  for (const reading of readings) {
+    const jobId = `${record.id}@${reading.id}`;
+    const result = results.find((r) => r.jobId === jobId);
+    if (result === undefined) {
+      return {
+        ok: false,
+        reason: "workers_unavailable",
+        detail: `worker returned no result for ${jobId}`,
+      };
+    }
+    if (!result.ok) {
+      return {
+        ok: false,
+        reason: "carried_search_mismatch",
+        detail: `carried candidate ${record.id} rejected by the runner on ${reading.id}: ${result.message}`,
+      };
+    }
+    if (
+      result.output.runnerVersion !== RUNNER_VERSION ||
+      result.output.inputDigest !== localDigests.get(jobId)
+    ) {
+      return {
+        ok: false,
+        reason: "carried_search_mismatch",
+        detail: `worker output for ${jobId} does not match the coordinator's input digest`,
+      };
+    }
+    if (result.output.resultDigest !== record.resultDigests?.[reading.id]) {
+      return {
+        ok: false,
+        reason: "carried_search_mismatch",
+        detail: `result digest for ${jobId} differs from the carried record`,
+      };
+    }
+  }
+  return { ok: true, worker };
 }

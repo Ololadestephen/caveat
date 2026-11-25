@@ -96,6 +96,8 @@ export type ScheduleOutcome =
       modelVersion?: string;
       servedBy?: string;
       latencyMs: number;
+      // Set when this outcome was reused verbatim from an earlier run.
+      carriedFrom?: string;
     }
   | NeedsReviewOutcome;
 

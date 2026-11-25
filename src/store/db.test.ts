@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
   approveRun,
@@ -10,10 +11,12 @@ import {
   getRun,
   listExports,
   listRuns,
+  listWatchEvents,
   markStale,
   newRunId,
   openDb,
   recordExport,
+  recordWatchEvent,
   supersedeOthers,
 } from "./db.ts";
 
@@ -192,5 +195,136 @@ describe("durability invariants", () => {
 describe("newRunId", () => {
   it("has the run-YYYYMMDD-HHMMSS-xxxx shape", () => {
     expect(newRunId(new Date("2026-11-24T13:45:06Z"))).toMatch(/^run-20261124-134506-[0-9a-f]{4}$/);
+  });
+});
+
+describe("migration to v3", () => {
+  it("upgrades a v2 database in place and keeps the immutability triggers", () => {
+    const dir = mkdtempSync(join(tmpdir(), "caveat-db-"));
+    try {
+      const path = join(dir, "caveat.db");
+      // The schema exactly as it existed at version 2 — no trigger column, no
+      // watch_events table.
+      const legacy = new DatabaseSync(path);
+      legacy.exec(`
+        CREATE TABLE runs (
+          id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          status TEXT NOT NULL,
+          status_reason TEXT,
+          source_tuple_json TEXT NOT NULL,
+          receipt_json TEXT NOT NULL,
+          receipt_hash TEXT NOT NULL,
+          draft_text TEXT NOT NULL,
+          draft_hash TEXT NOT NULL,
+          superseded_by TEXT,
+          stale_detail_json TEXT
+        );
+        CREATE TABLE approvals (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+          receipt_hash TEXT NOT NULL,
+          draft_hash TEXT NOT NULL,
+          approved_by TEXT NOT NULL,
+          approved_at TEXT NOT NULL
+        );
+        CREATE TABLE exports (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          approval_id TEXT NOT NULL,
+          at TEXT NOT NULL,
+          result TEXT NOT NULL CHECK(result IN ('exported','blocked_stale','blocked_unavailable')),
+          detail_json TEXT,
+          draft_hash TEXT NOT NULL
+        );
+        CREATE TRIGGER runs_immutable
+          BEFORE UPDATE OF receipt_json, receipt_hash, draft_text, draft_hash ON runs
+          WHEN OLD.status <> 'running'
+          BEGIN
+            SELECT RAISE(ABORT, 'runs receipt fields are immutable');
+          END;
+        CREATE TRIGGER runs_no_reopen
+          BEFORE UPDATE OF status ON runs
+          WHEN NEW.status = 'running' AND OLD.status <> 'running'
+          BEGIN
+            SELECT RAISE(ABORT, 'a finished run cannot return to running');
+          END;
+        PRAGMA user_version = 2;
+      `);
+      legacy
+        .prepare(
+          `INSERT INTO runs (id, created_at, status, source_tuple_json, receipt_json,
+             receipt_hash, draft_text, draft_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "run-approved",
+          "2026-11-24T10:00:00Z",
+          "approved",
+          "[]",
+          '{"receiptVersion":"caveat-receipt/2"}',
+          "rhash",
+          "draft",
+          "dhash",
+        );
+      legacy
+        .prepare(
+          `INSERT INTO runs (id, created_at, status, source_tuple_json, receipt_json,
+             receipt_hash, draft_text, draft_hash, stale_detail_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "run-stale",
+          "2026-11-24T09:00:00Z",
+          "stale",
+          "[]",
+          '{"receiptVersion":"caveat-receipt/2"}',
+          "rhash2",
+          "draft2",
+          "dhash2",
+          '[{"fileName":"f","kind":"version_changed"}]',
+        );
+      legacy.close();
+
+      const db = openDb(path);
+      // Pre-migration rows are treated as manual; their statuses survive.
+      const approved = getRun(db, "run-approved");
+      expect(approved?.status).toBe("approved");
+      expect(approved?.trigger).toBe("manual");
+      expect(getRun(db, "run-stale")?.status).toBe("stale");
+
+      // Watcher runs and events can now be written.
+      createRun(db, {
+        id: "run-watched",
+        createdAt: "2026-11-25T00:00:00Z",
+        sourceTupleJson: "[]",
+        receiptJson: "{}",
+        receiptHash: "",
+        draftText: "",
+        draftHash: "",
+        trigger: "watcher",
+      });
+      expect(getRun(db, "run-watched")?.trigger).toBe("watcher");
+      recordWatchEvent(db, {
+        id: "watch-1",
+        at: "2026-11-25T00:00:01Z",
+        result: "changed",
+        detailJson: '{"changes":[]}',
+      });
+      const events = listWatchEvents(db, 5);
+      expect(events).toHaveLength(1);
+      expect(events[0]?.result).toBe("changed");
+
+      // Immutability still holds on the upgraded schema.
+      expect(() =>
+        db.prepare("UPDATE runs SET receipt_json = '{}' WHERE id = ?").run("run-approved"),
+      ).toThrow(/immutable/);
+      expect(() =>
+        db.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run("run-approved"),
+      ).toThrow(/cannot return to running/);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

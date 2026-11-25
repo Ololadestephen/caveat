@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 
@@ -10,9 +11,15 @@ import { detectFlags } from "../evidence/flags.ts";
 import { extractPdfLines } from "../evidence/pdf-text.ts";
 import { extractSections } from "../evidence/sections.ts";
 import type { ContractSection } from "../evidence/sections.ts";
+import { versionTag } from "../evidence/recheck.ts";
 import type { SourceTuple } from "../evidence/recheck.ts";
+import { DECISION_SYSTEM_PROMPT } from "../interpret/prompt.ts";
 import { OpenRouterDecisionProvider } from "../interpret/openrouter.ts";
-import { OpenRouterScheduleExtractor } from "../interpret/schedule.ts";
+import { decisionSchema } from "../interpret/schema.ts";
+import {
+  OpenRouterScheduleExtractor,
+  SCHEDULE_JSON_SCHEMA,
+} from "../interpret/schedule.ts";
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import { RELEASE_TIMING } from "../interpret/types.ts";
 import type { DecisionOutcome, Excerpt, Question } from "../interpret/types.ts";
@@ -24,7 +31,7 @@ import {
 } from "../plan/twinvee.ts";
 import type { TwinveeAssumptions } from "../plan/twinvee.ts";
 import { RECEIPT_VERSION } from "../review/receipt.ts";
-import type { RunReceipt } from "../review/receipt.ts";
+import type { IncrementalInfo, RunReceipt } from "../review/receipt.ts";
 import {
   validateRetainerReview,
   validateSourcedOverride,
@@ -33,13 +40,23 @@ import type {
   RetainerReview,
   SourcedOverride,
 } from "../review/human-review.ts";
+import { digestValue } from "../runner/digest.ts";
 import { runFixture } from "../runner/run.ts";
 import { validateRunInput } from "../runner/validate.ts";
 import { chatConfig } from "../interpret/chat.ts";
 import type { callStructuredChat } from "../interpret/chat.ts";
 import { buildSearchBase } from "../search/levers.ts";
-import { runCounterofferSearch } from "../search/loop.ts";
-import type { CounterofferReceipt, SearchReading } from "../search/loop.ts";
+import type { SearchBase } from "../search/levers.ts";
+import {
+  counterofferCallDigest,
+  reverifyBestCandidate,
+  runCounterofferSearch,
+} from "../search/loop.ts";
+import type {
+  CounterofferReceipt,
+  SearchCandidateRecord,
+  SearchReading,
+} from "../search/loop.ts";
 import { SpritesExecPool } from "../worker/pool.ts";
 import type { WorkerPool } from "../worker/pool.ts";
 
@@ -88,6 +105,10 @@ export type PipelineConfig = {
   workersConnector?: string;
   workers?: string;
   chat?: typeof callStructuredChat;
+  trigger?: "manual" | "watcher";
+  // The run this one is based on. When its receipt carries digests, matching
+  // typed calls reuse the previous outcomes instead of re-asking the model.
+  previous?: { runId: string; receipt: RunReceipt; sourceTuple: SourceTuple };
 };
 
 export type PipelineResult = {
@@ -397,18 +418,14 @@ async function runReadings(
   return { readings, inputs, reasons };
 }
 
-// Runs the counteroffer search after clean readings. Any model/worker failure
-// comes back as a needs_review receipt and blocks the run — nothing throws
-// here unless the stage itself breaks, which also blocks.
-async function runSearchStage(
+// The deterministic search inputs — built before deciding whether to carry a
+// previous outcome, since the digest covers exactly these.
+function prepareSearch(
   schedule: Extract<ScheduleOutcome, { status: "extracted" }>,
   inputs: Record<string, Record<string, unknown>>,
   readings: RunReceipt["readings"],
   assumptions: TwinveeAssumptions,
-  connectors: Connectors,
-  model: string,
-  config: PipelineConfig,
-): Promise<CounterofferReceipt> {
+): { base: SearchBase; searchReadings: SearchReading[] } {
   const base = buildSearchBase(
     schedule.schedule,
     escrowRules(schedule.schedule, assumptions.escrowFundingDate),
@@ -420,31 +437,64 @@ async function runSearchStage(
     rawInput: inputs[r.id] as SearchReading["rawInput"],
     asSignedResults: r.results.as_signed ?? {},
   }));
-  let pool = config.workerPool;
-  if (pool === undefined) {
-    if (connectors.workersConn === undefined) {
-      return {
-        status: "needs_review",
-        stopReason: "worker_error",
-        reason: "workers_unavailable",
-        detail: "the workers connector is not configured on the gateway",
+  return { base, searchReadings };
+}
+
+function workersUnavailableReceipt(model: string, detail: string): CounterofferReceipt {
+  return {
+    status: "needs_review",
+    stopReason: "worker_error",
+    reason: "workers_unavailable",
+    detail,
+    model,
+    rounds: [],
+    best: null,
+    humanReview: [],
+  };
+}
+
+// The worker pool: injected in tests, otherwise the gateway's custom-API
+// connector exec-ing run-batch on the worker Sprites.
+function resolvePool(
+  connectors: Connectors,
+  model: string,
+  config: PipelineConfig,
+): { ok: true; pool: WorkerPool } | { ok: false; receipt: CounterofferReceipt } {
+  if (config.workerPool !== undefined) return { ok: true, pool: config.workerPool };
+  if (connectors.workersConn === undefined) {
+    return {
+      ok: false,
+      receipt: workersUnavailableReceipt(
         model,
-        rounds: [],
-        best: null,
-        humanReview: [],
-      };
-    }
-    const workerNames = (
-      config.workers ?? readEnv("CAVEAT_WORKERS") ?? DEFAULT_WORKERS
-    )
-      .split(",")
-      .map((name) => name.trim())
-      .filter((name) => name.length > 0);
-    pool = new SpritesExecPool({
+        "the workers connector is not configured on the gateway",
+      ),
+    };
+  }
+  const workerNames = (config.workers ?? readEnv("CAVEAT_WORKERS") ?? DEFAULT_WORKERS)
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  return {
+    ok: true,
+    pool: new SpritesExecPool({
       gatewayBaseUrl: connectors.workersConn.gatewayBaseUrl,
       workers: workerNames,
-    });
-  }
+    }),
+  };
+}
+
+// Runs the counteroffer search after clean readings. Any model/worker failure
+// comes back as a needs_review receipt and blocks the run — nothing throws
+// here unless the stage itself breaks, which also blocks.
+async function runSearchStage(
+  schedule: Extract<ScheduleOutcome, { status: "extracted" }>,
+  prepared: { base: SearchBase; searchReadings: SearchReading[] },
+  connectors: Connectors,
+  model: string,
+  config: PipelineConfig,
+): Promise<CounterofferReceipt> {
+  const resolved = resolvePool(connectors, model, config);
+  if (!resolved.ok) return resolved.receipt;
   const conditionalReleases = schedule.schedule.releases
     .filter((r) => r.extensionId !== undefined)
     .map((r) => ({
@@ -454,14 +504,118 @@ async function runSearchStage(
       extensionId: r.extensionId as string,
     }));
   return runCounterofferSearch({
-    base,
-    readings: searchReadings,
+    base: prepared.base,
+    readings: prepared.searchReadings,
     model,
     chatConfig: chatConfig(connectors.openrouterConn.gatewayBaseUrl, SEARCH_TIMEOUT_MS, undefined, fetch),
-    pool,
+    pool: resolved.pool,
     ...(config.chat !== undefined ? { chat: config.chat } : {}),
     conditionalReleases,
   });
+}
+
+// Carries a previous search outcome forward. A "found" search still re-verifies
+// its best candidate on the first worker: the runner numbers must reproduce
+// exactly, otherwise the run goes to needs_review.
+async function carrySearch(
+  previous: { runId: string; receipt: RunReceipt },
+  prevSearch: CounterofferReceipt,
+  prepared: { base: SearchBase; searchReadings: SearchReading[] },
+  connectors: Connectors,
+  model: string,
+  config: PipelineConfig,
+): Promise<{ receipt: CounterofferReceipt; carried: boolean }> {
+  const carried: CounterofferReceipt = { ...prevSearch, carriedFrom: previous.runId };
+  if (prevSearch.status !== "found") return { receipt: carried, carried: true };
+  const best = prevSearch.rounds
+    .flatMap((r) => r.candidates)
+    .find((c): c is SearchCandidateRecord => c.id === prevSearch.best);
+  if (best === undefined) {
+    return {
+      receipt: {
+        ...carried,
+        status: "needs_review",
+        stopReason: "worker_error",
+        reason: "carried_search_mismatch",
+        detail: `carried search names best candidate ${prevSearch.best ?? "none"} but no such record exists`,
+      },
+      carried: false,
+    };
+  }
+  const resolved = resolvePool(connectors, model, config);
+  if (!resolved.ok) return { receipt: resolved.receipt, carried: false };
+  const verified = await reverifyBestCandidate({
+    base: prepared.base,
+    readings: prepared.searchReadings,
+    record: best,
+    pool: resolved.pool,
+  });
+  if (!verified.ok) {
+    return {
+      receipt: {
+        ...carried,
+        status: "needs_review",
+        stopReason: "worker_error",
+        reason: verified.reason,
+        detail: verified.detail,
+      },
+      carried: false,
+    };
+  }
+  carried.reverifiedOn = verified.worker;
+  return { receipt: carried, carried: true };
+}
+
+// File-level diff between two source tuples for the incremental receipt.
+function diffFiles(
+  previous: SourceTuple,
+  next: SourceTuple,
+): IncrementalInfo["changedFiles"] {
+  const changed: IncrementalInfo["changedFiles"] = [];
+  const nextByName = new Map(next.map((f) => [f.fileName, f]));
+  for (const old of previous) {
+    const now = nextByName.get(old.fileName);
+    nextByName.delete(old.fileName);
+    const fromTag = versionTag(old);
+    const toTag = now === undefined ? null : versionTag(now);
+    if (now === undefined || toTag !== fromTag || now.sha256 !== old.sha256) {
+      changed.push({
+        fileName: old.fileName,
+        fromVersionTag: fromTag,
+        toVersionTag: toTag,
+        contentChanged: now === undefined || now.sha256 !== old.sha256,
+      });
+    }
+  }
+  for (const added of nextByName.values()) {
+    changed.push({
+      fileName: added.fileName,
+      fromVersionTag: null,
+      toVersionTag: versionTag(added),
+      contentChanged: true,
+    });
+  }
+  return changed;
+}
+
+function diffSectionDigests(
+  previous: Record<string, string>,
+  next: Record<string, string>,
+): IncrementalInfo["changedSections"] {
+  const added: string[] = [];
+  const removed: string[] = [];
+  const changed: string[] = [];
+  for (const id of Object.keys(next)) {
+    if (!(id in previous)) added.push(id);
+    else if (previous[id] !== next[id]) changed.push(id);
+  }
+  for (const id of Object.keys(previous)) {
+    if (!(id in next)) removed.push(id);
+  }
+  added.sort();
+  removed.sort();
+  changed.sort();
+  return { added, removed, changed };
 }
 
 async function loadAssumptions(fixturesDir: string): Promise<TwinveeAssumptions> {
@@ -493,6 +647,15 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   const { sections, excerpts } = await sectionize(fetched, config.pdfText ?? extractPdfLines, timer);
   timer.record("sections");
 
+  // sha256 of each section's text, keyed by its excerpt id — the clause-level
+  // diff baseline the next incremental run compares against.
+  const sectionDigests: Record<string, string> = {};
+  for (const section of sections) {
+    sectionDigests[`${section.fileName}#${section.sectionId}`] = createHash("sha256")
+      .update(section.text)
+      .digest("hex");
+  }
+
   const model = config.decisionModel ?? DEFAULT_MODEL;
   const operativeFile = config.operativeFile ?? "03-second-amendment.pdf";
   const decisionExcerpts = excerpts.filter((e) => e.source.fileName === operativeFile);
@@ -505,25 +668,80 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     excerpts: decisionExcerpts,
   };
 
+  // Digests of exactly what determines each typed call; a matching digest in
+  // the previous run's receipt means its outcome can be reused verbatim.
+  const excerptDigestInputs = decisionExcerpts.map((e) => ({ id: e.id, text: e.text }));
+  const decisionCallDigest = digestValue({
+    schemaName: `${question.spec.id}_decision`,
+    schema: decisionSchema(question.spec.actions),
+    systemPrompt: DECISION_SYSTEM_PROMPT,
+    model,
+    questionId: question.id,
+    excerpts: excerptDigestInputs,
+  });
+  const scheduleCallDigest = digestValue({
+    schemaName: "schedule_extraction",
+    schema: SCHEDULE_JSON_SCHEMA,
+    systemPrompt: DECISION_SYSTEM_PROMPT,
+    model,
+    questionId: "escrow_schedule",
+    excerpts: excerptDigestInputs,
+  });
+  const previous = config.previous;
+  const prevDigests = previous?.receipt.typedCallDigests;
+  // Only a run whose own receipt passed every gate may lend its answers; a
+  // blocked answer is always re-asked, never carried.
+  const baselineOk =
+    previous !== undefined &&
+    previous.receipt.status === "reviewable" &&
+    previous.receipt.sectionDigests !== undefined &&
+    prevDigests !== undefined;
+  const reran: string[] = [];
+  const carriedForward: string[] = [];
+
   // --- Typed decision -------------------------------------------------------------
   timer.begin();
-  const provider = new OpenRouterDecisionProvider({
-    gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
-    model,
-  });
-  const decision: DecisionOutcome = await provider.decide(question);
+  const prevDecision = previous?.receipt.releaseTiming?.outcome;
+  let decision: DecisionOutcome;
+  if (
+    baselineOk &&
+    prevDigests.release_timing === decisionCallDigest &&
+    prevDecision?.status === "decided"
+  ) {
+    decision = { ...prevDecision, carriedFrom: previous.runId };
+    carriedForward.push("release_timing");
+  } else {
+    const provider = new OpenRouterDecisionProvider({
+      gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
+      model,
+    });
+    decision = await provider.decide(question);
+    reran.push("release_timing");
+  }
   timer.record("release_timing");
 
   // --- Typed extraction --------------------------------------------------------------
   timer.begin();
-  const extractor = new OpenRouterScheduleExtractor({
-    gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
-    model,
-  });
-  const schedule: ScheduleOutcome = await extractor.extract({
-    id: "escrow_schedule",
-    excerpts: decisionExcerpts,
-  });
+  const prevSchedule = previous?.receipt.schedule?.outcome;
+  let schedule: ScheduleOutcome;
+  if (
+    baselineOk &&
+    prevDigests.escrow_schedule === scheduleCallDigest &&
+    prevSchedule?.status === "extracted"
+  ) {
+    schedule = { ...prevSchedule, carriedFrom: previous.runId };
+    carriedForward.push("escrow_schedule");
+  } else {
+    const extractor = new OpenRouterScheduleExtractor({
+      gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
+      model,
+    });
+    schedule = await extractor.extract({
+      id: "escrow_schedule",
+      excerpts: decisionExcerpts,
+    });
+    reran.push("escrow_schedule");
+  }
   timer.record("schedule");
 
   // --- Flags --------------------------------------------------------------------------
@@ -557,23 +775,53 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   timer.record("runner");
 
   // --- Counteroffer search -----------------------------------------------------
+  // The digest covers the compiled base + both readings' raw runner inputs, so
+  // it is computed whenever those exist — even when an earlier blocker means
+  // the search itself cannot run.
+  const prepared =
+    readings.length > 0 && schedule.status === "extracted"
+      ? prepareSearch(schedule, inputs, readings, assumptions)
+      : undefined;
+  const searchCallDigest =
+    prepared === undefined
+      ? "none"
+      : counterofferCallDigest({
+          base: prepared.base,
+          readings: prepared.searchReadings,
+          model,
+        });
   let counteroffer: CounterofferReceipt | undefined;
   if (
     blockedReasons.length === 0 &&
-    readings.length > 0 &&
+    prepared !== undefined &&
     schedule.status === "extracted"
   ) {
     timer.begin();
     try {
-      counteroffer = await runSearchStage(
-        schedule,
-        inputs,
-        readings,
-        assumptions,
-        connectors,
-        model,
-        config,
-      );
+      const prevSearch = previous?.receipt.counteroffer;
+      const canCarry =
+        baselineOk &&
+        prevDigests !== undefined &&
+        prevDigests.counteroffer_search === searchCallDigest &&
+        prevSearch !== undefined &&
+        (prevSearch.status === "found" ||
+          prevSearch.status === "not_found" ||
+          prevSearch.status === "not_needed");
+      if (canCarry && prevSearch !== undefined && previous !== undefined) {
+        const carried = await carrySearch(
+          previous,
+          prevSearch,
+          prepared,
+          connectors,
+          model,
+          config,
+        );
+        counteroffer = carried.receipt;
+        if (carried.carried) carriedForward.push("counteroffer_search");
+      } else {
+        counteroffer = await runSearchStage(schedule, prepared, connectors, model, config);
+        reran.push("counteroffer_search");
+      }
     } catch (error) {
       counteroffer = {
         status: "needs_review",
@@ -596,9 +844,26 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   }
   timer.finish();
 
+  const incremental: IncrementalInfo | undefined =
+    previous === undefined
+      ? undefined
+      : {
+          previousRunId: previous.runId,
+          mode: baselineOk ? "incremental" : "full_no_baseline",
+          changedFiles: diffFiles(previous.sourceTuple, sourceTuple),
+          changedSections:
+            previous.receipt.sectionDigests === undefined
+              ? { added: [], removed: [], changed: [] }
+              : diffSectionDigests(previous.receipt.sectionDigests, sectionDigests),
+          totalSections: sections.length,
+          reran,
+          carriedForward,
+        };
+
   const receipt: RunReceipt = {
     receiptVersion: RECEIPT_VERSION,
     runId: config.runId,
+    trigger: config.trigger ?? "manual",
     status: blockedReasons.length === 0 ? "reviewable" : "needs_review",
     blockedReasons,
     questionIds: [RELEASE_TIMING.id, "retainer_after_second_amendment"],
@@ -608,6 +873,12 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
       versionPresent: f.versionPresent,
       edgarUrl: EDGAR_URLS[f.fileName] ?? null,
     })),
+    sectionDigests,
+    typedCallDigests: {
+      release_timing: decisionCallDigest,
+      escrow_schedule: scheduleCallDigest,
+      counteroffer_search: searchCallDigest,
+    },
     releaseTiming: { outcome: decision, question },
     effectiveAction,
     overrides,
@@ -617,6 +888,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     readings,
     assumptions,
     ...(counteroffer !== undefined ? { counteroffer } : {}),
+    ...(incremental !== undefined ? { incremental } : {}),
   };
 
   return { receipt, sourceTuple, sections, timingsMs: timer.timings };

@@ -16,6 +16,7 @@ function runRow(overrides: Partial<RunRow> = {}): RunRow {
     draft_hash: "",
     superseded_by: null,
     stale_detail_json: null,
+    trigger: "manual",
     ...overrides,
   };
 }

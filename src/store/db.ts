@@ -25,6 +25,15 @@ export type RunRow = {
   draft_hash: string;
   superseded_by: string | null;
   stale_detail_json: string | null;
+  trigger: "manual" | "watcher";
+};
+
+export type WatchEventRow = {
+  id: string;
+  at: string;
+  result: "changed" | "unavailable" | "error" | "run_started" | "run_failed";
+  detail_json: string;
+  run_id: string | null;
 };
 
 export type ApprovalRow = {
@@ -46,7 +55,7 @@ export type ExportRow = {
   draft_hash: string;
 };
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const MIGRATIONS: string[] = [
   `
@@ -101,6 +110,20 @@ const MIGRATIONS: string[] = [
       SELECT RAISE(ABORT, 'a finished run cannot return to running');
     END;
   `,
+  // The Box watcher: which trigger started each run, and the watcher's own
+  // event log (folder changes, errors, runs it started or saw fail). Runs
+  // that predate this migration are treated as manual.
+  `
+  ALTER TABLE runs ADD COLUMN "trigger" TEXT NOT NULL DEFAULT 'manual';
+  CREATE TABLE watch_events (
+    id TEXT PRIMARY KEY,
+    at TEXT NOT NULL,
+    result TEXT NOT NULL
+      CHECK(result IN ('changed','unavailable','error','run_started','run_failed')),
+    detail_json TEXT,
+    run_id TEXT
+  );
+  `,
 ];
 
 export function newRunId(now = new Date()): string {
@@ -144,12 +167,14 @@ export function createRun(
     receiptHash: string;
     draftText: string;
     draftHash: string;
+    trigger?: "manual" | "watcher";
   },
 ): void {
   db.prepare(
     `INSERT INTO runs (id, created_at, status, status_reason, source_tuple_json,
-       receipt_json, receipt_hash, draft_text, draft_hash, superseded_by, stale_detail_json)
-     VALUES (?, ?, 'running', NULL, ?, ?, ?, ?, ?, NULL, NULL)`,
+       receipt_json, receipt_hash, draft_text, draft_hash, superseded_by, stale_detail_json,
+       "trigger")
+     VALUES (?, ?, 'running', NULL, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
   ).run(
     run.id,
     run.createdAt,
@@ -158,7 +183,43 @@ export function createRun(
     run.receiptHash,
     run.draftText,
     run.draftHash,
+    run.trigger ?? "manual",
   );
+}
+
+// True while any run is still in flight — the watcher skips its tick and a
+// manual start is refused with 409.
+export function hasRunningRun(db: DatabaseSync): boolean {
+  return (
+    db.prepare("SELECT 1 FROM runs WHERE status = 'running' LIMIT 1").get() !== undefined
+  );
+}
+
+export function recordWatchEvent(
+  db: DatabaseSync,
+  event: {
+    id: string;
+    at: string;
+    result: "changed" | "unavailable" | "error" | "run_started" | "run_failed";
+    detailJson?: string;
+    runId?: string;
+  },
+): void {
+  db.prepare(
+    "INSERT INTO watch_events (id, at, result, detail_json, run_id) VALUES (?, ?, ?, ?, ?)",
+  ).run(event.id, event.at, event.result, event.detailJson ?? null, event.runId ?? null);
+}
+
+export function latestWatchEvent(db: DatabaseSync): WatchEventRow | undefined {
+  return db
+    .prepare("SELECT * FROM watch_events ORDER BY at DESC, rowid DESC LIMIT 1")
+    .get() as WatchEventRow | undefined;
+}
+
+export function listWatchEvents(db: DatabaseSync, limit: number): WatchEventRow[] {
+  return db
+    .prepare("SELECT * FROM watch_events ORDER BY at DESC, rowid DESC LIMIT ?")
+    .all(limit) as unknown as WatchEventRow[];
 }
 
 export function getRun(db: DatabaseSync, id: string): RunRow | undefined {

@@ -189,7 +189,13 @@ function writeReviewsDir(): string {
 }
 
 // fetch router: Box REST calls by URL, chat calls by schema name in the body.
-function stubFetch(): void {
+function stubFetch(
+  opts: {
+    versionId?: string;
+    chatCounts?: Record<string, number>;
+    file2Lines?: string[];
+  } = {},
+): void {
   const impl = (url: unknown, init?: unknown): Promise<Response> => {
     const u = String(url);
     const body = (init as { body?: unknown } | undefined)?.body;
@@ -200,6 +206,9 @@ function stubFetch(): void {
         : undefined;
 
     if (u === `${OR}/v1/chat/completions`) {
+      if (opts.chatCounts !== undefined && schema !== undefined) {
+        opts.chatCounts[schema] = (opts.chatCounts[schema] ?? 0) + 1;
+      }
       if (schema === "release_timing_decision") {
         return Promise.resolve(chatResponse(DECISION_JSON));
       }
@@ -222,18 +231,18 @@ function stubFetch(): void {
     }
     const content = u.match(/\/2\.0\/files\/(file-\d)\/content/);
     if (content !== null) {
-      return Promise.resolve(new Response(fileBytes(content[1]!), { status: 200 }));
+      return Promise.resolve(new Response(fileBytes(content[1]!, opts.file2Lines), { status: 200 }));
     }
     const meta = u.match(/\/2\.0\/files\/(file-\d)\?/);
     if (meta !== null) {
-      const bytes = fileBytes(meta[1]!);
+      const bytes = fileBytes(meta[1]!, opts.file2Lines);
       return Promise.resolve(
         jsonResponse({
           id: meta[1],
           name: FILE_NAMES[Number(meta[1]!.slice(5))],
           size: bytes.byteLength,
           sha1: createHash("sha1").update(bytes).digest("hex"),
-          file_version: { id: "v1" },
+          file_version: { id: opts.versionId ?? "v1" },
           modified_at: "2026-01-01T00:00:00Z",
         }),
       );
@@ -243,15 +252,39 @@ function stubFetch(): void {
   vi.stubGlobal("fetch", impl);
 }
 
-function fileBytes(id: string): Uint8Array {
-  return new TextEncoder().encode(`pdf-bytes-${id}`);
+// Marker so a changed file-2 line set is distinguishable in the byte payload.
+const FILE2_CHANGED_MARKER = "CHANGED-SECTION-TEXT";
+
+function fileBytes(id: string, file2Lines?: string[]): Uint8Array {
+  const marker = id === "file-2" && file2Lines !== undefined ? `-${FILE2_CHANGED_MARKER}` : "";
+  return new TextEncoder().encode(`pdf-bytes-${id}${marker}`);
 }
+
+const FILE2_LINES = [
+  "3. Transaction Compensation",
+  "The Consultant shall be paid $6,000 per month",
+  "for the 6-month period into escrow.",
+  "(i) $36,000 shall be released to the",
+  "consultant on January 2, 2027.",
+];
+
+// Same operative content but the heading differs — the section text and its
+// digest change while every model quote stays verbatim.
+const FILE2_LINES_CHANGED = [
+  "3. Transaction Compensation and Escrow",
+  "The Consultant shall be paid $6,000 per month",
+  "for the 6-month period into escrow.",
+  "(i) $36,000 shall be released to the",
+  "consultant on January 2, 2027.",
+];
 
 // The pdfText seam: canned page lines per byte payload.
 function cannedPdfLines(bytes: Uint8Array) {
   const text = new TextDecoder().decode(bytes);
   const lines = text.includes("file-2")
-    ? ["3. Transaction Compensation", "The Consultant shall be paid $6,000 per month", "for the 6-month period into escrow.", "(i) $36,000 shall be released to the", "consultant on January 2, 2027."]
+    ? text.includes(FILE2_CHANGED_MARKER)
+      ? FILE2_LINES_CHANGED
+      : FILE2_LINES
     : text.includes("file-0")
       ? [
           "1. Retainer",
@@ -373,5 +406,217 @@ describe("runPipeline orchestration", () => {
     }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Error);
     expect((error as { step?: string }).step).toBe("box_file");
+  });
+});
+
+describe("incremental reruns", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function firstRun() {
+    stubFetch();
+    const result = await runPipeline({
+      ...config,
+      runId: "run-1",
+      reviewsDir: writeReviewsDir(),
+      connections: CONNECTIONS,
+      pdfText: cannedPdfLines,
+      assertExpected: false,
+      workerPool: new InProcessPool(["wa-test", "wb-test"]),
+    });
+    expect(result.receipt.status).toBe("reviewable");
+    expect(result.receipt.counteroffer?.status).toBe("found");
+    return result;
+  }
+
+  it("carries every typed call when only version ids changed", async () => {
+    const first = await firstRun();
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ versionId: "v2", chatCounts });
+    const pool = new InProcessPool(["wa-test", "wb-test"]);
+    const second = await runPipeline({
+      ...config,
+      runId: "run-2",
+      reviewsDir: writeReviewsDir(),
+      connections: CONNECTIONS,
+      pdfText: cannedPdfLines,
+      assertExpected: false,
+      workerPool: pool,
+      trigger: "watcher",
+      previous: {
+        runId: "run-1",
+        receipt: first.receipt,
+        sourceTuple: first.sourceTuple,
+      },
+    });
+    const r = second.receipt;
+
+    // Bytes identical, only version ids differed: zero model calls at all.
+    expect(Object.values(chatCounts).reduce((a, b) => a + b, 0)).toBe(0);
+
+    expect(r.incremental?.previousRunId).toBe("run-1");
+    expect(r.incremental?.mode).toBe("incremental");
+    expect(r.incremental?.changedSections).toEqual({
+      added: [],
+      removed: [],
+      changed: [],
+    });
+    expect(r.incremental?.changedFiles).toHaveLength(3);
+    for (const f of r.incremental?.changedFiles ?? []) {
+      expect(f.contentChanged).toBe(false);
+      expect(f.fromVersionTag).not.toBe(f.toVersionTag);
+    }
+    expect(r.incremental?.reran).toEqual([]);
+    expect(r.incremental?.carriedForward).toEqual([
+      "release_timing",
+      "escrow_schedule",
+      "counteroffer_search",
+    ]);
+
+    expect(r.releaseTiming?.outcome.status).toBe("decided");
+    expect(
+      r.releaseTiming?.outcome.status === "decided"
+        ? r.releaseTiming.outcome.carriedFrom
+        : undefined,
+    ).toBe("run-1");
+    expect(
+      r.schedule?.outcome.status === "extracted"
+        ? r.schedule.outcome.carriedFrom
+        : undefined,
+    ).toBe("run-1");
+
+    // The found search was carried; its best candidate was re-verified once on
+    // the first worker (both readings in a single batch).
+    const search = r.counteroffer;
+    expect(search?.status).toBe("found");
+    expect(search?.carriedFrom).toBe("run-1");
+    expect(search?.reverifiedOn).toBe("wa-test");
+    expect(search?.rounds).toEqual(first.receipt.counteroffer?.rounds);
+    expect(pool.calls).toHaveLength(1);
+    expect(pool.calls[0]?.worker).toBe("wa-test");
+    expect(pool.calls[0]?.jobs).toHaveLength(2);
+
+    expect(r.trigger).toBe("watcher");
+    expect(r.status).toBe("reviewable");
+    expect(r.sectionDigests).toEqual(first.receipt.sectionDigests);
+    expect(r.typedCallDigests).toEqual(first.receipt.typedCallDigests);
+  });
+
+  it("re-asks the model for release_timing and escrow_schedule when §3 changed", async () => {
+    const first = await firstRun();
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ versionId: "v2", chatCounts, file2Lines: FILE2_LINES_CHANGED });
+    const pool = new InProcessPool(["wa-test", "wb-test"]);
+    const second = await runPipeline({
+      ...config,
+      runId: "run-2",
+      reviewsDir: writeReviewsDir(),
+      connections: CONNECTIONS,
+      pdfText: cannedPdfLines,
+      assertExpected: false,
+      workerPool: pool,
+      previous: {
+        runId: "run-1",
+        receipt: first.receipt,
+        sourceTuple: first.sourceTuple,
+      },
+    });
+    const r = second.receipt;
+
+    expect(chatCounts.release_timing_decision).toBe(1);
+    expect(chatCounts.schedule_extraction).toBe(1);
+    // The schedule re-extracted identically, so the search inputs did not
+    // change and it was still carried (with re-verification, not a new search).
+    expect(chatCounts.counteroffer_proposal).toBeUndefined();
+
+    expect(r.incremental?.changedSections.changed).toContain(
+      "03-second-amendment.pdf#§3",
+    );
+    expect(r.incremental?.reran).toEqual(["release_timing", "escrow_schedule"]);
+    expect(r.incremental?.carriedForward).toEqual(["counteroffer_search"]);
+    expect(
+      r.releaseTiming?.outcome.status === "decided"
+        ? r.releaseTiming.outcome.carriedFrom
+        : undefined,
+    ).toBeUndefined();
+    expect(r.counteroffer?.carriedFrom).toBe("run-1");
+    expect(r.status).toBe("reviewable");
+  });
+
+  it("blocks on carried_search_mismatch when a previous resultDigest was tampered", async () => {
+    const first = await firstRun();
+    const tampered = structuredClone(first.receipt);
+    const search = tampered.counteroffer;
+    const best = search?.rounds
+      .flatMap((r) => r.candidates)
+      .find((c) => c.id === search.best);
+    expect(best?.resultDigests).toBeDefined();
+    for (const key of Object.keys(best?.resultDigests ?? {})) {
+      best!.resultDigests![key] = "tampered";
+    }
+    stubFetch({ versionId: "v2" });
+    const pool = new InProcessPool(["wa-test", "wb-test"]);
+    const second = await runPipeline({
+      ...config,
+      runId: "run-2",
+      reviewsDir: writeReviewsDir(),
+      connections: CONNECTIONS,
+      pdfText: cannedPdfLines,
+      assertExpected: false,
+      workerPool: pool,
+      previous: {
+        runId: "run-1",
+        receipt: tampered,
+        sourceTuple: first.sourceTuple,
+      },
+    });
+
+    expect(second.receipt.counteroffer?.status).toBe("needs_review");
+    expect(second.receipt.counteroffer?.reason).toBe("carried_search_mismatch");
+    expect(second.receipt.status).toBe("needs_review");
+    expect(
+      second.receipt.blockedReasons.map((r) => r.reason),
+    ).toContain("carried_search_mismatch");
+    // The re-verification batch did run — the mismatch is in its output.
+    expect(pool.calls).toHaveLength(1);
+  });
+
+  it("runs full_no_baseline when the previous receipt lacks digests", async () => {
+    const first = await firstRun();
+    const bare = structuredClone(first.receipt);
+    delete bare.sectionDigests;
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ versionId: "v2", chatCounts });
+    const pool = new InProcessPool(["wa-test", "wb-test"]);
+    const second = await runPipeline({
+      ...config,
+      runId: "run-2",
+      reviewsDir: writeReviewsDir(),
+      connections: CONNECTIONS,
+      pdfText: cannedPdfLines,
+      assertExpected: false,
+      workerPool: pool,
+      previous: {
+        runId: "run-1",
+        receipt: bare,
+        sourceTuple: first.sourceTuple,
+      },
+    });
+
+    expect(second.receipt.incremental?.mode).toBe("full_no_baseline");
+    expect(second.receipt.incremental?.changedSections).toEqual({
+      added: [],
+      removed: [],
+      changed: [],
+    });
+    expect(second.receipt.incremental?.reran).toEqual([
+      "release_timing",
+      "escrow_schedule",
+      "counteroffer_search",
+    ]);
+    expect(second.receipt.incremental?.carriedForward).toEqual([]);
+    expect(chatCounts.release_timing_decision).toBe(1);
+    expect(chatCounts.schedule_extraction).toBe(1);
+    expect(chatCounts.counteroffer_proposal).toBe(1);
+    expect(second.receipt.status).toBe("reviewable");
   });
 });
