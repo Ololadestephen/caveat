@@ -160,7 +160,8 @@ All evidence is written under `$CAVEAT_PRIVATE` (default
 
 Useful environment overrides: `CAVEAT_COORD_SPRITE`, `CAVEAT_WORKER_A`,
 `CAVEAT_WORKER_B`, `CAVEAT_SERVICE`, `CAVEAT_PRIVATE`, `CAVEAT_BOX_FOLDER`,
-`CAVEAT_OPERATIVE_FILE`, `CAVEAT_RUN_TIMEOUT_MS` (default 600000),
+`CAVEAT_OPERATIVE_FILE`, `CAVEAT_RUN_TIMEOUT_MS` (default 1200000),
+`CAVEAT_SEARCH_TIMEOUT_MS` (default 240000, per search round),
 `CAVEAT_WATCH_INTERVAL_MS` (default 60000, `0` disables the Box watcher),
 `CAVEAT_WORKERS` (default
 `caveat-wa=caveat-worker-a,caveat-wb=caveat-worker-b`: each worker Sprite

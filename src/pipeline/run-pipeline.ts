@@ -64,7 +64,14 @@ const DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free";
 // worker display name = connector name; the connector points at that worker's
 // org-private Sprite URL.
 const DEFAULT_WORKERS = "caveat-wa=caveat-worker-a,caveat-wb=caveat-worker-b";
-const SEARCH_TIMEOUT_MS = 60_000;
+// The free model needs about two minutes for one search round (observed
+// 113 s on 2026-11-25), so the per-round ceiling is well above that.
+const DEFAULT_SEARCH_TIMEOUT_MS = 240_000;
+
+function searchTimeoutMs(): number {
+  const parsed = Number(readEnv("CAVEAT_SEARCH_TIMEOUT_MS"));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SEARCH_TIMEOUT_MS;
+}
 
 const FILE_NAMES = [
   "01-consulting-agreement.pdf",
@@ -515,7 +522,7 @@ async function runSearchStage(
     base: prepared.base,
     readings: prepared.searchReadings,
     model,
-    chatConfig: chatConfig(connectors.openrouterConn.gatewayBaseUrl, SEARCH_TIMEOUT_MS, undefined, fetch),
+    chatConfig: chatConfig(connectors.openrouterConn.gatewayBaseUrl, searchTimeoutMs(), undefined, fetch),
     pool: resolved.pool,
     ...(config.chat !== undefined ? { chat: config.chat } : {}),
     conditionalReleases,

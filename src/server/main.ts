@@ -28,7 +28,7 @@ const ctx = createAppContext({
   fixturesDir: process.env.CAVEAT_FIXTURES_DIR ?? "fixtures",
   boxFolder,
   decisionModel: process.env.CAVEAT_DECISION_MODEL,
-  runTimeoutMs: envNumber("CAVEAT_RUN_TIMEOUT_MS", 600000),
+  runTimeoutMs: envNumber("CAVEAT_RUN_TIMEOUT_MS", 1200000),
   recheckTimeoutMs: envNumber("CAVEAT_RECHECK_TIMEOUT_MS", 30000),
   watcher: (): WatcherView => ({
     enabled: watchIntervalMs > 0,
