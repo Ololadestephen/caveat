@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RunReceipt } from "./receipt.ts";
 import { renderReviewPage } from "./review-page.ts";
+import { fixtureReceipt } from "./fixture-receipt.ts";
 
 const DECIDED_OUTCOME = {
   status: "decided" as const,
@@ -365,5 +366,197 @@ describe("renderReviewPage — blocked run", () => {
     expect(html).toContain("No results — this run needs review before results are produced");
     expect(html).not.toContain("Retainer superseded — as_signed");
     expect(html).not.toContain("Retainer continues — as_signed");
+  });
+});
+
+describe("renderReviewPage — headline", () => {
+  // The fixture receipt has real ledger entries: the $200 low on Dec 15 finds
+  // the matching entry's $150,000 escrow balance.
+  const html = renderReviewPage(fixtureReceipt("run-headline"));
+
+  it("shows the worst shortfall with the escrow balance from that ledger entry", () => {
+    expect(html).toContain(
+      "$8,000 under your floor on Dec 15, 2026 while $150,000 sits in escrow",
+    );
+  });
+
+  it("names the breaching reading and flags the demo assumptions", () => {
+    expect(html).toContain(
+      "Reading: Retainer superseded (one of two unresolved readings). Opening cash, floor and costs are demo assumptions.",
+    );
+  });
+
+  it("falls back to the end escrow when a sparse receipt has no ledger", () => {
+    const sparse = renderReviewPage(RECEIPT);
+    expect(sparse).toContain(
+      "$8,000 under your floor on Dec 15, 2026 while $75,000 sits in escrow",
+    );
+  });
+
+  it("omits the headline when nothing breaches the floor", () => {
+    const clean: RunReceipt = JSON.parse(JSON.stringify(RECEIPT)) as RunReceipt;
+    for (const reading of clean.readings) {
+      reading.results = {
+        as_signed: Object.fromEntries(
+          Object.entries(reading.results["as_signed"] ?? {}).map(([id, r]) => [
+            id,
+            { ...r, passes: true, firstBreach: null, lowest: { date: "2027-01-15", balanceCents: 5000000 } },
+          ]),
+        ),
+      };
+    }
+    const out = renderReviewPage(clean);
+    expect(out).not.toContain("under your floor");
+    expect(out).not.toContain("sits in escrow");
+  });
+});
+
+describe("renderReviewPage — counteroffer search", () => {
+  const WITH_SEARCH: RunReceipt = {
+    ...JSON.parse(JSON.stringify(RECEIPT)) as RunReceipt,
+    counteroffer: {
+      status: "found",
+      stopReason: "model_done",
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      rounds: [
+        {
+          round: 1,
+          modelNote: 'baseline shows the Dec gap; try <img src=x> deposit',
+          done: true,
+          modelVersion: "nvidia/nemotron-3.5-super-vl:free",
+          servedBy: "Nvidia",
+          candidates: [
+            {
+              id: "r1c1",
+              lever: "upfront_deposit",
+              params: { amount_cents: 800000, date: "2026-10-01", split_count: null, net_days: null },
+              rationale: 'moves the smallest chunk <script>alert(1)</script> earlier',
+              status: "tested",
+              worker: "caveat-wa",
+              rankCents: 800000,
+              centDays: 74400000,
+              summary:
+                "pay $8,000 of the escrow funding to the consultant as cash at signing (modeled as Oct 1, 2026), reducing the Jan 2, 2027 release to $67,000",
+              passesAll: true,
+              perScenario: {
+                retainer_superseded: {
+                  no_extensions: {
+                    passes: true,
+                    lowest: { date: "2026-12-15", balanceCents: 1000000 },
+                    firstBreach: null,
+                  },
+                  all_extensions: {
+                    passes: true,
+                    lowest: { date: "2026-12-15", balanceCents: 1000000 },
+                    firstBreach: null,
+                  },
+                },
+                retainer_continues: {
+                  no_extensions: {
+                    passes: true,
+                    lowest: { date: "2026-10-01", balanceCents: 2000000 },
+                    firstBreach: null,
+                  },
+                  all_extensions: {
+                    passes: true,
+                    lowest: { date: "2026-10-01", balanceCents: 2000000 },
+                    firstBreach: null,
+                  },
+                },
+              },
+            },
+            {
+              id: "r1c2",
+              lever: "earlier_release",
+              params: { amount_cents: null, date: "2026-11-13", split_count: null, net_days: null },
+              rationale: "missing amount",
+              status: "rejected_malformed",
+              rejection: {
+                by: "compile",
+                code: "missing_field",
+                field: "amount_cents",
+                detail: "earlier_release requires amount_cents",
+              },
+            },
+          ],
+        },
+      ],
+      best: "r1c1",
+      humanReview: ["r1c2"],
+    },
+  };
+  const html = renderReviewPage(WITH_SEARCH);
+
+  it("renders the outcome box with the best candidate's verified numbers", () => {
+    expect(html).toContain("<h2>Counteroffer search</h2>");
+    expect(html).toContain(
+      "pay $8,000 of the escrow funding to the consultant as cash at signing (modeled as Oct 1, 2026), reducing the Jan 2, 2027 release to $67,000",
+    );
+    expect(html).toContain("Passes all 4 tested scenario checks");
+    expect(html).toContain("lowest $10,000.00 on December 15, 2026");
+    expect(html).toContain("change size $8,000.00");
+    expect(html).toContain("found in round 1 of 1");
+  });
+
+  it("shows the model's own words, escaped, and the worker column", () => {
+    expect(html).toContain("Model's note (model's own words)");
+    expect(html).toContain("baseline shows the Dec gap; try &lt;img src=x&gt; deposit");
+    expect(html).not.toContain("<img src=x>");
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("moves the smallest chunk &lt;script&gt;alert(1)&lt;/script&gt; earlier");
+    expect(html).toContain("caveat-wa");
+  });
+
+  it("lists rejected candidates under needs human review with by/code/field", () => {
+    expect(html).toContain("<h3>Needs human review</h3>");
+    expect(html).toContain("r1c2");
+    expect(html).toContain("compile");
+    expect(html).toContain("missing_field");
+    expect(html).toContain("amount_cents");
+  });
+
+  it("renders the not_found and needs_review outcomes", () => {
+    const notFound: RunReceipt = {
+      ...RECEIPT,
+      counteroffer: {
+        status: "not_found",
+        stopReason: "round_cap",
+        model: "m",
+        rounds: [
+          { round: 1, modelNote: "n", done: false, candidates: [] },
+          { round: 2, modelNote: "n", done: false, candidates: [] },
+          { round: 3, modelNote: "n", done: false, candidates: [] },
+          { round: 4, modelNote: "n", done: false, candidates: [] },
+        ],
+        best: null,
+        humanReview: [],
+      },
+    };
+    expect(renderReviewPage(notFound)).toContain(
+      "No tested change within 4 rounds kept cash at or above the floor in every scenario",
+    );
+    const needsReview: RunReceipt = {
+      ...RECEIPT,
+      counteroffer: {
+        status: "needs_review",
+        stopReason: "worker_error",
+        reason: "workers_unavailable",
+        detail: "exec failed",
+        model: "m",
+        rounds: [],
+        best: null,
+        humanReview: [],
+      },
+    };
+    const out = renderReviewPage(needsReview);
+    expect(out).toContain("Counteroffer search needs human review");
+    expect(out).toContain("workers_unavailable");
+  });
+
+  it("omits the section entirely on a v1 receipt", () => {
+    expect(RECEIPT.counteroffer).toBeUndefined();
+    const v1 = renderReviewPage(RECEIPT);
+    expect(v1).not.toContain("Counteroffer search");
+    expect(v1).not.toContain("Model's note");
   });
 });

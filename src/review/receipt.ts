@@ -3,9 +3,10 @@ import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import type { DecisionOutcome, Excerpt, Question } from "../interpret/types.ts";
 import type { PolicyAdjustment, TwinveeAssumptions } from "../plan/twinvee.ts";
 import type { ScenarioResult } from "../runner/types.ts";
+import type { CounterofferReceipt } from "../search/loop.ts";
 import type { RetainerReview, SourcedOverride } from "./human-review.ts";
 
-export const RECEIPT_VERSION = "caveat-receipt/1";
+export const RECEIPT_VERSION = "caveat-receipt/2";
 
 export type ReceiptSource = {
   fileName: string;
@@ -34,7 +35,9 @@ export type HumanReviewReceipt =
 // The canonical record of a coordinator run. Contains no Box ids, URLs or raw
 // provider bodies — only validated outputs, digests and citations.
 export type RunReceipt = {
-  receiptVersion: typeof RECEIPT_VERSION;
+  // Stored receipts keep the version they were written under; the pipeline
+  // always stamps RECEIPT_VERSION on new ones.
+  receiptVersion: string;
   runId: string;
   status: "reviewable" | "needs_review";
   blockedReasons: ReceiptBlockedReason[];
@@ -50,4 +53,6 @@ export type RunReceipt = {
   flags: EvidenceFlag[];
   readings: ReceiptReading[];
   assumptions: TwinveeAssumptions;
+  // Added in v2 — absent on v1 receipts and on runs where the search never ran.
+  counteroffer?: CounterofferReceipt;
 };

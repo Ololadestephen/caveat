@@ -2,7 +2,7 @@ import { isRecord } from "./shape.ts";
 
 const GATEWAY_LIST_URL = "https://api.sprites.dev/v1/gateway/list";
 
-export type Connection = { provider: string; gatewayBaseUrl: string };
+export type Connection = { provider: string; gatewayBaseUrl: string; name?: string };
 
 export async function listConnections(options: { fetch?: typeof fetch } = {}): Promise<
   Connection[]
@@ -21,7 +21,11 @@ export async function listConnections(options: { fetch?: typeof fetch } = {}): P
       typeof entry.provider === "string" &&
       typeof entry.gateway_base_url === "string"
     ) {
-      connections.push({ provider: entry.provider, gatewayBaseUrl: entry.gateway_base_url });
+      connections.push({
+        provider: entry.provider,
+        gatewayBaseUrl: entry.gateway_base_url,
+        ...(typeof entry.name === "string" ? { name: entry.name } : {}),
+      });
     }
   }
   return connections;

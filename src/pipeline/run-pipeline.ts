@@ -16,7 +16,12 @@ import { OpenRouterScheduleExtractor } from "../interpret/schedule.ts";
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import { RELEASE_TIMING } from "../interpret/types.ts";
 import type { DecisionOutcome, Excerpt, Question } from "../interpret/types.ts";
-import { buildTwinveeInputs, policyAdjustments, PlanError } from "../plan/twinvee.ts";
+import {
+  buildTwinveeInputs,
+  escrowRules,
+  policyAdjustments,
+  PlanError,
+} from "../plan/twinvee.ts";
 import type { TwinveeAssumptions } from "../plan/twinvee.ts";
 import { RECEIPT_VERSION } from "../review/receipt.ts";
 import type { RunReceipt } from "../review/receipt.ts";
@@ -30,8 +35,18 @@ import type {
 } from "../review/human-review.ts";
 import { runFixture } from "../runner/run.ts";
 import { validateRunInput } from "../runner/validate.ts";
+import { chatConfig } from "../interpret/chat.ts";
+import type { callStructuredChat } from "../interpret/chat.ts";
+import { buildSearchBase } from "../search/levers.ts";
+import { runCounterofferSearch } from "../search/loop.ts";
+import type { CounterofferReceipt, SearchReading } from "../search/loop.ts";
+import { SpritesExecPool } from "../worker/pool.ts";
+import type { WorkerPool } from "../worker/pool.ts";
 
 const DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free";
+const DEFAULT_WORKERS_CONNECTOR = "caveat-workers";
+const DEFAULT_WORKERS = "caveat-wa,caveat-wb";
+const SEARCH_TIMEOUT_MS = 60_000;
 
 const FILE_NAMES = [
   "01-consulting-agreement.pdf",
@@ -69,6 +84,10 @@ export type PipelineConfig = {
   assertExpected?: boolean;
   connections?: Connection[];
   pdfText?: typeof extractPdfLines;
+  workerPool?: WorkerPool;
+  workersConnector?: string;
+  workers?: string;
+  chat?: typeof callStructuredChat;
 };
 
 export type PipelineResult = {
@@ -113,7 +132,16 @@ class StageTimer {
   }
 }
 
-type Connectors = { boxConn: Connection; openrouterConn: Connection };
+type Connectors = {
+  boxConn: Connection;
+  openrouterConn: Connection;
+  workersConn: Connection | undefined;
+};
+
+function readEnv(name: string): string | undefined {
+  const value = process.env[name];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
 
 async function connect(config: PipelineConfig, timer: StageTimer): Promise<Connectors> {
   const connections =
@@ -124,7 +152,10 @@ async function connect(config: PipelineConfig, timer: StageTimer): Promise<Conne
   if (openrouterConn === undefined) {
     throw new PipelineError("openrouter", new Error("openrouter connector not configured"));
   }
-  return { boxConn, openrouterConn };
+  const workersName =
+    config.workersConnector ?? readEnv("CAVEAT_WORKERS_CONNECTOR") ?? DEFAULT_WORKERS_CONNECTOR;
+  const workersConn = connections.find((c) => c.name === workersName);
+  return { boxConn, openrouterConn, workersConn };
 }
 
 type FetchedFile = {
@@ -306,15 +337,21 @@ async function runReadings(
   effectiveAction: string | null,
   assumptions: TwinveeAssumptions,
   config: PipelineConfig,
-): Promise<{ readings: RunReceipt["readings"]; reasons: { reason: string; detail: string }[] }> {
+): Promise<{
+  readings: RunReceipt["readings"];
+  inputs: Record<string, Record<string, unknown>>;
+  reasons: { reason: string; detail: string }[];
+}> {
   const readings: RunReceipt["readings"] = [];
+  const inputs: Record<string, Record<string, unknown>> = {};
   const reasons: { reason: string; detail: string }[] = [];
   if (!(schedule.status === "extracted" && review !== undefined && effectiveAction === "escrow_release")) {
-    return { readings, reasons };
+    return { readings, inputs, reasons };
   }
   try {
-    const inputs = buildTwinveeInputs({ schedule: schedule.schedule, review, assumptions });
-    for (const [id, rawInput] of Object.entries(inputs)) {
+    const built = buildTwinveeInputs({ schedule: schedule.schedule, review, assumptions });
+    for (const [id, rawInput] of Object.entries(built)) {
+      inputs[id] = rawInput;
       const input = validateRunInput(rawInput);
       const out = runFixture(input);
       if (config.assertExpected !== false) {
@@ -357,7 +394,74 @@ async function runReadings(
       detail: error instanceof Error ? error.message : String(error),
     });
   }
-  return { readings, reasons };
+  return { readings, inputs, reasons };
+}
+
+// Runs the counteroffer search after clean readings. Any model/worker failure
+// comes back as a needs_review receipt and blocks the run — nothing throws
+// here unless the stage itself breaks, which also blocks.
+async function runSearchStage(
+  schedule: Extract<ScheduleOutcome, { status: "extracted" }>,
+  inputs: Record<string, Record<string, unknown>>,
+  readings: RunReceipt["readings"],
+  assumptions: TwinveeAssumptions,
+  connectors: Connectors,
+  model: string,
+  config: PipelineConfig,
+): Promise<CounterofferReceipt> {
+  const base = buildSearchBase(
+    schedule.schedule,
+    escrowRules(schedule.schedule, assumptions.escrowFundingDate),
+    assumptions.escrowFundingDate,
+  );
+  const searchReadings: SearchReading[] = readings.map((r) => ({
+    id: r.id,
+    label: r.label,
+    rawInput: inputs[r.id] as SearchReading["rawInput"],
+    asSignedResults: r.results.as_signed ?? {},
+  }));
+  let pool = config.workerPool;
+  if (pool === undefined) {
+    if (connectors.workersConn === undefined) {
+      return {
+        status: "needs_review",
+        stopReason: "worker_error",
+        reason: "workers_unavailable",
+        detail: "the workers connector is not configured on the gateway",
+        model,
+        rounds: [],
+        best: null,
+        humanReview: [],
+      };
+    }
+    const workerNames = (
+      config.workers ?? readEnv("CAVEAT_WORKERS") ?? DEFAULT_WORKERS
+    )
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0);
+    pool = new SpritesExecPool({
+      gatewayBaseUrl: connectors.workersConn.gatewayBaseUrl,
+      workers: workerNames,
+    });
+  }
+  const conditionalReleases = schedule.schedule.releases
+    .filter((r) => r.extensionId !== undefined)
+    .map((r) => ({
+      id: r.id,
+      amountCents: r.amountCents,
+      date: r.date,
+      extensionId: r.extensionId as string,
+    }));
+  return runCounterofferSearch({
+    base,
+    readings: searchReadings,
+    model,
+    chatConfig: chatConfig(connectors.openrouterConn.gatewayBaseUrl, SEARCH_TIMEOUT_MS, undefined, fetch),
+    pool,
+    ...(config.chat !== undefined ? { chat: config.chat } : {}),
+    conditionalReleases,
+  });
 }
 
 async function loadAssumptions(fixturesDir: string): Promise<TwinveeAssumptions> {
@@ -374,7 +478,8 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
 
   // --- Connectors -------------------------------------------------------------
   timer.begin();
-  const { boxConn, openrouterConn } = await connect(config, timer);
+  const connectors = await connect(config, timer);
+  const { boxConn, openrouterConn } = connectors;
   timer.record("gateway_list");
 
   // --- Evidence: fetch all three PDFs -------------------------------------------
@@ -441,7 +546,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
 
   timer.begin();
   const assumptions = await timer.step("assumptions", loadAssumptions(config.fixturesDir));
-  const { readings, reasons: runnerReasons } = await runReadings(
+  const { readings, inputs, reasons: runnerReasons } = await runReadings(
     schedule,
     review,
     effectiveAction,
@@ -450,6 +555,45 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   );
   blockedReasons.push(...runnerReasons);
   timer.record("runner");
+
+  // --- Counteroffer search -----------------------------------------------------
+  let counteroffer: CounterofferReceipt | undefined;
+  if (
+    blockedReasons.length === 0 &&
+    readings.length > 0 &&
+    schedule.status === "extracted"
+  ) {
+    timer.begin();
+    try {
+      counteroffer = await runSearchStage(
+        schedule,
+        inputs,
+        readings,
+        assumptions,
+        connectors,
+        model,
+        config,
+      );
+    } catch (error) {
+      counteroffer = {
+        status: "needs_review",
+        stopReason: "worker_error",
+        reason: "counteroffer_error",
+        detail: error instanceof Error ? error.message : String(error),
+        model,
+        rounds: [],
+        best: null,
+        humanReview: [],
+      };
+    }
+    if (counteroffer.status === "needs_review") {
+      blockedReasons.push({
+        reason: counteroffer.reason ?? "counteroffer_needs_review",
+        detail: counteroffer.detail ?? `counteroffer search stopped: ${counteroffer.stopReason}`,
+      });
+    }
+    timer.record("counteroffer");
+  }
   timer.finish();
 
   const receipt: RunReceipt = {
@@ -472,6 +616,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     flags,
     readings,
     assumptions,
+    ...(counteroffer !== undefined ? { counteroffer } : {}),
   };
 
   return { receipt, sourceTuple, sections, timingsMs: timer.timings };

@@ -50,6 +50,34 @@ function formatCents(cents: number): string {
   return `$${grouped}.${rest}`;
 }
 
+const MONTH_ABBR = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+// "2026-12-15" → "Dec 15, 2026"
+function formatDateShort(iso: string): string {
+  const [year, month, day] = iso.split("-");
+  return `${MONTH_ABBR[Number(month) - 1]} ${Number(day)}, ${year}`;
+}
+
+// $8,000 whole dollars, else $8,000.50 — headline phrasing drops the cents.
+function formatMoneyShort(cents: number): string {
+  const grouped = String(Math.floor(cents / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const rest = cents % 100;
+  return rest === 0 ? `$${grouped}` : `$${grouped}.${String(rest).padStart(2, "0")}`;
+}
+
 function excerptFor(excerpts: readonly Excerpt[], excerptId: string): Excerpt | undefined {
   return excerpts.find((e) => e.id === excerptId);
 }
@@ -291,6 +319,150 @@ ${items.join("\n")}
 </section>`;
 }
 
+// "$8,000 under your floor on Dec 15, 2026 while $150,000 sits in escrow" —
+// the lowest balance below the floor across the as-signed readings.
+function renderHeadline(receipt: RunReceipt): string {
+  const floor = receipt.assumptions.floorCents;
+  let worst:
+    | { label: string; date: string; balanceCents: number; escrowCents: number }
+    | undefined;
+  for (const reading of receipt.readings) {
+    for (const result of Object.values(reading.results.as_signed ?? {})) {
+      if (result.lowest.balanceCents >= floor) continue;
+      const entry = result.ledger.find(
+        (e) => e.date === result.lowest.date && e.balanceCents === result.lowest.balanceCents,
+      );
+      if (worst === undefined || result.lowest.balanceCents < worst.balanceCents) {
+        worst = {
+          label: reading.label,
+          date: result.lowest.date,
+          balanceCents: result.lowest.balanceCents,
+          escrowCents: entry?.escrowBalanceCents ?? result.endEscrowCents,
+        };
+      }
+    }
+  }
+  if (worst === undefined) return "";
+  const shortfall = floor - worst.balanceCents;
+  return `<p class="headline"><strong>${formatMoneyShort(shortfall)} under your floor on ${escapeHtml(formatDateShort(worst.date))} while ${formatMoneyShort(worst.escrowCents)} sits in escrow</strong><br>
+<span class="caption">Reading: ${escapeHtml(worst.label)} (one of two unresolved readings). Opening cash, floor and costs are demo assumptions.</span></p>`;
+}
+
+function scenarioCount(record: { perScenario?: Record<string, Record<string, unknown>> | undefined }): number {
+  return Object.values(record.perScenario ?? {}).reduce(
+    (sum, scenarios) => sum + Object.keys(scenarios).length,
+    0,
+  );
+}
+
+function candidateResultCells(record: {
+  passesAll?: boolean | undefined;
+  perScenario?: Record<string, Record<string, { passes: boolean }>> | undefined;
+}): string {
+  const lines: string[] = [];
+  for (const [reading, scenarios] of Object.entries(record.perScenario ?? {})) {
+    for (const [scenario, result] of Object.entries(scenarios)) {
+      lines.push(`${escapeHtml(reading)} / ${escapeHtml(scenario)}: ${result.passes ? "pass" : "fail"}`);
+    }
+  }
+  return lines.length === 0 ? "—" : lines.join("<br>");
+}
+
+function renderCounteroffer(receipt: RunReceipt): string {
+  const search = receipt.counteroffer;
+  if (search === undefined) return "";
+
+  // --- Outcome box -------------------------------------------------------------
+  const best = search.best === null ? undefined : search.rounds.flatMap((r) => r.candidates).find(
+    (c) => c.id === search.best,
+  );
+  const bestRound =
+    best === undefined ? 0 : (search.rounds.find((r) => r.candidates.includes(best))?.round ?? 0);
+  let outcome: string;
+  if (search.status === "found" && best !== undefined) {
+    const lowestAcross = Object.values(best.perScenario ?? {})
+      .flatMap((scenarios) => Object.values(scenarios))
+      .reduce(
+        (acc, r) => (acc === null || r.lowest.balanceCents < acc.balanceCents ? r.lowest : acc),
+        null as { date: string; balanceCents: number } | null,
+      );
+    const lowestPart =
+      lowestAcross === null
+        ? ""
+        : `; lowest ${formatCents(lowestAcross.balanceCents)} on ${escapeHtml(formatDate(lowestAcross.date))}`;
+    outcome = `<div class="banner banner--ok"><strong>${escapeHtml(best.summary ?? best.id)}</strong><br>
+Passes all ${scenarioCount(best)} tested scenario checks${lowestPart}; change size ${formatCents(best.rankCents ?? 0)}; found in round ${bestRound} of ${search.rounds.length}.</div>`;
+  } else if (search.status === "not_needed") {
+    outcome = `<div class="banner banner--ok"><strong>Not needed.</strong> Both readings already keep cash at or above the floor as signed.</div>`;
+  } else if (search.status === "needs_review") {
+    outcome = `<div class="banner banner--blocked"><strong>Counteroffer search needs human review.</strong> ${escapeHtml(search.reason ?? search.stopReason)}${search.detail !== undefined ? ` — ${escapeHtml(search.detail)}` : ""}</div>`;
+  } else {
+    outcome = `<div class="banner banner--warn"><strong>No counteroffer found.</strong> No tested change within ${search.rounds.length} rounds kept cash at or above the floor in every scenario.</div>`;
+  }
+
+  // --- Per-round tables ----------------------------------------------------------
+  const rejected: { id: string; lever: string; rejection: { by: string; code: string; field?: string; detail: string } }[] = [];
+  const roundsHtml = search.rounds
+    .map((round) => {
+      const rows = round.candidates
+        .map((c) => {
+          if (c.rejection !== undefined) {
+            rejected.push({ id: c.id, lever: c.lever, rejection: c.rejection });
+          }
+          const status =
+            c.status === "duplicate"
+              ? `duplicate of ${escapeHtml(c.duplicateOf ?? "?")}`
+              : c.status === "rejected_malformed"
+                ? "rejected"
+                : c.passesAll === true
+                  ? "passes"
+                  : c.passesAll === false
+                    ? "fails"
+                    : "tested";
+          const terms =
+            c.summary !== undefined
+              ? escapeHtml(c.summary)
+              : `${escapeHtml(c.lever)} (${escapeHtml(JSON.stringify(c.params))})`;
+          const changeSize = c.rankCents === undefined ? "—" : formatCents(c.rankCents);
+          return `    <tr><td>${escapeHtml(c.id)}<br><span class="caption">${escapeHtml(c.lever)}</span><br><span class="caption">${escapeHtml(c.rationale)}</span></td><td>${terms}</td><td>${escapeHtml(c.worker ?? "—")}</td><td>${candidateResultCells(c)}</td><td>${changeSize}</td><td>${escapeHtml(status)}</td></tr>`;
+        })
+        .join("\n");
+      const modelBits = [escapeHtml(search.model)];
+      if (round.modelVersion !== undefined) modelBits.push(escapeHtml(round.modelVersion));
+      if (round.servedBy !== undefined) modelBits.push(escapeHtml(round.servedBy));
+      return `  <h3>Round ${round.round}</h3>
+  <p class="model-note">Model's note (model's own words): ${escapeHtml(round.modelNote)} <span class="caption">[${modelBits.join(", ")}]</span></p>
+  <table>
+    <tr><th>Candidate</th><th>Terms</th><th>Worker</th><th>Result</th><th>Change size</th><th>Status</th></tr>
+${rows}
+  </table>`;
+    })
+    .join("\n");
+
+  // --- Needs human review ---------------------------------------------------------
+  const reviewRows = rejected
+    .map(
+      (c) =>
+        `    <tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.lever)}</td><td>${escapeHtml(c.rejection.by)}</td><td>${escapeHtml(c.rejection.code)}</td><td>${escapeHtml(c.rejection.field ?? "—")}</td><td>${escapeHtml(c.rejection.detail)}</td></tr>`,
+    )
+    .join("\n");
+  const reviewHtml =
+    rejected.length === 0
+      ? ""
+      : `  <h3>Needs human review</h3>
+  <table>
+    <tr><th>Candidate</th><th>Lever</th><th>Rejected by</th><th>Code</th><th>Field</th><th>Detail</th></tr>
+${reviewRows}
+  </table>`;
+
+  return `<section class="counteroffer">
+  <h2>Counteroffer search</h2>
+${outcome}
+${roundsHtml}
+${reviewHtml}
+</section>`;
+}
+
 export const REVIEW_PAGE_CSS = `body{font-family:system-ui,sans-serif;max-width:44rem;margin:0 auto;padding:1rem;line-height:1.45;color:#1a1a1a}
 h1{font-size:1.35rem}h2{font-size:1.1rem;margin-top:2rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}h3{font-size:1rem}
 blockquote{margin:.5rem 0;padding:.5rem .8rem;border-left:3px solid #ccc;background:#f7f7f7}
@@ -299,6 +471,8 @@ table{border-collapse:collapse;width:100%;font-size:.85rem}th,td{border:1px soli
 .banner--blocked{background:#fdeaea;border:1px solid #e0a0a0}.banner--ok{background:#eaf6ea;border:1px solid #9ecf9e}
 .banner--warn{background:#fff8e6;border:1px solid #e0b040}
 .flag{background:#fff8e6;padding:.4rem .6rem}code{font-size:.85em;word-break:break-all}
+.headline{font-size:1.1rem;margin:1rem 0}.caption{color:#555;font-size:.82rem}
+.model-note{color:#333;font-style:italic}
 @media (max-width:48rem){table{display:block;overflow-x:auto}
 table.runs tr:has(th){display:none}table.runs tr{display:block;border:1px solid #ddd;border-radius:4px;margin:.5rem 0;padding:.2rem 0}table.runs td{display:block;border:0}}`;
 
@@ -312,12 +486,14 @@ export function renderReviewBody(receipt: RunReceipt): string {
   return `<h1>Caveat — contract cash review</h1>
 <p>Run <code>${escapeHtml(receipt.runId)}</code>. Questions: ${receipt.questionIds.map((q) => escapeHtml(q)).join(", ")}.</p>
 ${banner}
+${renderHeadline(receipt)}
 ${renderSources(receipt)}
 ${renderReleaseTiming(receipt)}
 ${renderSchedule(receipt)}
 ${renderHumanReview(receipt)}
 ${renderFlags(receipt)}
 ${renderResults(receipt)}
+${renderCounteroffer(receipt)}
 ${renderPolicyNotes(receipt)}`;
 }
 

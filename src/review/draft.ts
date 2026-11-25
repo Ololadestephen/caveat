@@ -155,6 +155,31 @@ export function renderDraft(receipt: RunReceipt): string {
     );
   }
 
+  // 5. Counteroffer search outcome — only when the search ran and produced a
+  // verdict; every substitution is a runner-verified number or compile text.
+  const search = receipt.counteroffer;
+  if (search !== undefined && search.status === "found" && search.best !== null) {
+    const best = search.rounds.flatMap((r) => r.candidates).find((c) => c.id === search.best);
+    if (best !== undefined) {
+      const bestRound = search.rounds.find((r) => r.candidates.includes(best))?.round;
+      const lowest = Object.values(best.perScenario ?? {})
+        .flatMap((scenarios) => Object.values(scenarios))
+        .reduce<{ date: string; balanceCents: number } | null>(
+          (acc, r) => (acc === null || r.lowest.balanceCents < acc.balanceCents ? r.lowest : acc),
+          null,
+        );
+      const lowestPart =
+        lowest === null ? "" : ` (lowest ${money(lowest.balanceCents)} on ${formatDate(lowest.date)})`;
+      lines.push(
+        `${next()}. Proposed change, tested by Caveat: ${best.summary ?? best.id}. This moves ${money(best.rankCents ?? 0)} earlier than the signed terms and adds no new money. Caveat's runner tested it against both extension cases under both retainer readings; cash stays at or above the ${money(receipt.assumptions.floorCents)} floor in all four${lowestPart}. It was found in round ${bestRound ?? "?"} of the search; the receipt lists every candidate tried.`,
+      );
+    }
+  } else if (search !== undefined && search.status === "not_found") {
+    lines.push(
+      `${next()}. No tested change within ${search.rounds.length} rounds kept cash at or above the floor in every scenario; the receipt lists every candidate tried.`,
+    );
+  }
+
   lines.push("");
   const a = receipt.assumptions;
   const firstCost = a.costs[0];
