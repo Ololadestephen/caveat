@@ -331,3 +331,49 @@ describe("startWatcher", () => {
     watcher.stop();
   });
 });
+
+describe("optional source files", () => {
+  it("a newly listed my-cash.csv counts as a change", async () => {
+    const db = openDb(":memory:");
+    const tuple = makeTuple("v1");
+    seedRun(db, {
+      id: "run-latest",
+      createdAt: "2026-11-25T02:00:00.000Z",
+      status: "approved",
+      sourceTuple: tuple,
+      receipt: RECEIPT_WITH_DIGESTS,
+    });
+    const cashEntry: BoxEntry = {
+      id: "file-cash",
+      type: "file",
+      name: "my-cash.csv",
+      sha1: "b".repeat(40),
+      versionId: "v9",
+    };
+    const confirmed: SourceTuple = [
+      ...tuple,
+      {
+        fileName: "my-cash.csv",
+        fileId: "file-cash",
+        versionId: "v9",
+        sha256: "c".repeat(64),
+        size: 42,
+      },
+    ];
+    const { deps, state, started } = makeDeps(db, {
+      listing: [...entriesFor(tuple), cashEntry],
+      recheck: () =>
+        Promise.resolve({
+          ok: true,
+          tuple: confirmed,
+          changes: diffSourceTuple(tuple, confirmed),
+        }),
+    });
+    await watchTick(deps, state);
+    expect(state.lastResult).toBe("change_found");
+    expect(started).toHaveLength(1);
+    expect(started[0]?.args.sourceTuple).toEqual(confirmed);
+    expect(getRun(db, "run-latest")?.status).toBe("stale");
+    db.close();
+  });
+});

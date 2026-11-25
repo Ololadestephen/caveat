@@ -646,3 +646,30 @@ describe("renderReviewPage — What changed in Box", () => {
     expect(renderReviewBody(RECEIPT)).not.toContain("What changed in Box");
   });
 });
+
+describe("renderReviewPage — cash source labels", () => {
+  it("labels the demo assumptions", () => {
+    const html = renderReviewPage(fixtureReceipt("run-page-cash-demo"));
+    expect(html).toContain("Opening cash, floor and costs are demo assumptions.");
+    expect(html).toContain("Cash numbers:");
+    expect(html).toContain("demo assumptions");
+  });
+
+  it("labels the owner cash file with its version tag", () => {
+    const receipt = JSON.parse(
+      JSON.stringify(fixtureReceipt("run-page-cash-owner")),
+    ) as RunReceipt;
+    receipt.cashSource = {
+      kind: "owner_file",
+      fileName: "my-cash.csv",
+      versionTag: "abc123def456",
+      sha12: "000aaa111bbb",
+    };
+    const html = renderReviewPage(receipt);
+    expect(html).toContain(
+      "Opening cash, floor and costs come from my-cash.csv (version abc123def456).",
+    );
+    expect(html).toContain("Cash numbers:");
+    expect(html).toContain("my-cash.csv (version abc123def456)");
+  });
+});

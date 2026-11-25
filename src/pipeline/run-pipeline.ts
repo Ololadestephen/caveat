@@ -11,7 +11,7 @@ import { detectFlags } from "../evidence/flags.ts";
 import { extractPdfLines } from "../evidence/pdf-text.ts";
 import { extractSections } from "../evidence/sections.ts";
 import type { ContractSection } from "../evidence/sections.ts";
-import { versionTag } from "../evidence/recheck.ts";
+import { versionTag, sha12 } from "../evidence/recheck.ts";
 import type { SourceTuple } from "../evidence/recheck.ts";
 import { DECISION_SYSTEM_PROMPT } from "../interpret/prompt.ts";
 import { OpenRouterDecisionProvider } from "../interpret/openrouter.ts";
@@ -23,6 +23,7 @@ import {
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import { RELEASE_TIMING } from "../interpret/types.ts";
 import type { DecisionOutcome, Excerpt, Question } from "../interpret/types.ts";
+import { parseCashFile } from "../plan/cash-file.ts";
 import {
   buildTwinveeInputs,
   escrowRules,
@@ -78,6 +79,10 @@ const FILE_NAMES = [
   "02-first-amendment.pdf",
   "03-second-amendment.pdf",
 ];
+
+// Optional owner-provided cash numbers. Fetched and versioned like the PDFs
+// but never sectionized.
+const CASH_FILE_NAME = "my-cash.csv";
 
 const EDGAR_URLS: Record<string, string> = {
   "01-consulting-agreement.pdf":
@@ -204,11 +209,13 @@ type FetchedFile = {
   versionPresent: boolean;
 };
 
+type CashFetched = FetchedFile & { fileId: string; versionId: string };
+
 async function fetchSources(
   boxConn: Connection,
   folderName: string,
   timer: StageTimer,
-): Promise<{ sourceTuple: SourceTuple; fetched: FetchedFile[] }> {
+): Promise<{ sourceTuple: SourceTuple; fetched: FetchedFile[]; cashFile: CashFetched | undefined }> {
   const folder = await timer.step(
     "box_folder",
     findFolderByName(boxConn.gatewayBaseUrl, "0", folderName),
@@ -239,7 +246,30 @@ async function fetchSources(
       size: evidence.metadata.size,
     });
   }
-  return { sourceTuple, fetched };
+  let cashFile: CashFetched | undefined;
+  const cashEntry = entries.find((e) => e.type === "file" && e.name === CASH_FILE_NAME);
+  if (cashEntry !== undefined) {
+    const evidence = await timer.step(
+      "box_fetch",
+      fetchBoxFile(boxConn.gatewayBaseUrl, cashEntry.id),
+    );
+    cashFile = {
+      fileName: evidence.metadata.name,
+      fileId: cashEntry.id,
+      versionId: evidence.metadata.fileVersionId,
+      bytes: evidence.bytes,
+      sha256: evidence.sha256,
+      versionPresent: evidence.metadata.fileVersionId.length > 0,
+    };
+    sourceTuple.push({
+      fileName: evidence.metadata.name,
+      fileId: cashEntry.id,
+      versionId: evidence.metadata.fileVersionId,
+      sha256: evidence.sha256,
+      size: evidence.metadata.size,
+    });
+  }
+  return { sourceTuple, fetched, cashFile };
 }
 
 async function sectionize(
@@ -375,11 +405,13 @@ async function runReadings(
   review: RetainerReview | undefined,
   effectiveAction: string | null,
   assumptions: TwinveeAssumptions,
+  expectedEligible: boolean,
   config: PipelineConfig,
 ): Promise<{
   readings: RunReceipt["readings"];
   inputs: Record<string, Record<string, unknown>>;
   reasons: { reason: string; detail: string }[];
+  expectedCheck?: RunReceipt["expectedCheck"];
 }> {
   const readings: RunReceipt["readings"] = [];
   const inputs: Record<string, Record<string, unknown>> = {};
@@ -387,26 +419,32 @@ async function runReadings(
   if (!(schedule.status === "extracted" && review !== undefined && effectiveAction === "escrow_release")) {
     return { readings, inputs, reasons };
   }
+  let expectedCheck: RunReceipt["expectedCheck"];
   try {
     const built = buildTwinveeInputs({ schedule: schedule.schedule, review, assumptions });
     for (const [id, rawInput] of Object.entries(built)) {
       inputs[id] = rawInput;
       const input = validateRunInput(rawInput);
       const out = runFixture(input);
-      if (config.assertExpected !== false) {
+      if (!expectedEligible) {
+        expectedCheck = "skipped_custom_cash";
+      } else if (config.assertExpected !== false) {
         const expectedRaw: unknown = JSON.parse(
           await readFile(`${config.fixturesDir}/${EXPECTED_FILES[id]}`, "utf8"),
         );
         if (!isRecord(expectedRaw) || !isRecord(expectedRaw.results)) {
           throw new Error(`expected fixture ${EXPECTED_FILES[id]} malformed`);
         }
+        expectedCheck ??= "matched";
         if (!isDeepStrictEqual(out.results, expectedRaw.results)) {
+          expectedCheck = "mismatch";
           reasons.push({
             reason: "results_mismatch",
             detail: `${id} results differ from ${EXPECTED_FILES[id]}`,
           });
         }
         if (!isDeepStrictEqual(out.smallestPassingCandidate, expectedRaw.smallestPassingCandidate)) {
+          expectedCheck = "mismatch";
           reasons.push({
             reason: "results_mismatch",
             detail: `${id} smallestPassingCandidate differs from ${EXPECTED_FILES[id]}`,
@@ -433,7 +471,7 @@ async function runReadings(
       detail: error instanceof Error ? error.message : String(error),
     });
   }
-  return { readings, inputs, reasons };
+  return { readings, inputs, reasons, expectedCheck };
 }
 
 // The deterministic search inputs — built before deciding whether to carry a
@@ -654,7 +692,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   // --- Evidence: fetch all three PDFs -------------------------------------------
   timer.begin();
   const folderName = config.boxFolder ?? "caveat_TEST";
-  const { sourceTuple, fetched } = await fetchSources(boxConn, folderName, timer);
+  const { sourceTuple, fetched, cashFile } = await fetchSources(boxConn, folderName, timer);
   timer.record("box_fetch");
 
   // --- PDF text -> sections ------------------------------------------------------
@@ -778,12 +816,49 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   blockedReasons.push(...reasons);
 
   timer.begin();
-  const assumptions = await timer.step("assumptions", loadAssumptions(config.fixturesDir));
-  const { readings, inputs, reasons: runnerReasons } = await runReadings(
+  const demoAssumptions = await timer.step(
+    "assumptions",
+    loadAssumptions(config.fixturesDir),
+  );
+  // The owner cash file replaces the demo numbers when present and valid. An
+  // invalid file blocks the run rather than falling back silently.
+  let assumptions = demoAssumptions;
+  let cashSource: NonNullable<RunReceipt["cashSource"]> = { kind: "demo_assumptions" };
+  if (cashFile !== undefined) {
+    const parsed = parseCashFile(cashFile.bytes, demoAssumptions);
+    if (!parsed.ok) {
+      blockedReasons.push({
+        reason: "cash_file_invalid",
+        detail: `line ${parsed.line}: ${parsed.code}: ${parsed.detail}`,
+      });
+    } else {
+      assumptions = parsed.assumptions;
+      cashSource = {
+        kind: "owner_file",
+        fileName: cashFile.fileName,
+        versionTag: versionTag({ fileId: cashFile.fileId, versionId: cashFile.versionId }),
+        sha12: sha12(cashFile.sha256),
+      };
+    }
+  }
+  // The committed expected fixtures only apply while the effective cash
+  // numbers deep-equal the demo file's.
+  const cashNumbers = (a: TwinveeAssumptions) => ({
+    startDate: a.startDate,
+    openingCents: a.openingCents,
+    floorCents: a.floorCents,
+    costs: a.costs,
+  });
+  const expectedEligible = isDeepStrictEqual(
+    cashNumbers(assumptions),
+    cashNumbers(demoAssumptions),
+  );
+  const { readings, inputs, reasons: runnerReasons, expectedCheck } = await runReadings(
     schedule,
     review,
     effectiveAction,
     assumptions,
+    expectedEligible,
     config,
   );
   blockedReasons.push(...runnerReasons);
@@ -882,12 +957,26 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     status: blockedReasons.length === 0 ? "reviewable" : "needs_review",
     blockedReasons,
     questionIds: [RELEASE_TIMING.id, "retainer_after_second_amendment"],
-    sources: fetched.map((f) => ({
-      fileName: f.fileName,
-      versionLabel: `sha256 ${f.sha256.slice(0, 12)}`,
-      versionPresent: f.versionPresent,
-      edgarUrl: EDGAR_URLS[f.fileName] ?? null,
-    })),
+    sources: [
+      ...fetched.map((f) => ({
+        fileName: f.fileName,
+        versionLabel: `sha256 ${f.sha256.slice(0, 12)}`,
+        versionPresent: f.versionPresent,
+        edgarUrl: EDGAR_URLS[f.fileName] ?? null,
+      })),
+      ...(cashFile !== undefined
+        ? [
+            {
+              fileName: cashFile.fileName,
+              versionLabel: `sha256 ${cashFile.sha256.slice(0, 12)}`,
+              versionPresent: cashFile.versionPresent,
+              edgarUrl: null,
+            },
+          ]
+        : []),
+    ],
+    cashSource,
+    ...(expectedCheck !== undefined ? { expectedCheck } : {}),
     sectionDigests,
     typedCallDigests: {
       release_timing: decisionCallDigest,

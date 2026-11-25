@@ -145,3 +145,29 @@ describe("renderDraft — counteroffer point", () => {
     expect(renderDraft(RECEIPT)).not.toContain("tested by Caveat");
   });
 });
+
+describe("owner cash file closing line", () => {
+  it("names the file and its version tag", () => {
+    const receipt = {
+      ...JSON.parse(JSON.stringify(RECEIPT)),
+      cashSource: {
+        kind: "owner_file",
+        fileName: "my-cash.csv",
+        versionTag: "abc123def456",
+        sha12: "000aaa111bbb",
+      },
+    } as RunReceipt;
+    const draft = renderDraft(receipt);
+    expect(draft).toContain(
+      "Cash figures come from your file my-cash.csv (version abc123def456): opening cash $20,000 on October 1, 2026, cash floor $10,000, 6 costs totalling $36,000 from October 2026 to March 2027.",
+    );
+    expect(draft).toContain("(runner policy");
+  });
+
+  it("keeps the demo wording when no owner file was used", () => {
+    const receipt = JSON.parse(JSON.stringify(RECEIPT)) as RunReceipt;
+    expect(renderDraft(receipt)).toContain(
+      "Cash figures use demo assumptions, not facts about the parties:",
+    );
+  });
+});

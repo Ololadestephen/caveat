@@ -405,8 +405,22 @@ function renderHeadline(receipt: RunReceipt): string {
   }
   if (worst === undefined) return "";
   const shortfall = floor - worst.balanceCents;
+  const cashCaption =
+    receipt.cashSource?.kind === "owner_file"
+      ? `Opening cash, floor and costs come from ${escapeHtml(receipt.cashSource.fileName)} (version ${escapeHtml(receipt.cashSource.versionTag)}).`
+      : "Opening cash, floor and costs are demo assumptions.";
   return `<p class="headline"><strong>${formatMoneyShort(shortfall)} under your floor on ${escapeHtml(formatDateShort(worst.date))} while ${formatMoneyShort(worst.escrowCents)} sits in escrow</strong><br>
-<span class="caption">Reading: ${escapeHtml(worst.label)} (one of two unresolved readings). Opening cash, floor and costs are demo assumptions.</span></p>`;
+<span class="caption">Reading: ${escapeHtml(worst.label)} (one of two unresolved readings). ${cashCaption}</span></p>`;
+}
+
+function renderCashNumbers(receipt: RunReceipt): string {
+  const a = receipt.assumptions;
+  const source =
+    receipt.cashSource?.kind === "owner_file"
+      ? `${escapeHtml(receipt.cashSource.fileName)} (version ${escapeHtml(receipt.cashSource.versionTag)})`
+      : "demo assumptions";
+  const total = a.costs.reduce((sum, c) => sum + c.amountCents, 0);
+  return `<p class="caption cash-numbers"><strong>Cash numbers:</strong> ${source} — opening ${escapeHtml(formatMoneyShort(a.openingCents))} on ${escapeHtml(formatDateShort(a.startDate))}, floor ${escapeHtml(formatMoneyShort(a.floorCents))}, ${a.costs.length} costs totalling ${escapeHtml(formatMoneyShort(total))}.</p>`;
 }
 
 function scenarioCount(record: { perScenario?: Record<string, Record<string, unknown>> | undefined }): number {
@@ -574,6 +588,7 @@ export function renderReviewBody(receipt: RunReceipt): string {
 <p>Run <code>${escapeHtml(receipt.runId)}</code>. Questions: ${receipt.questionIds.map((q) => escapeHtml(q)).join(", ")}.</p>
 ${banner}
 ${renderHeadline(receipt)}
+${renderCashNumbers(receipt)}
 ${renderIncremental(receipt)}
 ${renderSources(receipt)}
 ${renderReleaseTiming(receipt)}

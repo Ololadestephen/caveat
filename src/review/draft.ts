@@ -207,8 +207,16 @@ export function renderDraft(receipt: RunReceipt): string {
       break;
     }
   }
-  lines.push(
-    `Cash figures use demo assumptions, not facts about the parties: opening cash ${money(a.openingCents)}, cash floor ${money(a.floorCents)}, costs of ${firstCost !== undefined ? money(firstCost.amountCents) : "the stated amount"} on the 15th of each month from ${months}. Payments due on a weekend are counted on the next business day (runner policy${policyExample}).`,
-  );
+  const cash = receipt.cashSource;
+  if (cash?.kind === "owner_file") {
+    const total = a.costs.reduce((sum, c) => sum + c.amountCents, 0);
+    lines.push(
+      `Cash figures come from your file ${cash.fileName} (version ${cash.versionTag}): opening cash ${money(a.openingCents)} on ${formatDate(a.startDate)}, cash floor ${money(a.floorCents)}, ${a.costs.length} costs totalling ${money(total)} from ${months}. Payments due on a weekend are counted on the next business day (runner policy${policyExample}).`,
+    );
+  } else {
+    lines.push(
+      `Cash figures use demo assumptions, not facts about the parties: opening cash ${money(a.openingCents)}, cash floor ${money(a.floorCents)}, costs of ${firstCost !== undefined ? money(firstCost.amountCents) : "the stated amount"} on the 15th of each month from ${months}. Payments due on a weekend are counted on the next business day (runner policy${policyExample}).`,
+    );
+  }
   return `${lines.join("\n")}\n`;
 }

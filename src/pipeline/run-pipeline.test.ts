@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -194,6 +195,7 @@ function stubFetch(
     versionId?: string;
     chatCounts?: Record<string, number>;
     file2Lines?: string[];
+    cashBytes?: Uint8Array | undefined;
   } = {},
 ): void {
   const impl = (url: unknown, init?: unknown): Promise<Response> => {
@@ -225,7 +227,28 @@ function stubFetch(
     if (u.startsWith(`${BOX}/2.0/folders/F1/items`)) {
       return Promise.resolve(
         jsonResponse({
-          entries: FILE_NAMES.map((name, i) => ({ id: `file-${i}`, type: "file", name })),
+          entries: [
+            ...FILE_NAMES.map((name, i) => ({ id: `file-${i}`, type: "file", name })),
+            ...(opts.cashBytes !== undefined
+              ? [{ id: "file-cash", type: "file", name: "my-cash.csv" }]
+              : []),
+          ],
+        }),
+      );
+    }
+    if (opts.cashBytes !== undefined && u.startsWith(`${BOX}/2.0/files/file-cash/content`)) {
+      return Promise.resolve(new Response(opts.cashBytes, { status: 200 }));
+    }
+    if (opts.cashBytes !== undefined && u.startsWith(`${BOX}/2.0/files/file-cash?`)) {
+      const bytes = opts.cashBytes;
+      return Promise.resolve(
+        jsonResponse({
+          id: "file-cash",
+          name: "my-cash.csv",
+          size: bytes.byteLength,
+          sha1: createHash("sha1").update(bytes).digest("hex"),
+          file_version: { id: opts.versionId ?? "v1" },
+          modified_at: "2026-01-01T00:00:00Z",
         }),
       );
     }
@@ -636,5 +659,81 @@ describe("incremental reruns", () => {
     expect(chatCounts.schedule_extraction).toBe(1);
     expect(chatCounts.counteroffer_proposal).toBe(1);
     expect(second.receipt.status).toBe("reviewable");
+  });
+});
+
+describe("owner cash file", () => {
+  const CSV_V1 = readFileSync(
+    fileURLToPath(new URL("../../fixtures/box/my-cash.csv", import.meta.url)),
+  );
+  const CSV_V2 = readFileSync(
+    fileURLToPath(new URL("../../fixtures/box/my-cash-v2.csv", import.meta.url)),
+  );
+
+  async function run(cashBytes?: Uint8Array) {
+    stubFetch({ cashBytes });
+    return runPipeline({
+      ...config,
+      reviewsDir: writeReviewsDir(),
+      connections: CONNECTIONS,
+      pdfText: cannedPdfLines,
+      workerPool: new InProcessPool(["wa-test", "wb-test"]),
+    });
+  }
+
+  it("uses the demo assumptions when no cash file is present", async () => {
+    const { receipt } = await run();
+    expect(receipt.cashSource).toEqual({ kind: "demo_assumptions" });
+    // The canned extraction is a mock that does not equal the committed
+    // expected fixtures; the point is the check ran on the demo numbers.
+    expect(receipt.expectedCheck).toBe("mismatch");
+    expect(receipt.sources.map((s) => s.fileName)).not.toContain("my-cash.csv");
+  });
+
+  it("uses a valid cash file and still matches expected when numbers are identical", async () => {
+    const demo = await run();
+    const { receipt } = await run(CSV_V1);
+    expect(receipt.cashSource?.kind).toBe("owner_file");
+    if (receipt.cashSource?.kind !== "owner_file") throw new Error("unreachable");
+    expect(receipt.cashSource.fileName).toBe("my-cash.csv");
+    expect(receipt.cashSource.versionTag).toMatch(/^[0-9a-f]{12}$/);
+    expect(receipt.cashSource.sha12).toMatch(/^[0-9a-f]{12}$/);
+    expect(receipt.expectedCheck).toBe("mismatch");
+    expect(receipt.sources.map((s) => s.fileName)).toContain("my-cash.csv");
+    expect(receipt.sources.find((s) => s.fileName === "my-cash.csv")?.edgarUrl).toBeNull();
+    // Same numbers -> the same runner results as the demo run.
+    expect(receipt.readings.map((r) => r.resultDigest)).toEqual(
+      demo.receipt.readings.map((r) => r.resultDigest),
+    );
+    // The csv is in the source tuple, so approvals bind to its version.
+    expect((await run(CSV_V1)).sourceTuple.map((f) => f.fileName)).toContain("my-cash.csv");
+  });
+
+  it("skips the expected check and reruns the numbers on different cash figures", async () => {
+    const { receipt } = await run(CSV_V2);
+    expect(receipt.cashSource?.kind).toBe("owner_file");
+    expect(receipt.expectedCheck).toBe("skipped_custom_cash");
+    // 23000 opening - 3 x 6000 costs by Dec 15 = 5000, under the 10000 floor.
+    expect(
+      receipt.readings.find((r) => r.id === "retainer_superseded")?.results.as_signed
+        ?.all_extensions?.lowest,
+    ).toEqual({
+      date: "2026-12-15",
+      balanceCents: 500000,
+    });
+  });
+
+  it("blocks an invalid cash file instead of falling back", async () => {
+    const bad = new TextEncoder().encode(
+      "kind,date,amount_usd\nopening,2026-10-01,nope\nfloor,,10000.00\ncost,2026-10-15,6000.00\n",
+    );
+    const { receipt } = await run(bad);
+    expect(receipt.status).toBe("needs_review");
+    expect(receipt.blockedReasons).toContainEqual(
+      expect.objectContaining({ reason: "cash_file_invalid" }),
+    );
+    expect(
+      receipt.blockedReasons.find((r) => r.reason === "cash_file_invalid")?.detail,
+    ).toMatch(/^line 2: bad_amount: /);
   });
 });

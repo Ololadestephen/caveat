@@ -86,6 +86,14 @@ export type RunReceipt = {
   flags: EvidenceFlag[];
   readings: ReceiptReading[];
   assumptions: TwinveeAssumptions;
+  // Which cash numbers the run used: the owner's my-cash.csv when present and
+  // valid, else the demo fixture.
+  cashSource?:
+    | { kind: "owner_file"; fileName: string; versionTag: string; sha12: string }
+    | { kind: "demo_assumptions" };
+  // What the expected-fixture check did this run; absent when the readings
+  // never ran or the check was disabled.
+  expectedCheck?: "matched" | "mismatch" | "skipped_custom_cash";
   // Added in v2 — absent on v1 receipts and on runs where the search never ran.
   counteroffer?: CounterofferReceipt;
   incremental?: IncrementalInfo;

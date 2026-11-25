@@ -103,9 +103,15 @@ function recordEvent(
   });
 }
 
+// Folder files the pipeline will consume when present. A listed optional
+// file that is absent from the run's tuple counts as a change (a first
+// upload must replan); removing one is caught by the tuple walk below.
+export const OPTIONAL_SOURCE_FILES = ["my-cash.csv"];
+
 // True when the folder listing's files exactly cover the latest run's tuple:
 // same names, same file ids, same version ids. Extra folder entries are
-// ignored — they never entered the tuple.
+// ignored — except names in OPTIONAL_SOURCE_FILES, which would enter the
+// next tuple.
 function listingMatchesTuple(
   listing: Awaited<ReturnType<typeof listFolder>>,
   tuple: SourceTuple,
@@ -118,6 +124,12 @@ function listingMatchesTuple(
       entry.id !== source.fileId ||
       entry.versionId !== source.versionId
     ) {
+      return false;
+    }
+  }
+  const tupleNames = new Set(tuple.map((t) => t.fileName));
+  for (const name of OPTIONAL_SOURCE_FILES) {
+    if (!tupleNames.has(name) && files.some((e) => e.name === name)) {
       return false;
     }
   }
