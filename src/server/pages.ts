@@ -107,7 +107,7 @@ type StaleChange = {
   newSha12?: string;
 };
 
-function renderStaleChange(c: StaleChange): string {
+export function renderStaleChange(c: StaleChange): string {
   const versions =
     c.oldVersionTag !== undefined || c.newVersionTag !== undefined
       ? ` (version ${escapeHtml(c.oldVersionTag ?? "—")} → ${escapeHtml(c.newVersionTag ?? "—")})`

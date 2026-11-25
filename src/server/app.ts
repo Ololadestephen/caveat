@@ -3,7 +3,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { DatabaseSync } from "node:sqlite";
 
 import { recheckFolder } from "../evidence/recheck.ts";
-import type { SourceTuple } from "../evidence/recheck.ts";
+import type { SourceTuple, StaleChange } from "../evidence/recheck.ts";
 import { listConnections } from "../gateway.ts";
 import type { Connection } from "../gateway.ts";
 import { runPipeline } from "../pipeline/run-pipeline.ts";
@@ -27,7 +27,7 @@ import {
   recordExport,
   supersedeOthers,
 } from "../store/db.ts";
-import { pageShell, renderRun, renderRunList } from "./pages.ts";
+import { pageShell, renderRun, renderRunList, renderStaleChange } from "./pages.ts";
 import type { WatcherView } from "./pages.ts";
 import { startTaskHold } from "./task-hold.ts";
 
@@ -254,7 +254,7 @@ async function handleExport(ctx: AppContext, res: ServerResponse, runId: string)
   const run = getRun(db, runId);
   if (run === undefined) return sendHtml(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1>"));
   const approval = getApproval(db, runId);
-  if (run.status !== "approved" || approval === undefined) {
+  if (approval === undefined) {
     return sendHtml(res, 409, pageShell("Export failed", deps.revision, `<h1>Export failed</h1><p>This run is ${escapeHtml(run.status)}; only approved runs can be exported.</p><p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
   }
   const blockExport = (status: number, result: "blocked_stale" | "blocked_unavailable", detail: unknown, body: string): void => {
@@ -268,6 +268,34 @@ async function handleExport(ctx: AppContext, res: ServerResponse, runId: string)
     });
     sendHtml(res, status, pageShell("Export blocked", deps.revision, `${body}<p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
   };
+  const changedSinceApproval = (changes: StaleChange[]): string =>
+    `<h1>Export blocked</h1><p>The source files changed since approval:</p><ul>${changes.map(renderStaleChange).join("")}</ul>`;
+
+  // A run the watcher already marked stale keeps its recorded change list;
+  // refuse through the same blocked_stale path so the export row is saved.
+  if (run.status === "stale") {
+    let changes: StaleChange[] | undefined;
+    if (run.stale_detail_json !== null) {
+      try {
+        const parsed: unknown = JSON.parse(run.stale_detail_json);
+        if (Array.isArray(parsed)) changes = parsed as StaleChange[];
+      } catch {
+        changes = undefined;
+      }
+    }
+    if (changes === undefined) {
+      return blockExport(
+        409,
+        "blocked_stale",
+        "stale; change detail unavailable",
+        `<h1>Export blocked</h1><p>The source files changed since approval; the change detail is unavailable.</p>`,
+      );
+    }
+    return blockExport(409, "blocked_stale", changes, changedSinceApproval(changes));
+  }
+  if (run.status !== "approved") {
+    return sendHtml(res, 409, pageShell("Export failed", deps.revision, `<h1>Export failed</h1><p>This run is ${escapeHtml(run.status)}; only approved runs can be exported.</p><p><a href="/runs/${escapeHtml(runId)}">Back to the run</a></p>`));
+  }
 
   let tuple: SourceTuple;
   try {
@@ -292,10 +320,7 @@ async function handleExport(ctx: AppContext, res: ServerResponse, runId: string)
     }
     if (outcome.changes.length > 0) {
       markStale(db, runId, JSON.stringify(outcome.changes));
-      const items = outcome.changes
-        .map((c) => `<li>${escapeHtml(c.fileName)}: ${escapeHtml(c.kind)}</li>`)
-        .join("");
-      return blockExport(409, "blocked_stale", outcome.changes, `<h1>Export blocked</h1><p>The source files changed since approval:</p><ul>${items}</ul>`);
+      return blockExport(409, "blocked_stale", outcome.changes, changedSinceApproval(outcome.changes));
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

@@ -11,7 +11,7 @@ import { fixtureReceipt } from "../review/fixture-receipt.ts";
 import { draftHash, receiptHash } from "../review/draft.ts";
 import type { RunReceipt } from "../review/receipt.ts";
 import { canonicalJson } from "../runner/digest.ts";
-import { getRun, openDb } from "../store/db.ts";
+import { getRun, markStale, openDb } from "../store/db.ts";
 import { createApp } from "./app.ts";
 import type { AppDeps } from "./app.ts";
 
@@ -348,6 +348,40 @@ describe("caveat app", () => {
       expect(page).toContain(change.kind);
     },
   );
+
+  it("blocks export of a watcher-staled run and records each attempt", async () => {
+    const r = await rig();
+    const { runId } = await startApprovedRun(r);
+    const changes: StaleChange[] = [
+      {
+        fileName: "03-second-amendment.pdf",
+        kind: "version_changed",
+        oldVersionTag: "99400d6f8bd6",
+        newVersionTag: "5ae8e602aa7f",
+        oldSha12: "3".repeat(12),
+        newSha12: "3".repeat(12),
+      },
+    ];
+    markStale(r.db, runId, JSON.stringify(changes));
+    const res = await post(r, `/runs/${runId}/export`);
+    expect(res.status).toBe(409);
+    const body = await res.text();
+    expect(body).toContain("The source files changed since approval");
+    expect(body).toContain("03-second-amendment.pdf");
+    expect(body).toContain("99400d6f8bd6");
+    expect(body).toContain("5ae8e602aa7f");
+    const exports = r.db.prepare("SELECT result, detail_json FROM exports").all() as {
+      result: string;
+      detail_json: string;
+    }[];
+    expect(exports).toEqual([{ result: "blocked_stale", detail_json: JSON.stringify(changes) }]);
+    const second = await post(r, `/runs/${runId}/export`);
+    expect(second.status).toBe(409);
+    expect(r.db.prepare("SELECT result FROM exports").all()).toEqual([
+      { result: "blocked_stale" },
+      { result: "blocked_stale" },
+    ]);
+  });
 
   it.each([
     ["gateway 403", { ok: false, detail: "403 from gateway" } satisfies RecheckOutcome],
