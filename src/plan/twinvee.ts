@@ -89,7 +89,7 @@ function retainerRules(args: {
   return { rules, totalCents: total };
 }
 
-function escrowRules(schedule: ValidatedSchedule, fundingDate: string): PaymentRule[] {
+export function escrowRules(schedule: ValidatedSchedule, fundingDate: string): PaymentRule[] {
   const rules: PaymentRule[] = [
     {
       id: "escrow-funding",
