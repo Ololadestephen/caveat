@@ -179,7 +179,13 @@ ASSERT_OUT="$(node -e '
     const workers = new Set(tested.map((c) => c.worker));
     for (const w of workers)
       if (w !== "caveat-wa" && w !== "caveat-wb") problems.push(`worker ${w}`);
-    if (tested.length >= 2 && workers.size < 2) problems.push("only one worker used");
+    // Distribution is round-robin within a round, so both workers are only
+    // guaranteed to appear when one round tests >=2 candidates.
+    for (const x of rounds) {
+      const rt = x.candidates.filter((c) => c.status === "tested");
+      if (rt.length >= 2 && new Set(rt.map((c) => c.worker)).size < 2)
+        problems.push(`round ${x.round} used one worker for ${rt.length} candidates`);
+    }
   } else if (co) {
     problems.push(`status ${co.status}`);
   }
