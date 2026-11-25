@@ -23,9 +23,10 @@ A Caveat run on them surfaces five things a reader can miss:
   monthly retainer continues; Caveat runs the cash model under both readings
   and reports each outcome separately rather than picking one.
 - **A tested fix.** A counteroffer search asks the model for candidate term
-  changes, runs each one on the worker Sprites, feeds the runner's results
-  back and repeats for up to four rounds, keeping the smallest tested change
-  that holds cash at or above the floor in every scenario.
+  changes, runs them in parallel on the worker Sprites, feeds the runner's
+  results back and narrows for up to four rounds, keeping the smallest tested
+  change that holds cash at or above the floor in every scenario, alongside
+  the closest smaller change that failed.
 - **Stale approval.** Approvals pin the exact Box version of every source
   file. The coordinator watches the Box folder; when the amendment is
   re-uploaded as a new Box version (same bytes), the old approval is marked
@@ -48,19 +49,26 @@ A Caveat run on them surfaces five things a reader can miss:
   operator's machine holds only its `sprite` CLI login, which the proof
   scripts use through `sprite exec` and `sprite proxy`; the coordinator
   holds no org token.
-- **Counteroffer search** (`src/search/`): the model proposes up to three
-  candidates per round as strict JSON, using four levers that move money
-  already in the deal earlier (a cash deposit at signing, an earlier escrow
-  release, a monthly split of that release, or shorter payment terms). The
-  coordinator compiles each candidate into payment rules, runs it on both
-  workers in parallel under both retainer readings and both extension cases,
-  and sends the runner's results back. The search stops when the model says
-  it is done or after four rounds. The model never supplies a balance: the
-  runner is the only source of numbers, and "smallest" means the fewest
-  dollars paid earlier than the signed terms. Candidates that fail
-  validation or that the runner rejects are listed for human review. Every
-  round (candidates, results and the model's note on why it moved on) is on
-  the review page.
+- **Counteroffer search** (`src/search/`): each round the model proposes 2
+  or 3 candidates as strict JSON, each using a different lever. The four
+  levers move money already in the deal earlier: a cash deposit at signing,
+  an earlier escrow release, a monthly split of that release, or shorter
+  payment terms. A proposal that repeats a lever in a round, or offers fewer
+  than two candidates before it says it is done, stops the search for human
+  review. The coordinator compiles each candidate into payment rules and
+  splits the round's candidates across `caveat-wa` and `caveat-wb`, which run
+  them at the same time under both retainer readings and both extension
+  cases. The runner's results go back to the model with a per-lever bracket
+  (smallest passing and largest failing value tested so far), and the model
+  narrows the bracket in the next round. The search stops when the model
+  says it is done or after four rounds. The model never supplies a balance:
+  the runner is the only source of numbers, and "smallest" means the fewest
+  dollars paid earlier than the signed terms. The review page and draft show
+  the closest smaller candidate of the same lever that failed, or say that
+  no smaller one was tested and the result is not a proven minimum.
+  Candidates that fail validation or that the runner rejects are listed for
+  human review. Every round (candidates, worker, results and the model's
+  note on why it moved on) is on the review page.
 - **Box watcher** (`src/watch/`): while the coordinator is awake it checks
   the Box folder's file versions every 60 s. A new version marks approved
   and reviewable runs on the old version `stale` and starts a new run that
