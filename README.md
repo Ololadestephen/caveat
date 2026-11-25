@@ -10,7 +10,7 @@ never sent, never legal advice.
 
 The live evidence is a text rendering of three public SEC EDGAR exhibits from
 Twin Vee PowerCats Co.: a consulting agreement and its two amendments.
-A Caveat run on them surfaces four things a reader can miss:
+A Caveat run on them surfaces five things a reader can miss:
 
 - **Escrow is not cash.** The Second Amendment pays six months of compensation
   into escrow; the first release to the consultant is months away. Under the
@@ -22,10 +22,14 @@ A Caveat run on them surfaces four things a reader can miss:
 - **A retainer ambiguity.** The amendments never say whether the original
   monthly retainer continues; Caveat runs the cash model under both readings
   and reports each outcome separately rather than picking one.
+- **A tested fix.** A counteroffer search asks the model for candidate term
+  changes, runs each one on the worker Sprites, feeds the runner's results
+  back and repeats for up to four rounds, keeping the smallest tested change
+  that holds cash at or above the floor in every scenario.
 - **Stale approval.** Approvals pin the exact Box version of every source
-  file. When the amendment was re-uploaded as a new Box version (same bytes),
-  the next export was blocked as `stale` — the approval no longer covers the
-  folder as it exists now.
+  file. The coordinator watches the Box folder; when the amendment is
+  re-uploaded as a new Box version (same bytes), the old approval is marked
+  `stale`, its export is refused, and a fresh draft goes into review.
 
 ## Architecture
 
@@ -44,21 +48,48 @@ A Caveat run on them surfaces four things a reader can miss:
   operator's machine holds only its `sprite` CLI login, which the proof
   scripts use through `sprite exec` and `sprite proxy`; the coordinator
   holds no org token.
+- **Counteroffer search** (`src/search/`): the model proposes up to three
+  candidates per round as strict JSON, using four levers that move money
+  already in the deal earlier (a cash deposit at signing, an earlier escrow
+  release, a monthly split of that release, or shorter payment terms). The
+  coordinator compiles each candidate into payment rules, runs it on both
+  workers in parallel under both retainer readings and both extension cases,
+  and sends the runner's results back. The search stops when the model says
+  it is done or after four rounds. The model never supplies a balance: the
+  runner is the only source of numbers, and "smallest" means the fewest
+  dollars paid earlier than the signed terms. Candidates that fail
+  validation or that the runner rejects are listed for human review. Every
+  round (candidates, results and the model's note on why it moved on) is on
+  the review page.
+- **Box watcher** (`src/watch/`): while the coordinator is awake it checks
+  the Box folder's file versions every 60 s. A new version marks approved
+  and reviewable runs on the old version `stale` and starts a new run that
+  re-asks the model only when the text it would see has changed. Unchanged
+  answers are carried forward with a pointer to the run they came from, and
+  the deterministic steps always rerun. Sprites pause when idle and the
+  watcher pauses with them; the next request wakes it and it checks again.
+  It never uploads to Box or sends anything.
 - **Worker Sprites** (`caveat-wa`, `caveat-wb`): hold no Box/OpenRouter
-  grants at all. The worker proof pushes a fixture bundle, runs it under a
+  grants at all. The coordinator reaches them through a `caveat-workers`
+  Custom API connector restricted to the two workers' exec endpoints, so
+  the Sprites API token lives in the connector, not in any Sprite. The
+  coordinator checks that each worker's input digest matches what it sent.
+  The worker proof pushes a fixture bundle, runs it under a
   per-worker overlay, checkpoints the Sprite, restores it, and replays —
   showing deterministic digests, overlay isolation between workers, and that
   only the pre-existing checkpoint remains afterwards.
-- **Controller**: the scripts under `scripts/` run on the operator's machine
-  and orchestrate the Sprites. Workers never approve or export; there is no
-  code path from a worker into those handlers.
+- **Controller**: the coordinator drives the workers during a run. The
+  deploy and proof scripts under `scripts/` run on the operator's machine.
+  Workers never approve or export; there is no code path from a worker into
+  those handlers.
 
 ## What is live, synthetic, or assumed
 
 - **Live**: the three source PDFs in the Box test folder (text renderings of
   the public EDGAR exhibits below), the model calls through OpenRouter, the
-  deterministic cash runner, the web app, and the export-time recheck that
-  detects Box drift.
+  deterministic cash runner, the counteroffer search on the worker Sprites,
+  the Box watcher, the web app, and the export-time recheck that detects Box
+  drift.
 - **Synthetic or assumed**: the hand-checked $12,000 deposit ledger used as
   the arithmetic oracle (`fixtures/runner/synthetic-12k*.json`), the demo
   cash assumptions (opening cash, cash floor, monthly costs on the 15th), the
@@ -72,6 +103,16 @@ A Caveat run on them surfaces four things a reader can miss:
 - **Private, not in this repo**: the hand-maintained human review record
   (`reviews/retainer-review.json`) and the proof evidence written under
   `$CAVEAT_PRIVATE`.
+- **Model reliability**: the free model is not always consistent. On
+  2026-11-24 at 14:08 UTC (run `run-20261124-140809-1093`) its reason argued
+  that the second amendment is an escrow release, but its answer field said
+  `cash_on_fixed_date`, with a self-reported confidence of 0.97. Caveat
+  blocked the run as `needs_review` because only an `escrow_release` answer
+  is modeled; it does not detect a reason that contradicts its answer in
+  general. Another run (16:50 UTC the same day) was blocked as a schema
+  mismatch when the model returned "$25,000 per month" where a bare amount
+  was required. The proof scripts retry a blocked run once, so a passing
+  proof does not mean the model is reliable.
 - **Self-reported confidence**: model confidence values are self-reported by
   the model, not calibrated — a `1.00` is the model's own claim and is shown
   as such.
@@ -116,7 +157,10 @@ All evidence is written under `$CAVEAT_PRIVATE` (default
 
 Useful environment overrides: `CAVEAT_COORD_SPRITE`, `CAVEAT_WORKER_A`,
 `CAVEAT_WORKER_B`, `CAVEAT_SERVICE`, `CAVEAT_PRIVATE`, `CAVEAT_BOX_FOLDER`,
-`CAVEAT_OPERATIVE_FILE`, `CAVEAT_RUN_TIMEOUT_MS` (default 300000),
+`CAVEAT_OPERATIVE_FILE`, `CAVEAT_RUN_TIMEOUT_MS` (default 600000),
+`CAVEAT_WATCH_INTERVAL_MS` (default 60000, `0` disables the Box watcher),
+`CAVEAT_WORKERS` (default `caveat-wa,caveat-wb`), `CAVEAT_WORKERS_CONNECTOR`
+(default `caveat-workers`),
 `CAVEAT_RECHECK_TIMEOUT_MS` (default 30000), `CAVEAT_APPROVER` (required to
 approve a run), `CAVEAT_DATA_DIR` (service database location).
 
@@ -138,8 +182,10 @@ costs or modeled extensions are demo assumptions, not facts about the parties.
 The cash-runner arithmetic is checked against a fixed synthetic ledger.
 
 ## Environment
-- `CAVEAT_DECISION_MODEL` — decision model id for every typed call (default
-  `nvidia/nemotron-3.5-super-vl:free`); set to `typesafe/jev-router` to route the
-  same typed question through Jev with no code change.
+- `CAVEAT_DECISION_MODEL` — model id for every typed call, including the
+  counteroffer search (default `nvidia/nemotron-3.5-super-vl:free`).
+  Jev (`typesafe/jev-router`) is configurable, untested: setting this
+  variable changes only the model id in the request, but no run has used
+  Jev, and it is priced on OpenRouter rather than free.
 
 **Not legal advice. Drafts are never sent.**
