@@ -99,7 +99,7 @@ RUN_ID="${RUN_LOCATION##*/runs/}"
 note "{\"step\":\"c\",\"run_id\":\"$RUN_ID\"}"
 
 RUN_PAGE=""
-for _ in $(seq 1 60); do
+for _ in $(seq 1 240); do
   RUN_PAGE="$(curl -s "$BASE/runs/$RUN_ID")"
   if echo "$RUN_PAGE" | grep -q 'badge--reviewable\|badge--needs_review\|badge--failed'; then
     break
