@@ -21,10 +21,21 @@ export async function listConnections(options: { fetch?: typeof fetch } = {}): P
       typeof entry.provider === "string" &&
       typeof entry.gateway_base_url === "string"
     ) {
+      // Custom-API connectors have no `name`; their label lives in
+      // provider_account_name (and display_name). CAVEAT_WORKERS_CONNECTOR
+      // matches whichever is present.
+      const name =
+        typeof entry.name === "string"
+          ? entry.name
+          : typeof entry.provider_account_name === "string"
+            ? entry.provider_account_name
+            : typeof entry.display_name === "string"
+              ? entry.display_name
+              : undefined;
       connections.push({
         provider: entry.provider,
         gatewayBaseUrl: entry.gateway_base_url,
-        ...(typeof entry.name === "string" ? { name: entry.name } : {}),
+        ...(name !== undefined ? { name } : {}),
       });
     }
   }
