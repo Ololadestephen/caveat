@@ -248,11 +248,12 @@ describe("runCounterofferSearch", () => {
   });
 
   it("caps at 4 rounds with stopReason round_cap", async () => {
+    const EARLY_1: RawCandidate = { lever: "earlier_release", amount_cents: 100, date: "2026-11-13" };
     const { chat, calls } = scriptedChat([
-      proposal([DEPOSIT_1], false),
-      proposal([DEPOSIT_1], false),
-      proposal([DEPOSIT_1], false),
-      proposal([DEPOSIT_1], false),
+      proposal([DEPOSIT_1, EARLY_1], false),
+      proposal([DEPOSIT_1, EARLY_1], false),
+      proposal([DEPOSIT_1, EARLY_1], false),
+      proposal([DEPOSIT_1, EARLY_1], false),
     ]);
     const result = await runCounterofferSearch({
       base: BASE,
@@ -272,11 +273,10 @@ describe("runCounterofferSearch", () => {
   it("picks the smallest rankCents, ties on centDays then order", async () => {
     // All three pass; best is the smallest rank, then smallest centDays.
     const early900Nov13: RawCandidate = { lever: "earlier_release", amount_cents: 900000, date: "2026-11-13" };
-    const early900Nov10: RawCandidate = { lever: "earlier_release", amount_cents: 900000, date: "2026-11-10" };
     const early800: RawCandidate = { lever: "earlier_release", amount_cents: 800000, date: "2026-11-13" };
     const { chat } = scriptedChat([
-      proposal([early900Nov13], false),
-      proposal([early900Nov10, early800], true),
+      proposal([early900Nov13, { lever: "upfront_deposit", amount_cents: 5000000, date: "2026-10-01" }], false),
+      proposal([{ lever: "upfront_deposit", amount_cents: 900000, date: "2026-10-01" }, early800], true),
     ]);
     const result = await runCounterofferSearch({
       base: BASE,
@@ -344,7 +344,10 @@ describe("runCounterofferSearch", () => {
 
   it("reuses earlier results for duplicate compiled rules", async () => {
     const { chat } = scriptedChat([
-      proposal([DEPOSIT_8K], false),
+      proposal([
+        DEPOSIT_8K,
+        { lever: "earlier_release", amount_cents: 800000, date: "2026-11-13" },
+      ], false),
       proposal([{ ...DEPOSIT_8K, rationale: "same again" }], true),
     ]);
     const pool = new InProcessPool(["caveat-wa", "caveat-wb"]);
@@ -360,14 +363,19 @@ describe("runCounterofferSearch", () => {
     expect(dup?.status).toBe("duplicate");
     expect(dup?.duplicateOf).toBe("r1c1");
     expect(dup?.passesAll).toBe(true);
-    // Only the first round's jobs ran — 2 reading jobs on one worker.
-    expect(pool.calls).toHaveLength(1);
+    // Round 1 ran both candidates (one batch per worker); the duplicate in
+    // round 2 ran nothing.
+    expect(pool.calls).toHaveLength(2);
     expect(pool.calls[0]?.jobs).toHaveLength(2);
+    expect(pool.calls[1]?.jobs).toHaveLength(2);
   });
 
   it("returns needs_review on a model failure and keeps earlier rounds", async () => {
     const { chat } = scriptedChat([
-      proposal([DEPOSIT_8K], false, "round one"),
+      proposal([
+        DEPOSIT_8K,
+        { lever: "earlier_release", amount_cents: 800000, date: "2026-11-13" },
+      ], false, "round one"),
       { ok: false, reason: "rate_limited", detail: "429" },
     ]);
     const result = await runCounterofferSearch({
@@ -476,5 +484,187 @@ describe("runCounterofferSearch", () => {
     ]);
     expect(result.rounds[0]?.candidates[0]?.worker).toBe("caveat-wa");
     expect(result.rounds[0]?.candidates[1]?.worker).toBe("caveat-wb");
+  });
+});
+
+// --- testedBrackets -----------------------------------------------------------
+
+import { testedBrackets } from "./loop.ts";
+import type { Lever } from "./levers.ts";
+import type { SearchCandidateRecord } from "./loop.ts";
+import { digestValue } from "../runner/digest.ts";
+import { RUNNER_VERSION } from "../runner/run.ts";
+
+function rec(
+  id: string,
+  lever: Lever,
+  params: SearchCandidateRecord["params"],
+  verdict: boolean,
+  status: "tested" | "duplicate" = "tested",
+): SearchCandidateRecord {
+  const r: SearchCandidateRecord = {
+    id,
+    lever,
+    params,
+    rationale: "x",
+    status,
+    rankCents: params.amount_cents ?? 0,
+  };
+  if (status === "tested") r.passesAll = verdict;
+  return r;
+}
+
+describe("testedBrackets", () => {
+  it("picks the smallest pass and the closest smaller fail per family", () => {
+    const brackets = testedBrackets([
+      rec("p800", "upfront_deposit", { amount_cents: 800000, date: "2026-10-01", split_count: null, net_days: null }, true),
+      rec("f700", "upfront_deposit", { amount_cents: 700000, date: "2026-10-01", split_count: null, net_days: null }, false),
+      rec("f750", "upfront_deposit", { amount_cents: 750000, date: "2026-10-01", split_count: null, net_days: null }, false),
+      rec("p900", "upfront_deposit", { amount_cents: 900000, date: "2026-10-01", split_count: null, net_days: null }, true),
+    ]);
+    expect(brackets).toHaveLength(1);
+    expect(brackets[0]?.smallestPass?.id).toBe("p800");
+    expect(brackets[0]?.largestFail?.id).toBe("f750");
+  });
+
+  it("treats a larger net_days as a smaller change for shorter_payment_terms", () => {
+    const brackets = testedBrackets([
+      rec("n20p", "shorter_payment_terms", { amount_cents: null, date: null, split_count: null, net_days: 20 }, true),
+      rec("n25f", "shorter_payment_terms", { amount_cents: null, date: null, split_count: null, net_days: 25 }, false),
+    ]);
+    expect(brackets[0]?.smallestPass?.id).toBe("n20p");
+    expect(brackets[0]?.largestFail?.id).toBe("n25f");
+  });
+
+  it("keeps families apart by date and takes the largest fail when nothing passed", () => {
+    const brackets = testedBrackets([
+      rec("a", "upfront_deposit", { amount_cents: 800000, date: "2026-10-01", split_count: null, net_days: null }, true),
+      rec("b", "upfront_deposit", { amount_cents: 700000, date: "2026-11-01", split_count: null, net_days: null }, false),
+      rec("c", "upfront_deposit", { amount_cents: 600000, date: "2026-11-01", split_count: null, net_days: null }, false),
+    ]);
+    expect(brackets).toHaveLength(2);
+    const nov = brackets.find((b) => b.date === "2026-11-01");
+    expect(nov?.smallestPass).toBeNull();
+    expect(nov?.largestFail?.id).toBe("b");
+  });
+
+  it("counts a duplicate once, under its original", () => {
+    const brackets = testedBrackets([
+      rec("p800", "upfront_deposit", { amount_cents: 800000, date: "2026-10-01", split_count: null, net_days: null }, true),
+      rec("f700", "upfront_deposit", { amount_cents: 700000, date: "2026-10-01", split_count: null, net_days: null }, false),
+      { ...rec("dup", "upfront_deposit", { amount_cents: 800000, date: "2026-10-01", split_count: null, net_days: null }, false, "duplicate"), duplicateOf: "p800" },
+    ]);
+    expect(brackets).toHaveLength(1);
+    expect(brackets[0]?.smallestPass?.id).toBe("p800");
+    expect(brackets[0]?.largestFail?.id).toBe("f700");
+  });
+});
+
+// --- parallel rounds + the tested bound ----------------------------------------
+
+// A pool that returns scripted verdicts; the real inputDigest is echoed so the
+// loop's coordinator-side digest check still passes.
+class VerdictPool implements WorkerPool {
+  readonly workers = ["caveat-wa", "caveat-wb"];
+  readonly calls: { worker: string; jobs: WorkerJob[] }[] = [];
+  private readonly verdicts: Record<string, boolean>;
+  constructor(verdicts: Record<string, boolean>) {
+    this.verdicts = verdicts;
+  }
+  runBatch(worker: string, jobs: WorkerJob[]): Promise<WorkerJobResult[]> {
+    this.calls.push({ worker, jobs });
+    return Promise.resolve(
+      jobs.map((job) => {
+        const candId = job.jobId.split("@")[0] ?? job.jobId;
+        const pass = this.verdicts[candId] === true;
+        const scenario = {
+          passes: pass,
+          firstBreach: pass ? null : { date: "2026-12-15", week: 11, balanceCents: 900000 },
+          lowest: { date: "2026-12-15", balanceCents: pass ? 1000000 : 900000 },
+          endBalanceCents: 0,
+          endEscrowCents: 0,
+          ledger: [],
+        };
+        return {
+          jobId: job.jobId,
+          ok: true as const,
+          output: {
+            runnerVersion: RUNNER_VERSION,
+            inputDigest: digestValue(job.input),
+            results: { [candId]: { no_extensions: scenario, all_extensions: scenario } },
+            smallestPassingCandidate: pass ? candId : null,
+            resultDigest: digestValue(job.input),
+          },
+        };
+      }),
+    );
+  }
+}
+
+describe("parallel bracket-narrowing search", () => {
+  it("tests distinct levers on both workers per round and reports the bound", async () => {
+    const release = (amount: number): RawCandidate => ({
+      lever: "earlier_release",
+      amount_cents: amount,
+      date: "2026-11-13",
+    });
+    const { chat, calls } = scriptedChat([
+      proposal([DEPOSIT_8K, release(800000)], false),
+      proposal([
+        { lever: "upfront_deposit", amount_cents: 750000, date: "2026-10-01" },
+        release(700000),
+      ], true),
+    ]);
+    const pool = new VerdictPool({ r1c1: true, r1c2: false, r2c1: false, r2c2: false });
+    const result = await runCounterofferSearch({
+      base: BASE,
+      readings: readings(),
+      model: "m",
+      chatConfig: CHAT_CONFIG,
+      pool,
+      chat,
+    });
+    expect(result.status).toBe("found");
+    // Round 1's two candidates ran in parallel, one batch per worker.
+    const round1Calls = pool.calls.slice(0, 2);
+    expect(round1Calls.map((c) => c.worker).sort()).toEqual(["caveat-wa", "caveat-wb"]);
+    // The prompt for round 2 carried the round-1 bracket.
+    const prompt2 = JSON.parse(calls[1]?.userPrompt ?? "{}") as {
+      testedBrackets?: { lever: string; smallestPass: { id: string } | null; largestFail: { id: string } | null }[];
+    };
+    const deposit = prompt2.testedBrackets?.find((b) => b.lever === "upfront_deposit");
+    expect(deposit?.smallestPass?.id).toBe("r1c1");
+    expect(deposit?.largestFail).toBeNull();
+    const rel = prompt2.testedBrackets?.find((b) => b.lever === "earlier_release");
+    expect(rel?.smallestPass).toBeNull();
+    expect(rel?.largestFail?.id).toBe("r1c2");
+    // The best is bracketed by the closest failing deposit below it.
+    expect(result.best).toBe("r1c1");
+    expect(result.bound).toEqual({ candidate: "r2c1", gap: { unit: "cents", value: 50000 } });
+  });
+
+  it("brackets the deposit lever with real runner verdicts", async () => {
+    // Hand-checked runner truth: $8,000 deposit passes; $7,900 and $7,000 fail.
+    const filler = (amount: number): RawCandidate => ({
+      lever: "earlier_release",
+      amount_cents: amount,
+      date: "2026-11-13",
+    });
+    const { chat } = scriptedChat([
+      proposal([DEPOSIT_8K, filler(100)], false),
+      proposal([{ lever: "upfront_deposit", amount_cents: 790000, date: "2026-10-01" }, filler(200)], false),
+      proposal([{ lever: "upfront_deposit", amount_cents: 700000, date: "2026-10-01" }, filler(300)], true),
+    ]);
+    const result = await runCounterofferSearch({
+      base: BASE,
+      readings: readings(),
+      model: "m",
+      chatConfig: CHAT_CONFIG,
+      pool: new InProcessPool(["caveat-wa", "caveat-wb"]),
+      chat,
+    });
+    expect(result.status).toBe("found");
+    expect(result.best).toBe("r1c1");
+    expect(result.bound).toEqual({ candidate: "r2c1", gap: { unit: "cents", value: 10000 } });
   });
 });

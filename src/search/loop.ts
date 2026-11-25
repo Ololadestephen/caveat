@@ -56,6 +56,15 @@ export type SearchStopReason =
   | "worker_error"
   | "not_applicable";
 
+// The tested failing candidate closest below the best candidate in its lever
+// family — evidence that the found change is minimal, not just the smallest
+// tried. gap is in the family's size units: cents, or days for
+// shorter_payment_terms (whose size param is net_days).
+export type CounterofferBound = {
+  candidate: string;
+  gap: { unit: "cents" | "days"; value: number };
+};
+
 export type CounterofferReceipt = {
   status: "found" | "not_found" | "needs_review" | "not_needed";
   stopReason: SearchStopReason;
@@ -65,6 +74,7 @@ export type CounterofferReceipt = {
   rounds: SearchRound[];
   best: string | null;
   humanReview: string[];
+  bound?: CounterofferBound | null;
   // Set when the whole search outcome was reused verbatim from an earlier run
   // (the best candidate was re-verified on a worker, not re-searched).
   carriedFrom?: string;
@@ -128,6 +138,7 @@ function receipt(args: {
     rounds: args.rounds,
     best: args.best ?? null,
     humanReview,
+    bound: null,
   };
 }
 
@@ -157,6 +168,123 @@ function findBest(rounds: SearchRound[]): SearchCandidateRecord | null {
     });
   });
   return best;
+}
+
+export type BracketEndpoint = {
+  id: string;
+  amount_cents: number | null;
+  net_days: number | null;
+  rankCents: number | null;
+};
+
+export type TestedBracket = {
+  lever: Lever;
+  date: string | null;
+  split_count: number | null;
+  smallestPass: BracketEndpoint | null;
+  largestFail: BracketEndpoint | null;
+};
+
+// The lever family a candidate belongs to: the lever plus the params held
+// fixed while narrowing. The size param is the one being narrowed —
+// amount_cents for the first three levers, net_days for
+// shorter_payment_terms.
+function familyKey(record: SearchCandidateRecord): string {
+  const p = record.params;
+  if (record.lever === "shorter_payment_terms") return record.lever;
+  const parts = [record.lever, p.date ?? ""];
+  if (record.lever === "milestone_split") parts.push(String(p.split_count ?? ""));
+  return parts.join("|");
+}
+
+// Ordering where a smaller metric means a smaller change: fewer cents for the
+// amount levers, MORE net days for shorter_payment_terms.
+function changeMetric(record: SearchCandidateRecord): number {
+  return record.lever === "shorter_payment_terms"
+    ? -(record.params.net_days ?? 0)
+    : (record.params.amount_cents ?? 0);
+}
+
+function bracketEndpoint(record: SearchCandidateRecord): BracketEndpoint {
+  return {
+    id: record.id,
+    amount_cents: record.params.amount_cents,
+    net_days: record.params.net_days,
+    rankCents: record.rankCents ?? null,
+  };
+}
+
+// Per lever family: the passing candidate with the smallest change, and the
+// failing candidate with the largest change still below it (or the largest
+// failing change at all when nothing passed). Only tested candidates count; a
+// duplicate's verdict already counts once under its original's id.
+export function testedBrackets(records: SearchCandidateRecord[]): TestedBracket[] {
+  const families = new Map<string, SearchCandidateRecord[]>();
+  for (const record of records) {
+    if (record.status !== "tested" || typeof record.passesAll !== "boolean") continue;
+    const key = familyKey(record);
+    const list = families.get(key) ?? [];
+    list.push(record);
+    families.set(key, list);
+  }
+  const brackets: TestedBracket[] = [];
+  for (const list of families.values()) {
+    const first = list[0] as SearchCandidateRecord;
+    const passes = list.filter((c) => c.passesAll === true);
+    const fails = list.filter((c) => c.passesAll === false);
+    const smallestPass =
+      passes.length === 0
+        ? undefined
+        : passes.reduce((a, b) => (changeMetric(b) < changeMetric(a) ? b : a));
+    let largestFail: SearchCandidateRecord | undefined;
+    if (smallestPass === undefined) {
+      if (fails.length > 0) {
+        largestFail = fails.reduce((a, b) => (changeMetric(b) > changeMetric(a) ? b : a));
+      }
+    } else {
+      const below = fails.filter((c) => changeMetric(c) < changeMetric(smallestPass));
+      if (below.length > 0) {
+        largestFail = below.reduce((a, b) => (changeMetric(b) > changeMetric(a) ? b : a));
+      }
+    }
+    brackets.push({
+      lever: first.lever,
+      date: first.params.date,
+      split_count: first.params.split_count,
+      smallestPass: smallestPass === undefined ? null : bracketEndpoint(smallestPass),
+      largestFail: largestFail === undefined ? null : bracketEndpoint(largestFail),
+    });
+  }
+  return brackets;
+}
+
+// The failing bound for the best candidate's family: the tested failure with
+// the largest change still smaller than the best's.
+function boundOf(
+  best: SearchCandidateRecord,
+  records: SearchCandidateRecord[],
+): CounterofferBound | null {
+  const key = familyKey(best);
+  const bestMetric = changeMetric(best);
+  const fails = records.filter(
+    (r) =>
+      r.status === "tested" &&
+      r.passesAll === false &&
+      familyKey(r) === key &&
+      changeMetric(r) < bestMetric,
+  );
+  if (fails.length === 0) return null;
+  const bound = fails.reduce((a, b) => (changeMetric(b) > changeMetric(a) ? b : a));
+  const netDays = best.lever === "shorter_payment_terms";
+  const bestSize = netDays ? best.params.net_days : best.params.amount_cents;
+  const boundSize = netDays ? bound.params.net_days : bound.params.amount_cents;
+  return {
+    candidate: bound.id,
+    gap: {
+      unit: netDays ? "days" : "cents",
+      value: Math.abs((bestSize ?? 0) - (boundSize ?? 0)),
+    },
+  };
 }
 
 function buildUserPrompt(args: {
@@ -222,6 +350,7 @@ function buildUserPrompt(args: {
     conditionalReleases: search.conditionalReleases ?? [],
     scenarios,
     baseline,
+    testedBrackets: testedBrackets(previousRounds.flatMap((r) => r.candidates)),
     previousRounds: rounds,
   });
 }
@@ -471,13 +600,15 @@ export async function runCounterofferSearch(args: SearchArgs): Promise<Counterof
   const lastRound = rounds[rounds.length - 1];
   const stopReason: SearchStopReason =
     lastRound?.done === true ? "model_done" : "round_cap";
-  return receipt({
+  const result = receipt({
     status: best === null ? "not_found" : "found",
     stopReason,
     model,
     rounds,
     best: best?.id ?? null,
   });
+  if (best !== null) result.bound = boundOf(best, allRecords);
+  return result;
 }
 
 // The digest that decides whether a previous run's counteroffer outcome can be

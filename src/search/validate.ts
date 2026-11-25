@@ -37,10 +37,11 @@ export function validateProposal(
   if (parsed.candidates.length > 3) {
     return { ok: false, detail: "more than 3 candidates proposed" };
   }
-  if (parsed.done === false && parsed.candidates.length === 0) {
-    return { ok: false, detail: "done is false but no candidates were proposed" };
+  if (parsed.done === false && parsed.candidates.length < 2) {
+    return { ok: false, detail: "done is false but fewer than 2 candidates were proposed" };
   }
   const candidates: ProposedCandidate[] = [];
+  const leversSeen = new Set<string>();
   for (const [i, item] of parsed.candidates.entries()) {
     if (!isRecord(item)) {
       return { ok: false, detail: `candidates[${i}] is not an object` };
@@ -48,6 +49,10 @@ export function validateProposal(
     if (typeof item.lever !== "string" || !LEVERS.includes(item.lever)) {
       return { ok: false, detail: `candidates[${i}].lever is not a known lever` };
     }
+    if (leversSeen.has(item.lever)) {
+      return { ok: false, detail: `candidates[${i}].lever ${item.lever} repeats an earlier candidate's lever` };
+    }
+    leversSeen.add(item.lever);
     if (
       !NULLABLE_INT(item.amount_cents) ||
       !NULLABLE_STRING(item.date) ||
