@@ -60,18 +60,45 @@ node -e '
   process.stdout.write(JSON.stringify({ jobs: [{ jobId: "smoke", input: fixture }] }));
 ' "$REPO_ROOT/fixtures/runner/synthetic-12k.json" >"$STAGE/smoke-input.json"
 
-for WORKER in $(echo "${CAVEAT_WORKERS:-caveat-wa,caveat-wb}" | tr ',' ' '); do
+# CAVEAT_WORKERS is the pipeline's worker=connector format; the sprite name is
+# the part before "=". A bare name is used as-is.
+for ENTRY in $(echo "${CAVEAT_WORKERS:-caveat-wa,caveat-wb}" | tr ',' ' '); do
+  WORKER="${ENTRY%%=*}"
   sprite exec --no-stdin -s "$WORKER" -- rm -rf /home/sprite/caveat-worker
   sprite file push -p -s "$WORKER" -r "$WORKER_STAGE" /home/sprite/caveat-worker >/dev/null
+
+  # The worker service: a tiny HTTP endpoint the coordinator reaches through
+  # the worker's own Custom API connector. URL auth stays `sprite`.
+  if sprite exec --no-stdin -s "$WORKER" -- sprite-env services get caveat-worker >/dev/null 2>&1; then
+    sprite exec --no-stdin -s "$WORKER" -- sprite-env services delete caveat-worker >/dev/null
+  fi
+  sprite exec --no-stdin -s "$WORKER" -- sprite-env services create caveat-worker \
+    --cmd "/.sprite/bin/node" \
+    --args "src/worker/server.ts" \
+    --dir "/home/sprite/caveat-worker" \
+    --http-port 8080 --no-stream
+
+  READY=""
+  for _ in $(seq 1 30); do
+    if sprite exec --no-stdin -s "$WORKER" -- sh -c 'curl -sf localhost:8080/healthz' >/dev/null 2>&1; then
+      READY=1
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$READY" ]; then
+    echo "worker $WORKER: service caveat-worker never answered /healthz" >&2
+    exit 1
+  fi
+
   SMOKE_OUT="$(sprite exec -s "$WORKER" -- \
-    sh -c 'cd /home/sprite/caveat-worker && /.sprite/bin/node src/worker/run-batch.ts' \
+    sh -c 'curl -s -X POST -H "content-type: application/json" --data-binary @- localhost:8080/run-batch' \
     <"$STAGE/smoke-input.json")"
   if ! printf '%s' "$SMOKE_OUT" | node -e '
     let raw = "";
     process.stdin.on("data", (d) => (raw += d)).on("end", () => {
-      const line = raw.trim().split("\n").pop() ?? "";
       try {
-        const batch = JSON.parse(line);
+        const batch = JSON.parse(raw.trim());
         const first = batch.results?.[0];
         if (first?.ok !== true) process.exit(1);
       } catch {
@@ -83,7 +110,7 @@ for WORKER in $(echo "${CAVEAT_WORKERS:-caveat-wa,caveat-wb}" | tr ',' ' '); do
     echo "$SMOKE_OUT" >&2
     exit 1
   fi
-  echo "worker $WORKER: code pushed, smoke test ok"
+  echo "worker $WORKER: code pushed, service caveat-worker up, smoke test ok"
 done
 
 NODE_BIN="$(sprite exec --no-stdin -s "$SPRITE" -- sh -c 'command -v node' | tr -d '[:space:]')"

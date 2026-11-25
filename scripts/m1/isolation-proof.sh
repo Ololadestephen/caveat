@@ -69,6 +69,20 @@ GW_OF() {
 BOX_GW="$(GW_OF box)"
 OPENROUTER_GW="$(GW_OF openrouter)"
 
+# Worker connectors are custom_api entries named caveat-worker-a/-b (their
+# label lives in provider_account_name / display_name, not `name`).
+GW_NAMED() {
+  printf '%s' "$LIST_JSON" | node -e '
+    let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+      const j=JSON.parse(d);
+      const want=process.argv[1];
+      const c=(j.connections||[]).find(x=>x.name===want||x.provider_account_name===want||x.display_name===want);
+      console.log(c?c.gateway_base_url:"");
+    });' "$1" 2>/dev/null
+}
+WORKER_A_GW="$(GW_NAMED "${CAVEAT_WORKER_A_CONN:-caveat-worker-a}")"
+WORKER_B_GW="$(GW_NAMED "${CAVEAT_WORKER_B_CONN:-caveat-worker-b}")"
+
 for W in "$WORKER_A" "$WORKER_B"; do
   # /v1/gateway/list is scoped to the calling sprite: a worker must not see the
   # restricted "box" connection in its own list.
@@ -96,6 +110,35 @@ for W in "$WORKER_A" "$WORKER_B"; do
   else
     eval "OPENROUTER_CODE_${W#caveat-}=not_configured"
     check "openrouter_gateway_denied_$W" skipped_not_configured
+  fi
+
+  # Both worker connectors must refuse calls from the workers themselves.
+  for SIDE in a b; do
+    SIDE_UP="$(printf '%s' "$SIDE" | tr '[:lower:]' '[:upper:]')"
+    eval "CGW=\$WORKER_${SIDE_UP}_GW"
+    if [ -n "$CGW" ]; then
+      CODE=$(remote "$W" "curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST '$CGW/run-batch' -H 'Content-Type: application/json' -d '{\"jobs\":[]}'" || echo "000")
+      eval "WORKERCONN_${SIDE}_${W#caveat-}=$CODE"
+      check "worker_connector_${SIDE}_denied_$W" "$([ "$CODE" = 403 ] && echo pass || echo fail)"
+    else
+      eval "WORKERCONN_${SIDE}_${W#caveat-}=not_configured"
+      check "worker_connector_${SIDE}_denied_$W" skipped_not_configured
+    fi
+  done
+done
+
+# --- (c2) worker endpoints are not public ------------------------------------
+# From this Mac, with no auth at all, the org-private Sprite URL must not serve
+# the batch endpoint. Any non-200 (401/403/redirect-to-login) proves it.
+for W in "$WORKER_A" "$WORKER_B"; do
+  WORKER_URL="$("$SPRITE" info -s "$W" 2>/dev/null | awk '/^URL:/{print $2}')"
+  if [ -n "$WORKER_URL" ]; then
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$WORKER_URL/healthz" || echo "000")
+    eval "UNAUTH_${W#caveat-}=$CODE"
+    check "worker_url_unauthenticated_$W" "$([ "$CODE" != 200 ] && echo pass || echo fail)"
+  else
+    eval "UNAUTH_${W#caveat-}=no_url"
+    check "worker_url_unauthenticated_$W" fail
   fi
 done
 
@@ -177,7 +220,13 @@ cat > "$OUT" <<JSON
     "boxHttpA": "${BOX_CODE_wa:-n/a}",
     "boxHttpB": "${BOX_CODE_wb:-n/a}",
     "openrouterHttpA": "${OPENROUTER_CODE_wa:-n/a}",
-    "openrouterHttpB": "${OPENROUTER_CODE_wb:-n/a}"
+    "openrouterHttpB": "${OPENROUTER_CODE_wb:-n/a}",
+    "workerConnAhttpA": "${WORKERCONN_a_wa:-n/a}",
+    "workerConnAhttpB": "${WORKERCONN_a_wb:-n/a}",
+    "workerConnBhttpA": "${WORKERCONN_b_wa:-n/a}",
+    "workerConnBhttpB": "${WORKERCONN_b_wb:-n/a}",
+    "unauthHealthzA": "${UNAUTH_wa:-n/a}",
+    "unauthHealthzB": "${UNAUTH_wb:-n/a}"
   },
   "checkpoint": {
     "version": "${VER:-none}",
