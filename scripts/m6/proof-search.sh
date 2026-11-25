@@ -263,6 +263,9 @@ else
   grep -F 'not a proven minimum' "$RUN_PAGE" >/dev/null \
     || fail "run page lacks the no-bound wording"
 fi
+# Whole-dollar splits only: no $X.XX amounts other than .00 may appear.
+CENTS_AMOUNTS="$(grep -oE '\$[0-9,]+\.[0-9]{2}' "$RUN_PAGE" | grep -v '\.00$' || true)"
+[ -z "$CENTS_AMOUNTS" ] || fail "run page shows fractional dollar amounts: $CENTS_AMOUNTS"
 note "{\"step\":\"d\",\"rounds\":$ROUNDS_N,\"bound\":$BOUND_JSON}"
 
 # --- e. approve + export -----------------------------------------------------------
@@ -283,6 +286,8 @@ GOT_SHA="$(shasum -a 256 "$DRAFT_FILE" | awk '{print $1}')"
 [ "$GOT_SHA" = "$DRAFT_HASH" ] || fail "exported bytes sha256 $GOT_SHA != draft_hash $DRAFT_HASH"
 grep -F '5. Proposed change, tested by Caveat:' "$DRAFT_FILE" >/dev/null \
   || fail "draft lacks '5. Proposed change, tested by Caveat:'"
+CENTS_AMOUNTS="$(grep -oE '\$[0-9,]+\.[0-9]{2}' "$DRAFT_FILE" | grep -v '\.00$' || true)"
+[ -z "$CENTS_AMOUNTS" ] || fail "draft shows fractional dollar amounts: $CENTS_AMOUNTS"
 note "{\"step\":\"e\",\"draft_sha256\":\"$GOT_SHA\",\"file\":\"caveat-draft-$RUN_ID-v1.txt\"}"
 
 APPROVED_STATUS="$(db_query "SELECT status FROM runs WHERE id = '$RUN_ID'" | grep -o '"status":"[a-z_]*"' | cut -d'"' -f4)"
