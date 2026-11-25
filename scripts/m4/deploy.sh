@@ -48,6 +48,44 @@ fi
 sprite file push -p -s "$SPRITE" "$PRIVATE/reviews/retainer-review.json" \
   "$DATA_DIR/reviews/retainer-review.json" >/dev/null
 
+# Worker code: the runner batch entry point plus its src/ dependencies. The
+# {"type":"module"} package.json makes the sprite's node treat the pushed .ts
+# files as ESM. Workers' checkpoints are never touched.
+WORKER_STAGE="$STAGE/caveat-worker"
+mkdir -p "$WORKER_STAGE"
+cp -R "$STAGE/src" "$WORKER_STAGE/src"
+printf '{"type":"module"}\n' >"$WORKER_STAGE/package.json"
+node -e '
+  const fixture = require(process.argv[1]);
+  process.stdout.write(JSON.stringify({ jobs: [{ jobId: "smoke", input: fixture }] }));
+' "$REPO_ROOT/fixtures/runner/synthetic-12k.json" >"$STAGE/smoke-input.json"
+
+for WORKER in $(echo "${CAVEAT_WORKERS:-caveat-wa,caveat-wb}" | tr ',' ' '); do
+  sprite exec --no-stdin -s "$WORKER" -- rm -rf /home/sprite/caveat-worker
+  sprite file push -p -s "$WORKER" -r "$WORKER_STAGE" /home/sprite/caveat-worker >/dev/null
+  SMOKE_OUT="$(sprite exec -s "$WORKER" -- \
+    sh -c 'cd /home/sprite/caveat-worker && /.sprite/bin/node src/worker/run-batch.ts' \
+    <"$STAGE/smoke-input.json")"
+  if ! printf '%s' "$SMOKE_OUT" | node -e '
+    let raw = "";
+    process.stdin.on("data", (d) => (raw += d)).on("end", () => {
+      const line = raw.trim().split("\n").pop() ?? "";
+      try {
+        const batch = JSON.parse(line);
+        const first = batch.results?.[0];
+        if (first?.ok !== true) process.exit(1);
+      } catch {
+        process.exit(1);
+      }
+    });
+  '; then
+    echo "worker $WORKER smoke test failed:" >&2
+    echo "$SMOKE_OUT" >&2
+    exit 1
+  fi
+  echo "worker $WORKER: code pushed, smoke test ok"
+done
+
 NODE_BIN="$(sprite exec --no-stdin -s "$SPRITE" -- sh -c 'command -v node' | tr -d '[:space:]')"
 if [ -z "$NODE_BIN" ]; then
   echo "could not find node on $SPRITE" >&2
@@ -61,7 +99,7 @@ sprite exec --no-stdin -s "$SPRITE" -- sprite-env services create "$SERVICE" \
   --cmd "$NODE_BIN" \
   --args "src/server/main.ts" \
   --dir "$APP_DIR" \
-  --env "CAVEAT_DATA_DIR=$DATA_DIR,CAVEAT_APPROVER=Ololade Stephen,CAVEAT_DECISION_MODEL=nvidia/nemotron-3.5-super-vl:free" \
+  --env "CAVEAT_DATA_DIR=$DATA_DIR,CAVEAT_APPROVER=Ololade Stephen,CAVEAT_DECISION_MODEL=nvidia/nemotron-3.5-super-vl:free,CAVEAT_WATCH_INTERVAL_MS=${CAVEAT_WATCH_INTERVAL_MS:-60000}" \
   --http-port 8080 --no-stream
 
 echo "deployed $(cat "$STAGE/REVISION") to $SPRITE as service $SERVICE"
