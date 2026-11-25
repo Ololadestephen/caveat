@@ -269,19 +269,30 @@ function compile(base: SearchBase, proposal: ProposedCandidate): CompileOk | Com
       });
     }
     case "milestone_split": {
-      const amount = checkAmount(proposal.amount_cents, base.r1AmountCents);
-      if ("failure" in amount) return amount.failure;
+      const A = proposal.amount_cents;
+      if (
+        typeof A !== "number" ||
+        !Number.isInteger(A) ||
+        A <= 0 ||
+        A > base.r1AmountCents
+      ) {
+        return fail(
+          "invalid_amount",
+          "amount_cents",
+          "amount_cents must be a positive integer within the first release",
+        );
+      }
       const date = checkDate(proposal.date);
       if ("failure" in date) return date.failure;
       const N = proposal.split_count;
       if (typeof N !== "number" || !Number.isInteger(N) || (N !== 2 && N !== 3)) {
         return fail("invalid_split_count", "split_count", "split_count must be 2 or 3");
       }
-      if (amount.amount % N !== 0) {
+      if (A % 100 !== 0) {
         return fail(
-          "split_not_divisible",
+          "split_not_whole_dollars",
           "amount_cents",
-          "amount_cents must divide evenly by split_count",
+          "amount_cents must be a whole number of dollars",
         );
       }
       if (Number(date.date.slice(8)) > 28) {
@@ -291,7 +302,9 @@ function compile(base: SearchBase, proposal: ProposedCandidate): CompileOk | Com
           "the first split date must be on or before the 28th so every part repeats on the same day-of-month",
         );
       }
-      const A = amount.amount;
+      const dollars = Math.floor(A / 100);
+      const baseDollars = Math.floor(dollars / N);
+      const extraDollars = dollars % N;
       const parts: PaymentRule[] = [];
       for (let i = 0; i < N; i += 1) {
         const partDate = addMonths(date.date, i);
@@ -308,7 +321,7 @@ function compile(base: SearchBase, proposal: ProposedCandidate): CompileOk | Com
         parts.push({
           id: `split-${i + 1}`,
           kind: "escrow_release",
-          amountCents: A / N,
+          amountCents: (baseDollars + (i < extraDollars ? 1 : 0)) * 100,
           date: partDate,
         });
       }
@@ -323,7 +336,11 @@ function compile(base: SearchBase, proposal: ProposedCandidate): CompileOk | Com
         r1RemainderCents: base.r1AmountCents - A,
         rankCents: A,
         centDays,
-        summary: `release ${money(A)} of the ${fmtDate(base.r1Date)} escrow payment in ${N} monthly parts of ${money(A / N)} from ${fmtDate(date.date)}, reducing that release to ${money(base.r1AmountCents - A)}`,
+        summary: `release ${money(A)} of the ${fmtDate(base.r1Date)} escrow payment in ${N} monthly parts ${
+          extraDollars === 0
+            ? `of ${money(A / N)}`
+            : `(${parts.map((p) => money(p.amountCents ?? 0)).join(", ")})`
+        } from ${fmtDate(date.date)}, reducing that release to ${money(base.r1AmountCents - A)}`,
       });
     }
     case "shorter_payment_terms": {

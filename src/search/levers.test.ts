@@ -9,6 +9,7 @@ import type { RetainerReview } from "../review/human-review.ts";
 import { buildTwinveeInputs, escrowRules } from "../plan/twinvee.ts";
 import type { TwinveeAssumptions } from "../plan/twinvee.ts";
 import { buildSearchBase, compileCandidate } from "./levers.ts";
+import { digestValue } from "../runner/digest.ts";
 import type { ProposedCandidate, SearchBase } from "./levers.ts";
 
 function loadJson(path: string): unknown {
@@ -246,12 +247,12 @@ describe("compileCandidate — field rules", () => {
     expect(result).toMatchObject({ ok: false, code: "invalid_split_count", field: "split_count" });
   });
 
-  it("rejects a split amount that does not divide evenly", () => {
+  it("rejects a split amount that is not whole dollars", () => {
     const result = compileCandidate(
       BASE,
-      proposal({ lever: "milestone_split", amount_cents: 800000, date: "2026-11-13", split_count: 3 }),
+      proposal({ lever: "milestone_split", amount_cents: 800050, date: "2026-11-13", split_count: 2 }),
     );
-    expect(result).toMatchObject({ ok: false, code: "split_not_divisible", field: "amount_cents" });
+    expect(result).toMatchObject({ ok: false, code: "split_not_whole_dollars", field: "amount_cents" });
   });
 
   it("rejects a first split date after the 28th", () => {
@@ -379,6 +380,46 @@ describe("compileCandidate — compiled rules and summaries", () => {
     expect(result.summary).toBe(
       "release $8,000 of the Jan 2, 2027 escrow payment in 2 monthly parts of $4,000 from Nov 13, 2026, reducing that release to $67,000",
     );
+    // Even splits are byte-identical to the pre-whole-dollar implementation;
+    // the digest was computed at HEAD for the baseline's best candidate
+    // (milestone_split 800000/2 from 2026-10-02).
+    const baseline = compileCandidate(
+      BASE,
+      proposal({ lever: "milestone_split", amount_cents: 800000, date: "2026-10-02", split_count: 2 }),
+    );
+    if (!baseline.ok) throw new Error("baseline compile failed");
+    expect(digestValue(baseline.escrowRules)).toBe(
+      "63ab7b06b59649ad02d47f4633e868f13768a1e9b3f1e0899fa08595e9257f13",
+    );
+  });
+
+  it("milestone_split gives the earliest parts the extra whole dollars", () => {
+    const result = compileCandidate(
+      BASE,
+      proposal({ lever: "milestone_split", amount_cents: 799900, date: "2026-10-02", split_count: 2 }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.escrowRules.find((r) => r.id === "split-1")).toMatchObject({ amountCents: 400000, date: "2026-10-02" });
+    expect(result.escrowRules.find((r) => r.id === "split-2")).toMatchObject({ amountCents: 399900, date: "2026-11-02" });
+    expect(result.summary).toBe(
+      "release $7,999 of the Jan 2, 2027 escrow payment in 2 monthly parts ($4,000, $3,999) from Oct 2, 2026, reducing that release to $67,001",
+    );
+  });
+
+  it("milestone_split spreads the extra dollars across three parts", () => {
+    const result = compileCandidate(
+      BASE,
+      proposal({ lever: "milestone_split", amount_cents: 800000, date: "2026-10-02", split_count: 3 }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.escrowRules.find((r) => r.id === "split-1")).toMatchObject({ amountCents: 266700, date: "2026-10-02" });
+    expect(result.escrowRules.find((r) => r.id === "split-2")).toMatchObject({ amountCents: 266700, date: "2026-11-02" });
+    expect(result.escrowRules.find((r) => r.id === "split-3")).toMatchObject({ amountCents: 266600, date: "2026-12-02" });
+    expect(result.summary).toBe(
+      "release $8,000 of the Jan 2, 2027 escrow payment in 3 monthly parts ($2,667, $2,667, $2,666) from Oct 2, 2026, reducing that release to $67,000",
+    );
   });
 
   it("shorter_payment_terms moves covered months that land before release-1", () => {
@@ -461,6 +502,16 @@ describe("compileCandidate — runner verdicts", () => {
       date: "2026-12-15",
       balanceCents: 1000000,
     });
+  });
+
+  it("milestone_split $7,999 in two whole-dollar parts fails; lowest under the floor", () => {
+    const results = verdicts(
+      proposal({ lever: "milestone_split", amount_cents: 799900, date: "2026-10-02", split_count: 2 }),
+    );
+    expect(passesAll(results)).toBe(false);
+    expect(
+      results["retainer_superseded"]?.["no_extensions"]?.lowest?.balanceCents,
+    ).toBeLessThan(1000000);
   });
 
   it("shorter_payment_terms net 13 passes; net 14 breaches Nov 15", () => {
