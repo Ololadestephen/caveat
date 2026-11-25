@@ -156,6 +156,17 @@ describe("caveat app", () => {
     expect(css.headers.get("content-type")).toContain("text/css");
   });
 
+  it("refuses a manual start with 409 while a run is in flight", async () => {
+    const r = await rig({
+      pipeline: () => new Promise(() => {}), // the run never finishes
+    });
+    const first = await post(r, "/runs");
+    expect(first.status).toBe(303);
+    const second = await post(r, "/runs");
+    expect(second.status).toBe(409);
+    expect(await second.text()).toContain("already in progress");
+  });
+
   it("rejects POSTs without a matching Origin", async () => {
     const r = await rig();
     // fetch always sends Origin on POST; a bare socket exercises the absent case.

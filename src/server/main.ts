@@ -1,11 +1,16 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { openDb } from "../store/db.ts";
-import { createApp } from "./app.ts";
+import { listWatchEvents, openDb } from "../store/db.ts";
+import { startWatcher } from "../watch/watcher.ts";
+import type { Watcher } from "../watch/watcher.ts";
+import { createAppContext, serveContext, startRun } from "./app.ts";
+import type { WatcherView } from "./pages.ts";
 
 const dataDir = process.env.CAVEAT_DATA_DIR ?? "/home/sprite/caveat-data";
 const db = openDb(join(dataDir, "caveat.db"));
+const boxFolder = process.env.CAVEAT_BOX_FOLDER ?? "caveat_TEST";
+const watchIntervalMs = envNumber("CAVEAT_WATCH_INTERVAL_MS", 60000);
 
 let revision = "unknown";
 try {
@@ -14,16 +19,35 @@ try {
   // REVISION is written at deploy time; absent in local dev/tests.
 }
 
-const server = createApp({
+const watcherRef: { current?: Watcher } = {};
+const ctx = createAppContext({
   db,
   approver: process.env.CAVEAT_APPROVER,
   revision,
   reviewsDir: process.env.CAVEAT_REVIEWS_DIR ?? join(dataDir, "reviews"),
   fixturesDir: process.env.CAVEAT_FIXTURES_DIR ?? "fixtures",
-  boxFolder: process.env.CAVEAT_BOX_FOLDER ?? "caveat_TEST",
+  boxFolder,
   decisionModel: process.env.CAVEAT_DECISION_MODEL,
-  runTimeoutMs: envNumber("CAVEAT_RUN_TIMEOUT_MS", 300000),
+  runTimeoutMs: envNumber("CAVEAT_RUN_TIMEOUT_MS", 600000),
   recheckTimeoutMs: envNumber("CAVEAT_RECHECK_TIMEOUT_MS", 30000),
+  watcher: (): WatcherView => ({
+    enabled: watchIntervalMs > 0,
+    intervalMs: watchIntervalMs,
+    boxFolder,
+    lastCheckedAt: watcherRef.current?.state.lastCheckedAt ?? null,
+    lastResult: watcherRef.current?.state.lastResult ?? null,
+    events: listWatchEvents(db, 5),
+  }),
+});
+const server = serveContext(ctx);
+
+// Polls the Box folder and starts incremental reruns on change; disabled when
+// CAVEAT_WATCH_INTERVAL_MS is 0. Never uploads or writes to Box.
+watcherRef.current = startWatcher({
+  db,
+  boxFolder,
+  intervalMs: watchIntervalMs,
+  startRun: (args) => startRun(ctx, args),
 });
 
 function envNumber(name: string, fallback: number): number {

@@ -19,6 +19,7 @@ import {
   finishRun,
   getApproval,
   getRun,
+  hasRunningRun,
   listExports,
   listRuns,
   markStale,
@@ -27,6 +28,7 @@ import {
   supersedeOthers,
 } from "../store/db.ts";
 import { pageShell, renderRun, renderRunList } from "./pages.ts";
+import type { WatcherView } from "./pages.ts";
 import { startTaskHold } from "./task-hold.ts";
 
 const APP_CSS = `${REVIEW_PAGE_CSS}
@@ -58,9 +60,11 @@ export type AppDeps = {
   connections?: () => Promise<Connection[]>;
   recheck?: typeof recheckFolder;
   holdTask?: (name: string) => { stop: () => void };
+  // Live watcher state for the runs list; absent in tests / when disabled.
+  watcher?: () => WatcherView;
 };
 
-type Ctx = {
+export type AppContext = {
   db: DatabaseSync;
   deps: AppDeps;
   pipeline: NonNullable<AppDeps["pipeline"]>;
@@ -125,9 +129,10 @@ function sameOrigin(req: IncomingMessage): boolean {
 // A once-only run finisher: the pipeline result, a thrown error and the
 // timeout all race here — the first call wins and releases the task hold.
 function makeFinisher(
-  ctx: Ctx,
+  ctx: AppContext,
   runId: string,
   hold: { stop: () => void },
+  onFinish?: (status: string) => void,
 ): (
   status: "reviewable" | "needs_review" | "failed",
   reason: string | null,
@@ -142,23 +147,35 @@ function makeFinisher(
       if (run === undefined || run.status !== "running") return;
       finishRun(ctx.db, runId, status, reason, fields);
       if (status === "reviewable" || status === "needs_review") supersedeOthers(ctx.db, runId);
+      onFinish?.(status);
     } finally {
       hold.stop();
     }
   };
 }
 
-function kickRun(ctx: Ctx, runId: string): void {
+export type StartRunArgs = {
+  trigger: "manual" | "watcher";
+  previous?: { runId: string; receipt: RunReceipt; sourceTuple: SourceTuple };
+  // Stored on the row immediately (the watcher already confirmed it); the
+  // pipeline writes the same value again on success.
+  sourceTuple?: SourceTuple;
+  onFinish?: (status: string) => void;
+};
+
+function kickRun(ctx: AppContext, runId: string, args: StartRunArgs): void {
   const { deps, pipeline, holdTask } = ctx;
   const hold = holdTask(`caveat-run-${runId}`);
-  const finish = makeFinisher(ctx, runId, hold);
+  const finish = makeFinisher(ctx, runId, hold, args.onFinish);
   const work = (async () => {
     const { receipt, sourceTuple } = await pipeline({
       runId,
       reviewsDir: deps.reviewsDir,
       fixturesDir: deps.fixturesDir,
       boxFolder: deps.boxFolder,
+      trigger: args.trigger,
       ...(deps.decisionModel !== undefined ? { decisionModel: deps.decisionModel } : {}),
+      ...(args.previous !== undefined ? { previous: args.previous } : {}),
     });
     const draft = renderDraft(receipt);
     finish(receipt.status === "reviewable" ? "reviewable" : "needs_review",
@@ -179,8 +196,26 @@ function kickRun(ctx: Ctx, runId: string): void {
   setTimeout(() => finish("failed", "timeout"), deps.runTimeoutMs).unref();
 }
 
+// Creates the run row and kicks the pipeline. The watcher calls this directly;
+// the POST /runs route goes through it with trigger "manual".
+export function startRun(ctx: AppContext, args: StartRunArgs): string {
+  const runId = newRunId();
+  createRun(ctx.db, {
+    id: runId,
+    createdAt: new Date().toISOString(),
+    sourceTupleJson: JSON.stringify(args.sourceTuple ?? []),
+    receiptJson: "{}",
+    receiptHash: "",
+    draftText: "",
+    draftHash: "",
+    trigger: args.trigger,
+  });
+  kickRun(ctx, runId, args);
+  return runId;
+}
+
 async function handleApprove(
-  ctx: Ctx,
+  ctx: AppContext,
   req: IncomingMessage,
   res: ServerResponse,
   runId: string,
@@ -214,7 +249,7 @@ async function handleApprove(
   redirect(res, `/runs/${runId}`);
 }
 
-async function handleExport(ctx: Ctx, res: ServerResponse, runId: string): Promise<void> {
+async function handleExport(ctx: AppContext, res: ServerResponse, runId: string): Promise<void> {
   const { db, deps, connections, recheck } = ctx;
   const run = getRun(db, runId);
   if (run === undefined) return sendHtml(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1>"));
@@ -283,7 +318,7 @@ async function handleExport(ctx: Ctx, res: ServerResponse, runId: string): Promi
   res.end(run.draft_text);
 }
 
-function routeRequest(ctx: Ctx, req: IncomingMessage, res: ServerResponse): Promise<void> | void {
+function routeRequest(ctx: AppContext, req: IncomingMessage, res: ServerResponse): Promise<void> | void {
   const { db, deps } = ctx;
   const method = req.method ?? "GET";
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -305,17 +340,18 @@ function routeRequest(ctx: Ctx, req: IncomingMessage, res: ServerResponse): Prom
     return sendHtml(res, 403, pageShell("Forbidden", deps.revision, "<h1>Forbidden</h1><p>Origin check failed.</p>"));
   }
   if (method === "POST" && path === "/runs") {
-    const runId = newRunId();
-    createRun(db, {
-      id: runId,
-      createdAt: new Date().toISOString(),
-      sourceTupleJson: "[]",
-      receiptJson: "{}",
-      receiptHash: "",
-      draftText: "",
-      draftHash: "",
-    });
-    kickRun(ctx, runId);
+    if (hasRunningRun(db)) {
+      return sendHtml(
+        res,
+        409,
+        pageShell(
+          "Run in progress",
+          deps.revision,
+          '<h1>A run is already in progress</h1><p>Wait for it to finish before starting another.</p><p><a href="/">Runs</a></p>',
+        ),
+      );
+    }
+    const runId = startRun(ctx, { trigger: "manual" });
     return redirect(res, `/runs/${runId}`);
   }
   const runMatch = /^\/runs\/([^/]+)$/.exec(path);
@@ -340,13 +376,17 @@ function routeRequest(ctx: Ctx, req: IncomingMessage, res: ServerResponse): Prom
     return handleExport(ctx, res, exportMatch[1]!);
   }
   if (method === "GET" && path === "/") {
-    return sendHtml(res, 200, renderRunList(listRuns(db), deps.revision));
+    return sendHtml(
+      res,
+      200,
+      renderRunList(listRuns(db), deps.revision, deps.watcher?.()),
+    );
   }
   return sendHtml(res, 404, pageShell("Not found", deps.revision, "<h1>Not found</h1><p><a href=\"/\">Runs</a></p>"));
 }
 
-export function createApp(deps: AppDeps): Server {
-  const ctx: Ctx = {
+export function createAppContext(deps: AppDeps): AppContext {
+  return {
     db: deps.db,
     deps,
     pipeline: deps.pipeline ?? runPipeline,
@@ -354,6 +394,12 @@ export function createApp(deps: AppDeps): Server {
     recheck: deps.recheck ?? recheckFolder,
     holdTask: deps.holdTask ?? startTaskHold,
   };
+}
+
+// The HTTP handler around a shared context; main.ts builds the context first
+// so the Box watcher can start runs through the same one.
+export function serveContext(ctx: AppContext): Server {
+  const { deps } = ctx;
   return createServer((req, res) => {
     Promise.resolve(routeRequest(ctx, req, res)).catch((error: unknown) => {
       const detail = error instanceof Error ? error.message : String(error);
@@ -364,4 +410,8 @@ export function createApp(deps: AppDeps): Server {
       }
     });
   });
+}
+
+export function createApp(deps: AppDeps): Server {
+  return serveContext(createAppContext(deps));
 }

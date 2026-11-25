@@ -33,7 +33,14 @@ export type BoxFileEvidence = {
   sha256: string;
 };
 
-export type BoxEntry = { id: string; type: string; name: string };
+export type BoxEntry = {
+  id: string;
+  type: string;
+  name: string;
+  // Present only when the listing request asks for them via `fields`.
+  sha1?: string;
+  versionId?: string;
+};
 
 function normalizeBase(gatewayBaseUrl: string): string {
   return gatewayBaseUrl.replace(/\/+$/, "");
@@ -131,7 +138,7 @@ export async function fetchBoxFile(
 export async function listFolder(
   gatewayBaseUrl: string,
   folderId: string,
-  options: { fetch?: typeof fetch } = {},
+  options: { fetch?: typeof fetch; fields?: string } = {},
 ): Promise<BoxEntry[]> {
   const fetchImpl = options.fetch ?? fetch;
   const base = normalizeBase(gatewayBaseUrl);
@@ -140,7 +147,7 @@ export async function listFolder(
   let marker: string | undefined;
   do {
     const url = new URL(`${base}/2.0/folders/${encodeURIComponent(folderId)}/items`);
-    url.searchParams.set("fields", "id,type,name");
+    url.searchParams.set("fields", options.fields ?? "id,type,name");
     url.searchParams.set("limit", "1000");
     url.searchParams.set("usemarker", "true");
     if (marker !== undefined) url.searchParams.set("marker", marker);
@@ -155,7 +162,17 @@ export async function listFolder(
     }
     for (const entry of body.entries) {
       if (isRecord(entry) && typeof entry.id === "string" && typeof entry.name === "string") {
-        entries.push({ id: entry.id, type: typeof entry.type === "string" ? entry.type : "", name: entry.name });
+        const parsed: BoxEntry = {
+          id: entry.id,
+          type: typeof entry.type === "string" ? entry.type : "",
+          name: entry.name,
+        };
+        if (typeof entry.sha1 === "string") parsed.sha1 = entry.sha1;
+        const fileVersion = entry.file_version;
+        if (isRecord(fileVersion) && typeof fileVersion.id === "string") {
+          parsed.versionId = fileVersion.id;
+        }
+        entries.push(parsed);
       }
     }
     marker = typeof body.next_marker === "string" && body.next_marker.length > 0 ? body.next_marker : undefined;

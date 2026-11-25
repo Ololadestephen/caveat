@@ -2,7 +2,7 @@ import type { SourceTuple } from "../evidence/recheck.ts";
 import { escapeHtml } from "../review/decision-card.ts";
 import type { RunReceipt } from "../review/receipt.ts";
 import { renderReviewBody } from "../review/review-page.ts";
-import type { ApprovalRow, ExportRow, RunRow } from "../store/db.ts";
+import type { ApprovalRow, ExportRow, RunRow, WatchEventRow } from "../store/db.ts";
 
 export function pageShell(title: string, revision: string, body: string): string {
   return `<!doctype html>
@@ -40,18 +40,60 @@ function sourceSummary(tupleJson: string): string {
   }
 }
 
-export function renderRunList(runs: RunRow[], revision: string): string {
+export type WatcherView = {
+  enabled: boolean;
+  intervalMs: number;
+  boxFolder: string;
+  lastCheckedAt: string | null;
+  lastResult: string | null;
+  events: WatchEventRow[];
+};
+
+const WATCH_RESULT_LABELS: Record<string, string> = {
+  no_change: "no change",
+  change_found: "change found",
+  box_unavailable: "Box unavailable",
+  error: "error",
+  skipped_busy: "skipped — a run is in progress",
+};
+
+function renderWatcherLine(watcher: WatcherView | undefined): string {
+  if (watcher === undefined) return "";
+  if (!watcher.enabled) {
+    return `<p class="watcher"><strong>Box watcher:</strong> disabled.</p>`;
+  }
+  const seconds = Math.round(watcher.intervalMs / 1000);
+  const last =
+    watcher.lastCheckedAt === null
+      ? "not checked yet"
+      : `${escapeHtml(watcher.lastCheckedAt)}, ${
+          WATCH_RESULT_LABELS[watcher.lastResult ?? ""] ?? "no change"
+        }`;
+  const events = watcher.events
+    .map((e) => `<li>${escapeHtml(e.at)} — ${escapeHtml(e.result)}${e.run_id !== null ? ` (run <a href="/runs/${escapeHtml(e.run_id)}">${escapeHtml(e.run_id)}</a>)` : ""}</li>`)
+    .join("");
+  return `<div class="watcher"><p><strong>Box watcher:</strong> checks the ${escapeHtml(watcher.boxFolder)} folder every ${seconds} s while the coordinator is awake. Last check: ${last}.</p>${
+    watcher.events.length > 0 ? `<ul>${events}</ul>` : ""
+  }</div>`;
+}
+
+export function renderRunList(
+  runs: RunRow[],
+  revision: string,
+  watcher?: WatcherView,
+): string {
   const rows = runs
     .map((run) => {
       const receiptSha = run.receipt_hash.length > 0 ? run.receipt_hash.slice(0, 12) : "—";
-      return `    <tr><td><a href="/runs/${escapeHtml(run.id)}">${escapeHtml(run.id)}</a></td><td>${statusBadge(run.status, run.superseded_by)}</td><td>${escapeHtml(run.created_at)}</td><td>${sourceSummary(run.source_tuple_json)}</td><td><code>${receiptSha}</code></td></tr>`;
+      return `    <tr><td><a href="/runs/${escapeHtml(run.id)}">${escapeHtml(run.id)}</a></td><td>${statusBadge(run.status, run.superseded_by)}</td><td>${escapeHtml(run.created_at)}</td><td>${escapeHtml(run.trigger)}</td><td>${sourceSummary(run.source_tuple_json)}</td><td><code>${receiptSha}</code></td></tr>`;
     })
     .join("\n");
   return pageShell("Caveat runs", revision, `<nav><strong>Caveat</strong> — contract cash review</nav>
 <h1>Runs</h1>
+${renderWatcherLine(watcher)}
 <form method="POST" action="/runs"><button type="submit">Start a run</button></form>
 <table class="runs">
-  <tr><th>Run</th><th>Status</th><th>Created</th><th>Sources</th><th>Receipt</th></tr>
+  <tr><th>Run</th><th>Status</th><th>Created</th><th>Started by</th><th>Sources</th><th>Receipt</th></tr>
 ${rows}
 </table>`);
 }
@@ -117,7 +159,7 @@ export function renderRun(
   const parts: string[] = [
     `<nav><a href="/">Caveat runs</a> / ${escapeHtml(run.id)}</nav>`,
     `<h1>${escapeHtml(run.id)}</h1>`,
-    `<p>${statusBadge(run.status, run.superseded_by)} · created ${escapeHtml(run.created_at)}${run.status_reason !== null ? ` · ${escapeHtml(run.status_reason)}` : ""}</p>`,
+    `<p>${statusBadge(run.status, run.superseded_by)} · created ${escapeHtml(run.created_at)} · started by ${escapeHtml(run.trigger)}${run.status_reason !== null ? ` · ${escapeHtml(run.status_reason)}` : ""}</p>`,
   ];
   if (run.status === "stale") parts.push(renderStaleBanner(run));
   if (run.superseded_by !== null && run.status !== "stale") {
