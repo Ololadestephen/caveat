@@ -451,8 +451,20 @@ function renderCounteroffer(receipt: RunReceipt): string {
       lowestAcross === null
         ? ""
         : `; lowest ${formatCents(lowestAcross.balanceCents)} on ${escapeHtml(formatDate(lowestAcross.date))}`;
+    const boundRecord =
+      search.bound === null || search.bound === undefined
+        ? undefined
+        : search.rounds.flatMap((r) => r.candidates).find((c) => c.id === search.bound?.candidate);
+    const boundLine =
+      boundRecord === undefined
+        ? `<br>No smaller ${escapeHtml(best.lever)} candidate was tested, so this is the smallest passing tested change, not a proven minimum.`
+        : `<br>Tested bound: ${escapeHtml(boundRecord.summary ?? boundRecord.id)} fails at least one scenario check (gap ${
+            search.bound?.gap.unit === "days"
+              ? `${search.bound.gap.value} days`
+              : formatCents(search.bound?.gap.value ?? 0)
+          }).`;
     outcome = `<div class="banner banner--ok"><strong>${escapeHtml(best.summary ?? best.id)}</strong><br>
-Passes all ${scenarioCount(best)} tested scenario checks${lowestPart}; change size ${formatCents(best.rankCents ?? 0)}; found in round ${bestRound} of ${search.rounds.length}.</div>`;
+Passes all ${scenarioCount(best)} tested scenario checks${lowestPart}; change size ${formatCents(best.rankCents ?? 0)}; found in round ${bestRound} of ${search.rounds.length}.${boundLine}</div>`;
   } else if (search.status === "not_needed") {
     outcome = `<div class="banner banner--ok"><strong>Not needed.</strong> Both readings already keep cash at or above the floor as signed.</div>`;
   } else if (search.status === "needs_review") {
@@ -491,12 +503,26 @@ Passes all ${scenarioCount(best)} tested scenario checks${lowestPart}; change si
       const modelBits = [escapeHtml(search.model)];
       if (round.modelVersion !== undefined) modelBits.push(escapeHtml(round.modelVersion));
       if (round.servedBy !== undefined) modelBits.push(escapeHtml(round.servedBy));
+      const workers = [
+        ...new Set(
+          round.candidates
+            .filter((c) => c.status === "tested" && c.worker !== undefined)
+            .map((c) => c.worker as string),
+        ),
+      ];
+      const workerCaption =
+        workers.length === 0
+          ? ""
+          : workers.length === 1
+            ? `<p class="caption">Tested on ${escapeHtml(workers[0] ?? "")}</p>`
+            : `<p class="caption">Tested in parallel on ${workers.map(escapeHtml).join(", ")}</p>`;
       return `  <h3>Round ${round.round}</h3>
   <p class="model-note">Model's note (model's own words): ${escapeHtml(round.modelNote)} <span class="caption">[${modelBits.join(", ")}]</span></p>
   <table>
     <tr><th>Candidate</th><th>Terms</th><th>Worker</th><th>Result</th><th>Change size</th><th>Status</th></tr>
 ${rows}
-  </table>`;
+  </table>
+${workerCaption}`;
     })
     .join("\n");
 

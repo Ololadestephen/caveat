@@ -170,8 +170,16 @@ export function renderDraft(receipt: RunReceipt): string {
         );
       const lowestPart =
         lowest === null ? "" : ` (lowest ${money(lowest.balanceCents)} on ${formatDate(lowest.date)})`;
+      const boundRecord =
+        search.bound === null || search.bound === undefined
+          ? undefined
+          : search.rounds.flatMap((r) => r.candidates).find((c) => c.id === search.bound?.candidate);
+      const boundPart =
+        boundRecord === undefined
+          ? ""
+          : ` A smaller version (${boundRecord.summary ?? boundRecord.id}) failed the same tests.`;
       lines.push(
-        `${next()}. Proposed change, tested by Caveat: ${best.summary ?? best.id}. This moves ${money(best.rankCents ?? 0)} earlier than the signed terms and adds no new money. Caveat's runner tested it against both extension cases under both retainer readings; cash stays at or above the ${money(receipt.assumptions.floorCents)} floor in all four${lowestPart}. It was found in round ${bestRound ?? "?"} of the search; the receipt lists every candidate tried.`,
+        `${next()}. Proposed change, tested by Caveat: ${best.summary ?? best.id}. This moves ${money(best.rankCents ?? 0)} earlier than the signed terms and adds no new money. Caveat's runner tested it against both extension cases under both retainer readings; cash stays at or above the ${money(receipt.assumptions.floorCents)} floor in all four${lowestPart}.${boundPart} It was found in round ${bestRound ?? "?"} of the search; the receipt lists every candidate tried.`,
       );
     }
   } else if (search !== undefined && search.status === "not_found") {

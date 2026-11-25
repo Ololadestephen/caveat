@@ -95,6 +95,34 @@ describe("renderDraft — counteroffer point", () => {
     );
   });
 
+  it("appends the tested bound sentence when a bound exists", () => {
+    const withBound = JSON.parse(JSON.stringify(FOUND)) as NonNullable<RunReceipt["counteroffer"]>;
+    withBound.bound = { candidate: "r2c1", gap: { unit: "cents", value: 50000 } };
+    withBound.rounds.push({
+      round: 2,
+      modelNote: "n",
+      done: true,
+      candidates: [
+        {
+          id: "r2c1",
+          lever: "upfront_deposit",
+          params: { amount_cents: 750000, date: "2026-10-01", split_count: null, net_days: null },
+          rationale: "narrow it",
+          status: "tested",
+          rankCents: 750000,
+          summary:
+            "pay $7,500 of the escrow funding to the consultant as cash at signing (modeled as Oct 1, 2026), reducing the Jan 2, 2027 release to $67,500",
+          passesAll: false,
+        },
+      ],
+    });
+    const receipt = { ...JSON.parse(JSON.stringify(RECEIPT)), counteroffer: withBound } as RunReceipt;
+    const draft = renderDraft(receipt);
+    expect(draft).toContain(
+      "floor in all four (lowest $10,000 on December 15, 2026). A smaller version (pay $7,500 of the escrow funding to the consultant as cash at signing (modeled as Oct 1, 2026), reducing the Jan 2, 2027 release to $67,500) failed the same tests. It was found in round 1 of the search",
+    );
+  });
+
   it("says no tested change worked when the search found none", () => {
     const receipt = {
       ...JSON.parse(JSON.stringify(RECEIPT)),

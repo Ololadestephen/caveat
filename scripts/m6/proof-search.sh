@@ -179,13 +179,26 @@ ASSERT_OUT="$(node -e '
     const workers = new Set(tested.map((c) => c.worker));
     for (const w of workers)
       if (w !== "caveat-wa" && w !== "caveat-wb") problems.push(`worker ${w}`);
-    // Distribution is round-robin within a round, so both workers are only
-    // guaranteed to appear when one round tests >=2 candidates.
+    // Distribution is round-robin within a round; the search must exercise
+    // both workers in at least one round, and any >=2-tested round must use
+    // both.
+    let sawParallel = false;
     for (const x of rounds) {
       const rt = x.candidates.filter((c) => c.status === "tested");
-      if (rt.length >= 2 && new Set(rt.map((c) => c.worker)).size < 2)
+      const ws = new Set(rt.map((c) => c.worker));
+      if (rt.length >= 2 && ws.size < 2)
         problems.push(`round ${x.round} used one worker for ${rt.length} candidates`);
+      if (rt.length >= 2 && ws.size >= 2) sawParallel = true;
+      // A not-done round must propose >=2 candidates on distinct levers.
+      if (!x.done) {
+        if (x.candidates.length < 2)
+          problems.push(`round ${x.round} proposed ${x.candidates.length} candidates`);
+        const levers = new Set(x.candidates.map((c) => c.lever));
+        if (levers.size < x.candidates.length)
+          problems.push(`round ${x.round} repeated a lever`);
+      }
     }
+    if (!sawParallel) problems.push("no round tested >=2 candidates on both workers");
   } else if (co) {
     problems.push(`status ${co.status}`);
   }
@@ -204,7 +217,7 @@ ASSERT_OUT="$(node -e '
   }));
   fs.writeFileSync(process.argv[2], JSON.stringify({
     status: co?.status ?? null, stopReason: co?.stopReason ?? null,
-    best: co?.best ?? null, rounds: table,
+    best: co?.best ?? null, bound: co?.bound ?? null, rounds: table,
     humanReview: co?.humanReview ?? [],
     carriedFrom: co?.carriedFrom ?? null, reverifiedOn: co?.reverifiedOn ?? null,
   }, null, 2));
@@ -242,7 +255,15 @@ grep -F 'Counteroffer search' "$RUN_PAGE" >/dev/null || fail "run page lacks the
 ROUNDS_N="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).rounds.length)' "$EVIDENCE_DIR/search-rounds-$RUN_ID.json")"
 NOTES_N="$(grep -o "Model's note" "$RUN_PAGE" | wc -l | tr -d ' ')"
 [ "$NOTES_N" = "$ROUNDS_N" ] || fail "run page has $NOTES_N Model's note lines, want $ROUNDS_N"
-note "{\"step\":\"d\",\"rounds\":$ROUNDS_N}"
+BOUND_JSON="$(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).bound ?? null))' "$EVIDENCE_DIR/search-rounds-$RUN_ID.json")"
+if [ "$BOUND_JSON" != "null" ]; then
+  grep -F 'Tested bound: ' "$RUN_PAGE" >/dev/null \
+    || fail "run page lacks 'Tested bound:' though the receipt has a bound"
+else
+  grep -F 'not a proven minimum' "$RUN_PAGE" >/dev/null \
+    || fail "run page lacks the no-bound wording"
+fi
+note "{\"step\":\"d\",\"rounds\":$ROUNDS_N,\"bound\":$BOUND_JSON}"
 
 # --- e. approve + export -----------------------------------------------------------
 RECEIPT_HASH="$(grep -oE 'name="receiptHash" value="[0-9a-f]+"' "$RUN_PAGE" | grep -oE '[0-9a-f]{64}')"

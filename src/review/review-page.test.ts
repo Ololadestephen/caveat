@@ -515,6 +515,39 @@ describe("renderReviewPage — counteroffer search", () => {
     expect(html).toContain("amount_cents");
   });
 
+  it("notes when no smaller candidate was tested and captions the worker", () => {
+    expect(html).toContain(
+      "No smaller upfront_deposit candidate was tested, so this is the smallest passing tested change, not a proven minimum.",
+    );
+    expect(html).toContain("Tested on caveat-wa");
+  });
+
+  it("shows the tested bound and the parallel-workers caption", () => {
+    const bound = JSON.parse(JSON.stringify(WITH_SEARCH)) as RunReceipt;
+    const co = bound.counteroffer!;
+    co.bound = { candidate: "r1c2", gap: { unit: "cents", value: 50000 } };
+    const round = co.rounds[0]!;
+    round.candidates[1] = {
+      id: "r1c2",
+      lever: "upfront_deposit",
+      params: { amount_cents: 750000, date: "2026-10-01", split_count: null, net_days: null },
+      rationale: "narrow it",
+      status: "tested",
+      worker: "caveat-wb",
+      rankCents: 750000,
+      summary:
+        "pay $7,500 of the escrow funding to the consultant as cash at signing (modeled as Oct 1, 2026), reducing the Jan 2, 2027 release to $67,500",
+      passesAll: false,
+      perScenario: {},
+    };
+    const out = renderReviewPage(bound);
+    expect(out).toContain(
+      "Tested bound: pay $7,500 of the escrow funding to the consultant as cash at signing (modeled as Oct 1, 2026), reducing the Jan 2, 2027 release to $67,500 fails at least one scenario check (gap $500.00).",
+    );
+    expect(out).toContain("Tested in parallel on caveat-wa, caveat-wb");
+    expect(out).not.toContain("not a proven minimum");
+  });
+
   it("renders the not_found and needs_review outcomes", () => {
     const notFound: RunReceipt = {
       ...RECEIPT,
