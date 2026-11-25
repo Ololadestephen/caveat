@@ -382,6 +382,24 @@ describe("runPipeline orchestration", () => {
     expect(first?.resultDigests?.retainer_continues).toBeTruthy();
   });
 
+  it("reports workers_unavailable naming the missing connector", async () => {
+    stubFetch();
+    // No worker connectors in the list and no injected pool: the search must
+    // come back needs_review naming the first connector it looked for.
+    const result = await runPipeline({
+      ...config,
+      reviewsDir: writeReviewsDir(),
+      connections: CONNECTIONS,
+      pdfText: cannedPdfLines,
+      assertExpected: false,
+    });
+    const search = result.receipt.counteroffer;
+    expect(search?.status).toBe("needs_review");
+    expect(search?.reason).toBe("workers_unavailable");
+    expect(search?.detail).toContain("caveat-worker-a");
+    expect(result.receipt.status).toBe("needs_review");
+  });
+
   it("fails at box_file when a named file is absent from the folder", async () => {
     vi.stubGlobal("fetch", (url: unknown) => {
       const u = String(url);

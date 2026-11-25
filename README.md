@@ -70,9 +70,12 @@ A Caveat run on them surfaces five things a reader can miss:
   watcher pauses with them; the next request wakes it and it checks again.
   It never uploads to Box or sends anything.
 - **Worker Sprites** (`caveat-wa`, `caveat-wb`): hold no Box/OpenRouter
-  grants at all. The coordinator reaches them through a `caveat-workers`
-  Custom API connector restricted to the two workers' exec endpoints, so
-  the Sprites API token lives in the connector, not in any Sprite. The
+  grants at all. The coordinator reaches them through one Custom API
+  connector per worker (`caveat-worker-a`, `caveat-worker-b`) pointing at
+  that worker's org-private Sprite URL and restricted to `/run-batch`; the
+  gateway refuses connectors that target the Sprites API itself, so workers
+  serve a small HTTP endpoint instead of being driven by exec. The token
+  lives in the connector, not in any Sprite. The
   coordinator checks that each worker's input digest matches what it sent.
   The worker proof pushes a fixture bundle, runs it under a
   per-worker overlay, checkpoints the Sprite, restores it, and replays —
@@ -159,8 +162,9 @@ Useful environment overrides: `CAVEAT_COORD_SPRITE`, `CAVEAT_WORKER_A`,
 `CAVEAT_WORKER_B`, `CAVEAT_SERVICE`, `CAVEAT_PRIVATE`, `CAVEAT_BOX_FOLDER`,
 `CAVEAT_OPERATIVE_FILE`, `CAVEAT_RUN_TIMEOUT_MS` (default 600000),
 `CAVEAT_WATCH_INTERVAL_MS` (default 60000, `0` disables the Box watcher),
-`CAVEAT_WORKERS` (default `caveat-wa,caveat-wb`), `CAVEAT_WORKERS_CONNECTOR`
-(default `caveat-workers`),
+`CAVEAT_WORKERS` (default
+`caveat-wa=caveat-worker-a,caveat-wb=caveat-worker-b`: each worker Sprite
+paired with the connector that reaches it),
 `CAVEAT_RECHECK_TIMEOUT_MS` (default 30000), `CAVEAT_APPROVER` (required to
 approve a run), `CAVEAT_DATA_DIR` (service database location).
 

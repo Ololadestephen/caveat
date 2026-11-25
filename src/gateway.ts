@@ -22,8 +22,8 @@ export async function listConnections(options: { fetch?: typeof fetch } = {}): P
       typeof entry.gateway_base_url === "string"
     ) {
       // Custom-API connectors have no `name`; their label lives in
-      // provider_account_name (and display_name). CAVEAT_WORKERS_CONNECTOR
-      // matches whichever is present.
+      // provider_account_name (and display_name). CAVEAT_WORKERS connector
+      // names match whichever is present.
       const name =
         typeof entry.name === "string"
           ? entry.name

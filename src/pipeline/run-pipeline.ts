@@ -57,12 +57,13 @@ import type {
   SearchCandidateRecord,
   SearchReading,
 } from "../search/loop.ts";
-import { SpritesExecPool } from "../worker/pool.ts";
+import { SpritesHttpPool } from "../worker/pool.ts";
 import type { WorkerPool } from "../worker/pool.ts";
 
 const DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free";
-const DEFAULT_WORKERS_CONNECTOR = "caveat-workers";
-const DEFAULT_WORKERS = "caveat-wa,caveat-wb";
+// worker display name = connector name; the connector points at that worker's
+// org-private Sprite URL.
+const DEFAULT_WORKERS = "caveat-wa=caveat-worker-a,caveat-wb=caveat-worker-b";
 const SEARCH_TIMEOUT_MS = 60_000;
 
 const FILE_NAMES = [
@@ -102,7 +103,6 @@ export type PipelineConfig = {
   connections?: Connection[];
   pdfText?: typeof extractPdfLines;
   workerPool?: WorkerPool;
-  workersConnector?: string;
   workers?: string;
   chat?: typeof callStructuredChat;
   trigger?: "manual" | "watcher";
@@ -156,7 +156,7 @@ class StageTimer {
 type Connectors = {
   boxConn: Connection;
   openrouterConn: Connection;
-  workersConn: Connection | undefined;
+  all: Connection[];
 };
 
 function readEnv(name: string): string | undefined {
@@ -173,10 +173,21 @@ async function connect(config: PipelineConfig, timer: StageTimer): Promise<Conne
   if (openrouterConn === undefined) {
     throw new PipelineError("openrouter", new Error("openrouter connector not configured"));
   }
-  const workersName =
-    config.workersConnector ?? readEnv("CAVEAT_WORKERS_CONNECTOR") ?? DEFAULT_WORKERS_CONNECTOR;
-  const workersConn = connections.find((c) => c.name === workersName);
-  return { boxConn, openrouterConn, workersConn };
+  return { boxConn, openrouterConn, all: connections };
+}
+
+// "worker=connector" entries; a bare name uses it as both.
+function parseWorkerSpec(spec: string): { worker: string; connector: string }[] {
+  return spec
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => {
+      const eq = entry.indexOf("=");
+      return eq === -1
+        ? { worker: entry, connector: entry }
+        : { worker: entry.slice(0, eq).trim(), connector: entry.slice(eq + 1).trim() };
+    });
 }
 
 type FetchedFile = {
@@ -453,34 +464,31 @@ function workersUnavailableReceipt(model: string, detail: string): CounterofferR
   };
 }
 
-// The worker pool: injected in tests, otherwise the gateway's custom-API
-// connector exec-ing run-batch on the worker Sprites.
+// The worker pool: injected in tests, otherwise one Custom API connector per
+// worker pointing at that worker's org-private Sprite URL.
 function resolvePool(
   connectors: Connectors,
   model: string,
   config: PipelineConfig,
 ): { ok: true; pool: WorkerPool } | { ok: false; receipt: CounterofferReceipt } {
   if (config.workerPool !== undefined) return { ok: true, pool: config.workerPool };
-  if (connectors.workersConn === undefined) {
-    return {
-      ok: false,
-      receipt: workersUnavailableReceipt(
-        model,
-        "the workers connector is not configured on the gateway",
-      ),
-    };
+  const gateways: Record<string, string> = {};
+  for (const { worker, connector } of parseWorkerSpec(
+    config.workers ?? readEnv("CAVEAT_WORKERS") ?? DEFAULT_WORKERS,
+  )) {
+    const conn = connectors.all.find((c) => c.name === connector);
+    if (conn === undefined) {
+      return {
+        ok: false,
+        receipt: workersUnavailableReceipt(
+          model,
+          `the ${connector} connector is not configured on the gateway`,
+        ),
+      };
+    }
+    gateways[worker] = conn.gatewayBaseUrl;
   }
-  const workerNames = (config.workers ?? readEnv("CAVEAT_WORKERS") ?? DEFAULT_WORKERS)
-    .split(",")
-    .map((name) => name.trim())
-    .filter((name) => name.length > 0);
-  return {
-    ok: true,
-    pool: new SpritesExecPool({
-      gatewayBaseUrl: connectors.workersConn.gatewayBaseUrl,
-      workers: workerNames,
-    }),
-  };
+  return { ok: true, pool: new SpritesHttpPool({ gateways }) };
 }
 
 // Runs the counteroffer search after clean readings. Any model/worker failure
