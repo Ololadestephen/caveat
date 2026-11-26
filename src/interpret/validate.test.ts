@@ -1,3 +1,4 @@
+import { quoteInText } from "./validate.ts";
 import { describe, expect, it } from "vitest";
 import { validateDecision } from "./validate.ts";
 import { BILLING_TRIGGER } from "./types.ts";
@@ -90,5 +91,32 @@ describe("validateDecision", () => {
   it("accepts confidence exactly at the threshold", () => {
     const result = validateDecision(decision({ confidence: 0.8 }), QUESTION, 0.8);
     expect(result.ok).toBe(true);
+  });
+});
+
+describe("quoteInText match normalization", () => {
+  it("maps curly apostrophes and quotes to straight ones on both sides", () => {
+    expect(quoteInText("Consultant's invoice", "Consultant ’s invoice")).toBe(true);
+    expect(quoteInText("Consultant ’s invoice", "Consultant's invoice")).toBe(true);
+    expect(quoteInText('the "Works"', "the “Works”")).toBe(true);
+    expect(quoteInText("the “Works”", 'the "Works"')).toBe(true);
+  });
+
+  it("ignores whitespace before closing punctuation and after an open paren", () => {
+    expect(quoteInText("Exhibit A.", "Exhibit A .")).toBe(true);
+    expect(quoteInText("net thirty (30) calendar days", "net thirty ( 30 ) calendar days")).toBe(true);
+    expect(quoteInText("(Exhibit C)", "( Exhibit C )")).toBe(true);
+    expect(quoteInText("fees, costs; taxes: duties", "fees , costs ; taxes : duties")).toBe(true);
+    expect(quoteInText("Aviat's", "Aviat ’s")).toBe(true);
+  });
+
+  it("still collapses wrapped whitespace", () => {
+    expect(quoteInText("paid on the last day", "paid on the\nlast   day")).toBe(true);
+  });
+
+  it("still rejects a genuinely different word", () => {
+    expect(quoteInText("Consultant's fees", "Consultant ’s invoice")).toBe(false);
+    expect(quoteInText("net sixty (30) days", "net thirty (30) days")).toBe(false);
+    expect(quoteInText("", "any text")).toBe(false);
   });
 });

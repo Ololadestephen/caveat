@@ -111,6 +111,8 @@ describe("parseRecurrence / parseNetDays", () => {
     expect(parseNetDays("net 0 days")).toBeUndefined();
     expect(parseNetDays("net 365 days")).toBeUndefined();
     expect(parseNetDays("promptly")).toBeUndefined();
+    expect(parseNetDays("30 days")).toBe(30);
+    expect(parseNetDays("30 calendar days")).toBe(30);
   });
 });
 

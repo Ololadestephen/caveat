@@ -125,7 +125,11 @@ export function parseRecurrence(text: string | null): "monthly" | "one_off" | un
   return undefined;
 }
 
-const NET_DAYS_RES = [/net (\d{1,2})\b/i, /\((\d{1,2})\)\s*(calendar )?days/i];
+const NET_DAYS_RES = [
+  /net (\d{1,2})\b/i,
+  /\((\d{1,2})\)\s*(calendar )?days/i,
+  /\b(\d{1,2})\s+(calendar )?days\b/i,
+];
 
 export function parseNetDays(text: string): number | undefined {
   for (const re of NET_DAYS_RES) {

@@ -10,11 +10,21 @@ export type ValidationResult =
 const TOP_LEVEL_KEYS = ["action", "reason", "cited_clause", "confidence"];
 const CLAUSE_KEYS = ["excerpt_id", "quote"];
 
-// Verbatim checks run on whitespace-normalised text: contract text wraps
-// mid-phrase, so a quote that spans a wrap still counts as verbatim.
+// Verbatim checks run on normalised text: contract text wraps mid-phrase,
+// and public filings carry typographic noise — curly quotes and spaces before
+// punctuation from line-justification. Normalising the same way on both sides
+// keeps the check verbatim without penalising faithful copies.
+function normalizeForMatch(text: string): string {
+  return normalizeWhitespace(text)
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/\s+([.,;:)'"])/g, "$1")
+    .replace(/\(\s+/g, "(");
+}
+
 export function quoteInText(quote: string, text: string): boolean {
-  const normalizedQuote = normalizeWhitespace(quote);
-  return normalizedQuote.length > 0 && normalizeWhitespace(text).includes(normalizedQuote);
+  const normalizedQuote = normalizeForMatch(quote);
+  return normalizedQuote.length > 0 && normalizeForMatch(text).includes(normalizedQuote);
 }
 
 export function validateDecision(
