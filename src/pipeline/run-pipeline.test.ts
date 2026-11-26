@@ -11,6 +11,10 @@ import type { RunReceipt } from "../review/receipt.ts";
 import { InProcessPool } from "../worker/pool.ts";
 import type { WorkerJob, WorkerJobResult } from "../worker/pool.ts";
 
+
+// Explicit comparator: the same UTF-16 code-unit order as .sort().
+const BY_STRING = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
 const config = {
   runId: "run-test",
   reviewsDir: "reviews",
@@ -559,7 +563,7 @@ describe("runPipeline orchestration", () => {
     expect(first?.passesAll).toBe(true);
     expect(second?.status).toBe("tested");
     // Both workers were used — one runBatch call per worker, concurrently.
-    expect(pool.calls.map((c) => c.worker).sort()).toEqual(["wa-test", "wb-test"]);
+    expect(pool.calls.map((c) => c.worker).sort(BY_STRING)).toEqual(["wa-test", "wb-test"]);
     expect(first?.inputDigests?.retainer_superseded).toBeTruthy();
     expect(first?.resultDigests?.retainer_continues).toBeTruthy();
   });
@@ -1036,8 +1040,8 @@ describe("client reply", () => {
     expect(reply?.counter?.id).toBe("client");
     expect(reply?.counter?.lever).toBe("upfront_deposit");
     expect(reply?.counter?.passesAll).toBe(true);
-    expect([...(reply?.workers ?? [])].sort()).toEqual(["wa-test", "wb-test"]);
-    expect(reply?.counter?.workers?.sort()).toEqual(["wa-test", "wb-test"]);
+    expect([...(reply?.workers ?? [])].sort(BY_STRING)).toEqual(["wa-test", "wb-test"]);
+    expect(reply?.counter?.workers?.sort(BY_STRING)).toEqual(["wa-test", "wb-test"]);
     expect(reply?.response).toBeUndefined();
 
     // The reply is a source and its sections are digested, but its sections

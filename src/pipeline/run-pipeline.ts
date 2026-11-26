@@ -195,6 +195,21 @@ type Connectors = {
   all: Connection[];
 };
 
+type CarryKey =
+  | "release_timing"
+  | "escrow_schedule"
+  | "counteroffer_search"
+  | "client_letter_gate"
+  | "client_counter"
+  | "client_reply_search";
+
+// Finds the first carry source (newest first) whose stored digest for this
+// typed call matches; the caller still checks the outcome is carryable.
+type CarrySourceLookup = (
+  key: CarryKey,
+  digest: string,
+) => { runId: string; receipt: RunReceipt } | undefined;
+
 function readEnv(name: string): string | undefined {
   const value = process.env[name];
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -704,34 +719,46 @@ function diffSectionDigests(
   for (const id of Object.keys(previous)) {
     if (!(id in next)) removed.push(id);
   }
-  added.sort();
-  removed.sort();
-  changed.sort();
+  const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  added.sort(byCodeUnit);
+  removed.sort(byCodeUnit);
+  changed.sort(byCodeUnit);
   return { added, removed, changed };
 }
 
 async function loadAssumptions(fixturesDir: string): Promise<TwinveeAssumptions> {
   const raw = await readFile(`${fixturesDir}/plan/twinvee-demo-assumptions.json`, "utf8");
-  return JSON.parse(raw) as TwinveeAssumptions;
+  try {
+    return JSON.parse(raw) as TwinveeAssumptions;
+  } catch (error) {
+    throw new Error("plan/twinvee-demo-assumptions.json is not valid JSON", {
+      cause: error,
+    });
+  }
 }
 
-// The evidence->decision->runner pipeline. The typed questions cover the
-// operative (second) amendment; the other files' sections feed flags and
-// human-review citation verification.
-export async function runPipeline(config: PipelineConfig): Promise<PipelineResult> {
-  const timer = new StageTimer();
-  const blockedReasons: { reason: string; detail: string }[] = [];
-
-  // --- Connectors -------------------------------------------------------------
+// Connects through the gateway, fetches every evidence file and sectionizes
+// the three contract PDFs. Any connector or Box failure aborts the run.
+async function collectSources(
+  config: PipelineConfig,
+  timer: StageTimer,
+): Promise<{
+  connectors: Connectors;
+  sourceTuple: SourceTuple;
+  fetched: FetchedFile[];
+  cashFile: OptionalFetched | undefined;
+  replyFile: OptionalFetched | undefined;
+  sections: ContractSection[];
+  excerpts: Excerpt[];
+}> {
   timer.begin();
   const connectors = await connect(config, timer);
-  const { boxConn, openrouterConn, typesafeConn } = connectors;
   timer.record("gateway_list");
 
   // --- Evidence: fetch all three PDFs -------------------------------------------
   timer.begin();
   const folderName = config.boxFolder ?? "caveat_TEST";
-  const { sourceTuple, fetched, cashFile, replyFile } = await fetchSources(boxConn, folderName, timer);
+  const { sourceTuple, fetched, cashFile, replyFile } = await fetchSources(connectors.boxConn, folderName, timer);
   timer.record("box_fetch");
 
   // --- PDF text -> sections ------------------------------------------------------
@@ -739,56 +766,80 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   const { sections, excerpts } = await sectionize(fetched, config.pdfText ?? extractPdfLines, timer);
   timer.record("sections");
 
-  // sha256 of each section's text, keyed by its excerpt id — the clause-level
-  // diff baseline the next incremental run compares against.
+  return { connectors, sourceTuple, fetched, cashFile, replyFile, sections, excerpts };
+}
+
+// sha256 of each contract section's text keyed by excerpt id — the
+// clause-level diff baseline the next incremental run compares against —
+// plus the reply letter's own excerpts when the letter is present.
+async function buildEvidenceContext(
+  sections: ContractSection[],
+  replyFile: OptionalFetched | undefined,
+  pdfText: NonNullable<PipelineConfig["pdfText"]>,
+  timer: StageTimer,
+): Promise<{ sectionDigests: Record<string, string>; replyExcerpts: Excerpt[] }> {
   const sectionDigests: Record<string, string> = {};
   for (const section of sections) {
     sectionDigests[`${section.fileName}#${section.sectionId}`] = createHash("sha256")
       .update(section.text)
       .digest("hex");
   }
+  const replyExcerpts =
+    replyFile === undefined
+      ? []
+      : await sectionizeReplyLetter(replyFile, pdfText, sectionDigests, timer);
+  return { sectionDigests, replyExcerpts };
+}
 
-  // The client reply letter (when present) is sectionized separately: its
-  // digests join sectionDigests under its own file name, but its sections
-  // stay out of the contract's sections/excerpts — flags and human review
-  // only apply to the contract PDFs.
+// The client reply letter (when present) is sectionized separately: its
+// digests join sectionDigests under its own file name, but its sections
+// stay out of the contract's sections/excerpts — flags and human review
+// only apply to the contract PDFs.
+async function sectionizeReplyLetter(
+  replyFile: OptionalFetched,
+  pdfText: NonNullable<PipelineConfig["pdfText"]>,
+  sectionDigests: Record<string, string>,
+  timer: StageTimer,
+): Promise<Excerpt[]> {
+  const pages = await timer.step("pdf_text", pdfText(replyFile.bytes));
+  const replySections = extractSections(replyFile.fileName, pages);
+  const versionLabel = `sha256 ${replyFile.sha256.slice(0, 12)}`;
   const replyExcerpts: Excerpt[] = [];
-  if (replyFile !== undefined) {
-    const pages = await timer.step(
-      "pdf_text",
-      (config.pdfText ?? extractPdfLines)(replyFile.bytes),
-    );
-    const replySections = extractSections(replyFile.fileName, pages);
-    const versionLabel = `sha256 ${replyFile.sha256.slice(0, 12)}`;
-    for (const section of replySections) {
-      sectionDigests[`${section.fileName}#${section.sectionId}`] = createHash("sha256")
-        .update(section.text)
-        .digest("hex");
-      replyExcerpts.push({
-        id: `${section.fileName}#${section.sectionId}`,
-        text: section.text,
-        source: {
-          fileName: section.fileName,
-          versionLabel,
-          page: section.pages[0],
-          section: section.sectionId,
-        },
-      });
-    }
+  for (const section of replySections) {
+    sectionDigests[`${section.fileName}#${section.sectionId}`] = createHash("sha256")
+      .update(section.text)
+      .digest("hex");
+    replyExcerpts.push({
+      id: `${section.fileName}#${section.sectionId}`,
+      text: section.text,
+      source: {
+        fileName: section.fileName,
+        versionLabel,
+        page: section.pages[0],
+        section: section.sectionId,
+      },
+    });
   }
+  return replyExcerpts;
+}
 
-  const model = config.decisionModel ?? DEFAULT_MODEL;
-  const operativeFile = config.operativeFile ?? "03-second-amendment.pdf";
-  const decisionExcerpts = excerpts.filter((e) => e.source.fileName === operativeFile);
-  if (decisionExcerpts.length === 0) {
-    throw new PipelineError("sections", new Error(`no sections extracted from ${operativeFile}`));
-  }
-  const question: Question = {
-    spec: RELEASE_TIMING,
-    id: RELEASE_TIMING.id,
-    excerpts: decisionExcerpts,
-  };
-
+// Digests of exactly what determines each typed call; a matching digest in a
+// previous run's receipt means its outcome can be reused verbatim. Each digest
+// covers the exact provider payload, so an OpenRouter answer can never be
+// carried as a Jev one (and vice versa).
+function computeCallDigests(args: {
+  question: Question;
+  decisionExcerpts: Excerpt[];
+  replyExcerpts: Excerpt[];
+  typesafeConn: Connection | undefined;
+  model: string;
+}): {
+  decisionCallDigest: string;
+  scheduleCallDigest: string;
+  clientCounterDigest: string;
+  clientGateDigest: string;
+} {
+  const { question, decisionExcerpts, replyExcerpts, typesafeConn, model } = args;
   // Digests of exactly what determines each typed call; a matching digest in
   // the previous run's receipt means its outcome can be reused verbatim.
   const excerptDigestInputs = decisionExcerpts.map((e) => ({ id: e.id, text: e.text }));
@@ -831,7 +882,69 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
           provider: "typesafe",
           request: buildGateRequest(replyExcerpts, JEV_MODEL),
         });
-  let clientReplySearchDigest = "none";
+  return { decisionCallDigest, scheduleCallDigest, clientCounterDigest, clientGateDigest };
+}
+
+// The model, the operative-file excerpts that drive every typed call, the
+// release-timing question, and the digests of all four typed calls.
+function prepareDecisionInputs(
+  excerpts: Excerpt[],
+  replyExcerpts: Excerpt[],
+  typesafeConn: Connection | undefined,
+  config: PipelineConfig,
+): {
+  model: string;
+  decisionExcerpts: Excerpt[];
+  question: Question;
+  decisionCallDigest: string;
+  scheduleCallDigest: string;
+  clientCounterDigest: string;
+  clientGateDigest: string;
+} {
+  const model = config.decisionModel ?? DEFAULT_MODEL;
+  const operativeFile = config.operativeFile ?? "03-second-amendment.pdf";
+  const decisionExcerpts = excerpts.filter((e) => e.source.fileName === operativeFile);
+  if (decisionExcerpts.length === 0) {
+    throw new PipelineError("sections", new Error(`no sections extracted from ${operativeFile}`));
+  }
+  const question: Question = {
+    spec: RELEASE_TIMING,
+    id: RELEASE_TIMING.id,
+    excerpts: decisionExcerpts,
+  };
+  const {
+    decisionCallDigest,
+    scheduleCallDigest,
+    clientCounterDigest,
+    clientGateDigest,
+  } = computeCallDigests({
+    question,
+    decisionExcerpts,
+    replyExcerpts,
+    typesafeConn,
+    model,
+  });
+  return {
+    model,
+    decisionExcerpts,
+    question,
+    decisionCallDigest,
+    scheduleCallDigest,
+    clientCounterDigest,
+    clientGateDigest,
+  };
+}
+
+// Builds the carry context: the baseline run for the incremental diff plus
+// the pool of carry sources (newest first) each typed call may borrow from. A
+// source lends only the calls whose digest matches — needs_review receipts
+// are filtered out even when a caller passes them. Without an explicit pool
+// the baseline is the only source, matching the old behavior.
+function buildCarryContext(config: PipelineConfig): {
+  previous: PipelineConfig["previous"];
+  carrySourceFor: CarrySourceLookup;
+  baselineOk: boolean;
+} {
   const previous = config.previous;
   // The pool of carry sources, newest first; a source lends only the calls
   // whose digest matches — needs_review receipts are filtered out even when a
@@ -843,16 +956,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     (s) =>
       s.receipt.status === "reviewable" && s.receipt.typedCallDigests !== undefined,
   );
-  const carrySourceFor = (
-    key:
-      | "release_timing"
-      | "escrow_schedule"
-      | "counteroffer_search"
-      | "client_letter_gate"
-      | "client_counter"
-      | "client_reply_search",
-    digest: string,
-  ): { runId: string; receipt: RunReceipt } | undefined =>
+  const carrySourceFor: CarrySourceLookup = (key, digest) =>
     carrySources.find((s) => s.receipt.typedCallDigests?.[key] === digest);
   // Only a run whose own receipt passed every gate may lend its answers; a
   // blocked answer is always re-asked, never carried.
@@ -861,9 +965,37 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     previous.receipt.status === "reviewable" &&
     previous.receipt.sectionDigests !== undefined &&
     previous.receipt.typedCallDigests !== undefined;
-  const reran: string[] = [];
-  const carriedForward: string[] = [];
+  return { previous, carrySourceFor, baselineOk };
+}
 
+// Ask (or carry) the two typed calls over the contract excerpts: the
+// release-timing decision and the escrow-schedule extraction.
+async function runTypedCalls(args: {
+  decisionCallDigest: string;
+  scheduleCallDigest: string;
+  question: Question;
+  decisionExcerpts: Excerpt[];
+  openrouterConn: Connection;
+  typesafeConn: Connection | undefined;
+  model: string;
+  carrySourceFor: CarrySourceLookup;
+  reran: string[];
+  carriedForward: string[];
+  timer: StageTimer;
+}): Promise<{ decision: DecisionOutcome; schedule: ScheduleOutcome }> {
+  const {
+    decisionCallDigest,
+    scheduleCallDigest,
+    question,
+    decisionExcerpts,
+    openrouterConn,
+    typesafeConn,
+    model,
+    carrySourceFor,
+    reran,
+    carriedForward,
+    timer,
+  } = args;
   // --- Typed decision -------------------------------------------------------------
   timer.begin();
   const decisionSource = carrySourceFor("release_timing", decisionCallDigest);
@@ -907,7 +1039,43 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     reran.push("escrow_schedule");
   }
   timer.record("schedule");
+  return { decision, schedule };
+}
 
+// Flags, human-review artifacts, gate evaluation, the owner cash file, the
+// deterministic runner readings and the compiled search base + its call
+// digest. Mutates blockedReasons like the surrounding stages.
+async function runRunnerStage(args: {
+  sections: ContractSection[];
+  decision: DecisionOutcome;
+  schedule: ScheduleOutcome;
+  cashFile: OptionalFetched | undefined;
+  model: string;
+  config: PipelineConfig;
+  blockedReasons: { reason: string; detail: string }[];
+  timer: StageTimer;
+}): Promise<{
+  flags: ReturnType<typeof detectFlags>;
+  humanReview: RunReceipt["humanReview"];
+  overrides: SourcedOverride[];
+  effectiveAction: string | null;
+  assumptions: TwinveeAssumptions;
+  cashSource: NonNullable<RunReceipt["cashSource"]>;
+  expectedCheck: RunReceipt["expectedCheck"];
+  readings: RunReceipt["readings"];
+  prepared: { base: SearchBase; searchReadings: SearchReading[] } | undefined;
+  searchCallDigest: string;
+}> {
+  const {
+    sections,
+    decision,
+    schedule,
+    cashFile,
+    model,
+    config,
+    blockedReasons,
+    timer,
+  } = args;
   // --- Flags --------------------------------------------------------------------------
   timer.begin();
   const flags = detectFlags(sections);
@@ -1007,312 +1175,215 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
           readings: prepared.searchReadings,
           model,
         });
-  let counteroffer: CounterofferReceipt | undefined;
-  if (
-    blockedReasons.length === 0 &&
-    prepared !== undefined &&
-    schedule.status === "extracted"
-  ) {
-    timer.begin();
-    try {
-      const searchSource = carrySourceFor("counteroffer_search", searchCallDigest);
-      const prevSearch = searchSource?.receipt.counteroffer;
-      const canCarry =
-        searchSource !== undefined &&
-        prevSearch !== undefined &&
-        (prevSearch.status === "found" ||
-          prevSearch.status === "not_found" ||
-          prevSearch.status === "not_needed");
-      if (canCarry && prevSearch !== undefined && searchSource !== undefined) {
-        const carried = await carrySearch(
-          { runId: searchSource.runId, receipt: searchSource.receipt },
-          prevSearch,
-          prepared,
-          connectors,
-          model,
-          config,
-        );
-        counteroffer = carried.receipt;
-        if (carried.carried) carriedForward.push("counteroffer_search");
-      } else {
-        counteroffer = await runSearchStage(schedule, prepared, connectors, model, config);
-        reran.push("counteroffer_search");
-      }
-    } catch (error) {
-      counteroffer = {
-        status: "needs_review",
-        stopReason: "worker_error",
-        reason: "counteroffer_error",
-        detail: error instanceof Error ? error.message : String(error),
-        model,
-        rounds: [],
-        best: null,
-        humanReview: [],
-      };
-    }
-    if (counteroffer.status === "needs_review") {
-      blockedReasons.push({
-        reason: counteroffer.reason ?? "counteroffer_needs_review",
-        detail: counteroffer.detail ?? `counteroffer search stopped: ${counteroffer.stopReason}`,
-      });
-    }
-    timer.record("counteroffer");
-  }
+  return {
+    flags,
+    humanReview,
+    overrides,
+    effectiveAction,
+    assumptions,
+    cashSource,
+    expectedCheck,
+    readings,
+    prepared,
+    searchCallDigest,
+  };
+}
 
-  // --- Client reply --------------------------------------------------------------
-  // 04-client-reply.pdf, when present: read the one proposed change verbatim,
-  // test it on every worker, and when it fails run a seeded follow-up search.
-  // Runs only after the main search and only with no earlier blockers.
-  let clientReply: ClientReplyReceipt | undefined;
+// Carry-or-run for the counteroffer search: a digest match in a reviewable
+// source reuses the outcome (carrySearch re-verifies a "found" best on a
+// worker); anything else runs the model-driven search. Worker and model
+// failures degrade to a needs_review receipt instead of throwing. Skipped
+// entirely when an earlier blocker exists or the inputs are missing.
+async function runCounterofferStage(args: {
+  prepared: { base: SearchBase; searchReadings: SearchReading[] } | undefined;
+  schedule: ScheduleOutcome;
+  searchCallDigest: string;
+  connectors: Connectors;
+  model: string;
+  config: PipelineConfig;
+  carrySourceFor: CarrySourceLookup;
+  reran: string[];
+  carriedForward: string[];
+  blockedReasons: { reason: string; detail: string }[];
+  timer: StageTimer;
+}): Promise<CounterofferReceipt | undefined> {
+  const {
+    prepared,
+    schedule,
+    searchCallDigest,
+    connectors,
+    model,
+    config,
+    carrySourceFor,
+    reran,
+    carriedForward,
+    blockedReasons,
+    timer,
+  } = args;
   if (
-    replyFile !== undefined &&
-    replyExcerpts.length > 0 &&
-    prepared !== undefined &&
-    schedule.status === "extracted" &&
-    blockedReasons.length === 0
+    blockedReasons.length !== 0 ||
+    prepared === undefined ||
+    schedule.status !== "extracted"
   ) {
-    timer.begin();
-    const replyFileMeta = {
-      fileName: replyFile.fileName,
-      versionTag: versionTag({
-        fileId: replyFile.fileId,
-        versionId: replyFile.versionId,
-      }),
-      sha12: sha12(replyFile.sha256),
+    return undefined;
+  }
+  timer.begin();
+  const counteroffer = await runCounterofferStageBody({
+    prepared,
+    schedule,
+    searchCallDigest,
+    connectors,
+    model,
+    config,
+    carrySourceFor,
+    reran,
+    carriedForward,
+  });
+  if (counteroffer.status === "needs_review") {
+    blockedReasons.push({
+      reason: counteroffer.reason ?? "counteroffer_needs_review",
+      detail: counteroffer.detail ?? `counteroffer search stopped: ${counteroffer.stopReason}`,
+    });
+  }
+  timer.record("counteroffer");
+  return counteroffer;
+}
+
+async function runCounterofferStageBody(args: {
+  prepared: { base: SearchBase; searchReadings: SearchReading[] };
+  schedule: Extract<ScheduleOutcome, { status: "extracted" }>;
+  searchCallDigest: string;
+  connectors: Connectors;
+  model: string;
+  config: PipelineConfig;
+  carrySourceFor: CarrySourceLookup;
+  reran: string[];
+  carriedForward: string[];
+}): Promise<CounterofferReceipt> {
+  const {
+    prepared,
+    schedule,
+    searchCallDigest,
+    connectors,
+    model,
+    config,
+    carrySourceFor,
+    reran,
+    carriedForward,
+  } = args;
+  try {
+    const searchSource = carrySourceFor("counteroffer_search", searchCallDigest);
+    const prevSearch = searchSource?.receipt.counteroffer;
+    const canCarry =
+      searchSource !== undefined &&
+      prevSearch !== undefined &&
+      (prevSearch.status === "found" ||
+        prevSearch.status === "not_found" ||
+        prevSearch.status === "not_needed");
+    if (canCarry && prevSearch !== undefined && searchSource !== undefined) {
+      const carried = await carrySearch(
+        { runId: searchSource.runId, receipt: searchSource.receipt },
+        prevSearch,
+        prepared,
+        connectors,
+        model,
+        config,
+      );
+      if (carried.carried) carriedForward.push("counteroffer_search");
+      return carried.receipt;
+    }
+    const fresh = await runSearchStage(schedule, prepared, connectors, model, config);
+    reran.push("counteroffer_search");
+    return fresh;
+  } catch (error) {
+    return {
+      status: "needs_review",
+      stopReason: "worker_error",
+      reason: "counteroffer_error",
+      detail: error instanceof Error ? error.message : String(error),
+      model,
+      rounds: [],
+      best: null,
+      humanReview: [],
     };
-    const conditionalReleases = schedule.schedule.releases
-      .filter((r) => r.extensionId !== undefined)
-      .map((r) => ({
-        id: r.id,
-        amountCents: r.amountCents,
-        date: r.date,
-        extensionId: r.extensionId as string,
-      }));
-
-    // The typed read carries by call digest like the other typed calls; the
-    // deterministic worker test always re-runs (it covers base + readings,
-    // which the read digest does not).
-    let counterRecord: SearchCandidateRecord | undefined;
-    let citation: ClientCitation | undefined;
-    let workers: string[] | undefined;
-    let replyFail: { reason: string; detail: string } | undefined;
-
-    // Jev letter gate (TypeSafe connection only): the letter must propose
-    // exactly one payment change before any OpenRouter extraction runs. A
-    // failing gate makes no model call beyond the gate itself.
-    let gate: JevGate | undefined;
-    if (typesafeConn !== undefined) {
-      const gateSource = carrySourceFor("client_letter_gate", clientGateDigest);
-      const carriedGate = gateSource?.receipt.clientReply?.gate;
-      if (carriedGate !== undefined) {
-        gate = carriedGate;
-        carriedForward.push("client_letter_gate");
-      } else {
-        const jev = new JevDecisionProvider({
-          gatewayBaseUrl: typesafeConn.gatewayBaseUrl,
-        });
-        const g = await jev.gateLetter(replyExcerpts);
-        reran.push("client_letter_gate");
-        if (g.status === "pass") {
-          gate = g.gate;
-        } else {
-          if (g.status !== "failed") gate = g.gate;
-          replyFail =
-            g.status === "not_single"
-              ? {
-                  reason: "counter_not_single_change",
-                  detail: `Jev decided the letter does not propose exactly one payment change (p = ${g.gate.noul.toFixed(2)})`,
-                }
-              : g.status === "uncertain"
-                ? {
-                    reason: "low_confidence",
-                    detail: `Jev could not decide whether the letter proposes exactly one payment change (p = ${g.gate.noul.toFixed(2)})`,
-                  }
-                : { reason: g.reason, detail: g.detail };
-        }
-      }
-    }
-
-    const counterSource =
-      replyFail === undefined
-        ? carrySourceFor("client_counter", clientCounterDigest)
-        : undefined;
-    const prevReply = counterSource?.receipt.clientReply;
-    const carryRead =
-      replyFail === undefined &&
-      counterSource !== undefined &&
-      prevReply?.counter !== undefined &&
-      prevReply.citation !== undefined;
-    if (carryRead && prevReply !== undefined && prevReply.counter !== undefined) {
-      const carried = prevReply.counter;
-      counterRecord = {
-        id: carried.id,
-        lever: carried.lever,
-        params: carried.params,
-        rationale: carried.rationale,
-        status: "tested",
-      };
-      citation = prevReply.citation;
-      carriedForward.push("client_counter");
-    } else if (replyFail === undefined) {
-      const extractor = new OpenRouterClientCounterExtractor({
-        gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
-        model,
-      });
-      const read = await extractor.extract({
-        id: "client_counter",
-        excerpts: replyExcerpts,
-      });
-      if (read.status === "needs_review") {
-        replyFail = { reason: read.reason, detail: read.detail };
-      } else {
-        citation = read.citation;
-        counterRecord = {
-          id: "client",
-          lever: read.candidate.lever,
-          params: {
-            amount_cents: read.candidate.amount_cents,
-            date: read.candidate.date,
-            split_count: read.candidate.split_count,
-            net_days: read.candidate.net_days,
-          },
-          rationale: read.candidate.rationale,
-          status: "tested",
-        };
-      }
-      reran.push("client_counter");
-    }
-
-    if (replyFail === undefined && counterRecord !== undefined) {
-      const resolved = resolvePool(connectors, model, config);
-      if (!resolved.ok) {
-        replyFail = {
-          reason: "workers_unavailable",
-          detail: resolved.receipt.detail ?? "no worker pool available",
-        };
-      } else {
-        const tested = await testClientCandidate({
-          base: prepared.base,
-          readings: prepared.searchReadings,
-          record: counterRecord,
-          pool: resolved.pool,
-        });
-        if (!tested.ok) {
-          replyFail = { reason: tested.reason, detail: tested.detail };
-        } else {
-          counterRecord = tested.record;
-          workers = tested.workers;
-        }
-      }
-    }
-
-    if (replyFail !== undefined) {
-      clientReply = {
-        status: "needs_review",
-        ...replyFileMeta,
-        reason: replyFail.reason,
-        detail: replyFail.detail,
-        ...(gate !== undefined ? { gate } : {}),
-        ...(citation !== undefined ? { citation } : {}),
-        ...(counterRecord !== undefined ? { counter: counterRecord } : {}),
-        ...(workers !== undefined ? { workers } : {}),
-      };
-      blockedReasons.push({ reason: replyFail.reason, detail: replyFail.detail });
-    } else if (counterRecord !== undefined && citation !== undefined) {
-      const counterFields = {
-        ...replyFileMeta,
-        citation,
-        counter: counterRecord,
-        ...(workers !== undefined ? { workers } : {}),
-        ...(gate !== undefined ? { gate } : {}),
-      };
-      if (counterRecord.passesAll === true) {
-        clientReply = { status: "safe", ...counterFields };
-      } else {
-        // The client's counter fails: find the smallest tested change that
-        // passes, seeded with the client's record and its failing brackets.
-        clientReplySearchDigest = clientReplyCallDigest({
-          base: prepared.base,
-          readings: prepared.searchReadings,
-          seed: counterRecord,
-          model,
-          systemPromptSuffix: CLIENT_REPLY_PROMPT_SUFFIX,
-        });
-        let response: CounterofferReceipt;
-        const replySource = carrySourceFor(
-          "client_reply_search",
-          clientReplySearchDigest,
-        );
-        const prevResponse = replySource?.receipt.clientReply?.response;
-        const canCarry =
-          replySource !== undefined &&
-          prevResponse !== undefined &&
-          (prevResponse.status === "found" || prevResponse.status === "not_found");
-        if (canCarry && prevResponse !== undefined && replySource !== undefined) {
-          const carried = await carrySearch(
-            { runId: replySource.runId, receipt: replySource.receipt },
-            prevResponse,
-            prepared,
-            connectors,
-            model,
-            config,
-          );
-          response = carried.receipt;
-          if (carried.carried) carriedForward.push("client_reply_search");
-          else reran.push("client_reply_search");
-        } else {
-          const resolved = resolvePool(connectors, model, config);
-          if (!resolved.ok) {
-            response = resolved.receipt;
-          } else {
-            response = await runCounterofferSearch({
-              base: prepared.base,
-              readings: prepared.searchReadings,
-              model,
-              chatConfig: chatConfig(
-                connectors.openrouterConn.gatewayBaseUrl,
-                searchTimeoutMs(),
-                undefined,
-                fetch,
-              ),
-              pool: resolved.pool,
-              ...(config.chat !== undefined ? { chat: config.chat } : {}),
-              conditionalReleases,
-              seedRecords: [counterRecord],
-              idPrefix: "reply-",
-              systemPromptSuffix: CLIENT_REPLY_PROMPT_SUFFIX,
-            });
-          }
-          reran.push("client_reply_search");
-        }
-        if (response.status === "found") {
-          clientReply = { status: "countered", ...counterFields, response };
-        } else if (response.status === "not_found") {
-          clientReply = { status: "no_fix", ...counterFields, response };
-          blockedReasons.push({
-            reason: "client_counter_no_fix",
-            detail:
-              "the client's proposed change fails and the follow-up search found no tested change that keeps cash at or above the floor",
-          });
-        } else {
-          const reason = response.reason ?? "client_reply_needs_review";
-          const detail =
-            response.detail ?? `client reply search stopped: ${response.stopReason}`;
-          clientReply = {
-            status: "needs_review",
-            ...counterFields,
-            reason,
-            detail,
-            response,
-          };
-          blockedReasons.push({ reason, detail });
-        }
-      }
-    }
-    timer.record("client_reply");
   }
-  timer.finish();
+}
 
+// Builds the stored receipt — every field below is receipt JSON, so field
+// order and presence must stay byte-stable.
+function assembleReceipt(args: {
+  config: PipelineConfig;
+  previous: PipelineConfig["previous"];
+  baselineOk: boolean;
+  sourceTuple: SourceTuple;
+  fetched: FetchedFile[];
+  cashFile: OptionalFetched | undefined;
+  replyFile: OptionalFetched | undefined;
+  sections: ContractSection[];
+  sectionDigests: Record<string, string>;
+  digests: {
+    decisionCallDigest: string;
+    scheduleCallDigest: string;
+    searchCallDigest: string;
+    clientGateDigest: string;
+    clientCounterDigest: string;
+    clientReplySearchDigest: string;
+  };
+  blockedReasons: { reason: string; detail: string }[];
+  reran: string[];
+  carriedForward: string[];
+  decision: DecisionOutcome;
+  question: Question;
+  effectiveAction: string | null;
+  overrides: SourcedOverride[];
+  schedule: ScheduleOutcome;
+  decisionExcerpts: Excerpt[];
+  humanReview: RunReceipt["humanReview"];
+  flags: ReturnType<typeof detectFlags>;
+  readings: RunReceipt["readings"];
+  assumptions: TwinveeAssumptions;
+  cashSource: NonNullable<RunReceipt["cashSource"]>;
+  expectedCheck: RunReceipt["expectedCheck"];
+  counteroffer: CounterofferReceipt | undefined;
+  clientReply: ClientReplyReceipt | undefined;
+}): RunReceipt {
+  const {
+    config,
+    previous,
+    baselineOk,
+    sourceTuple,
+    fetched,
+    cashFile,
+    replyFile,
+    sections,
+    sectionDigests,
+    digests,
+    blockedReasons,
+    reran,
+    carriedForward,
+    decision,
+    question,
+    effectiveAction,
+    overrides,
+    schedule,
+    decisionExcerpts,
+    humanReview,
+    flags,
+    readings,
+    assumptions,
+    cashSource,
+    expectedCheck,
+    counteroffer,
+    clientReply,
+  } = args;
+  const {
+    decisionCallDigest,
+    scheduleCallDigest,
+    searchCallDigest,
+    clientGateDigest,
+    clientCounterDigest,
+    clientReplySearchDigest,
+  } = digests;
   const incremental: IncrementalInfo | undefined =
     previous === undefined
       ? undefined
@@ -1395,6 +1466,448 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     ...(clientReply !== undefined ? { clientReply } : {}),
     ...(incremental !== undefined ? { incremental } : {}),
   };
+  return receipt;
+}
+
+// The client-reply stage: Jev letter gate (TypeSafe connection only) ->
+// verbatim counter read -> every-worker runner test -> seeded follow-up
+// search when the counter fails. Runs only after the main search and only
+// with no earlier blockers; mutates the pipeline's reran / carriedForward /
+// blockedReasons lists like the rest of the stages.
+async function runReplyStage(args: {
+  replyFile: OptionalFetched | undefined;
+  replyExcerpts: Excerpt[];
+  prepared: { base: SearchBase; searchReadings: SearchReading[] } | undefined;
+  schedule: ScheduleOutcome;
+  connectors: Connectors;
+  model: string;
+  config: PipelineConfig;
+  clientGateDigest: string;
+  clientCounterDigest: string;
+  carrySourceFor: CarrySourceLookup;
+  reran: string[];
+  carriedForward: string[];
+  blockedReasons: { reason: string; detail: string }[];
+  timer: StageTimer;
+}): Promise<{
+  clientReply: ClientReplyReceipt | undefined;
+  clientReplySearchDigest: string;
+}> {
+  const {
+    replyFile,
+    replyExcerpts,
+    prepared,
+    schedule,
+    connectors,
+    model,
+    config,
+    clientGateDigest,
+    clientCounterDigest,
+    carrySourceFor,
+    reran,
+    carriedForward,
+    blockedReasons,
+    timer,
+  } = args;
+  const { openrouterConn, typesafeConn } = connectors;
+  if (
+    replyFile === undefined ||
+    replyExcerpts.length === 0 ||
+    prepared === undefined ||
+    schedule.status !== "extracted" ||
+    blockedReasons.length !== 0
+  ) {
+    return { clientReply: undefined, clientReplySearchDigest: "none" };
+  }
+
+  timer.begin();
+  let clientReply: ClientReplyReceipt | undefined;
+  let clientReplySearchDigest = "none";
+
+  const replyFileMeta = {
+    fileName: replyFile.fileName,
+    versionTag: versionTag({
+      fileId: replyFile.fileId,
+      versionId: replyFile.versionId,
+    }),
+    sha12: sha12(replyFile.sha256),
+  };
+  const conditionalReleases = schedule.schedule.releases
+    .filter((r) => r.extensionId !== undefined)
+    .map((r) => ({
+      id: r.id,
+      amountCents: r.amountCents,
+      date: r.date,
+      extensionId: r.extensionId as string,
+    }));
+
+  // The typed read carries by call digest like the other typed calls; the
+  // deterministic worker test always re-runs (it covers base + readings,
+  // which the read digest does not).
+  let counterRecord: SearchCandidateRecord | undefined;
+  let citation: ClientCitation | undefined;
+  let workers: string[] | undefined;
+  let replyFail: { reason: string; detail: string } | undefined;
+
+  // Jev letter gate (TypeSafe connection only): the letter must propose
+  // exactly one payment change before any OpenRouter extraction runs. A
+  // failing gate makes no model call beyond the gate itself.
+  let gate: JevGate | undefined;
+  if (typesafeConn !== undefined) {
+    const gateSource = carrySourceFor("client_letter_gate", clientGateDigest);
+    const carriedGate = gateSource?.receipt.clientReply?.gate;
+    if (carriedGate !== undefined) {
+      gate = carriedGate;
+      carriedForward.push("client_letter_gate");
+    } else {
+      const jev = new JevDecisionProvider({
+        gatewayBaseUrl: typesafeConn.gatewayBaseUrl,
+      });
+      const g = await jev.gateLetter(replyExcerpts);
+      reran.push("client_letter_gate");
+      if (g.status === "pass") {
+        gate = g.gate;
+      } else {
+        if (g.status !== "failed") gate = g.gate;
+        replyFail =
+          g.status === "not_single"
+            ? {
+                reason: "counter_not_single_change",
+                detail: `Jev decided the letter does not propose exactly one payment change (p = ${g.gate.noul.toFixed(2)})`,
+              }
+            : g.status === "uncertain"
+              ? {
+                  reason: "low_confidence",
+                  detail: `Jev could not decide whether the letter proposes exactly one payment change (p = ${g.gate.noul.toFixed(2)})`,
+                }
+              : { reason: g.reason, detail: g.detail };
+      }
+    }
+  }
+
+  const counterSource =
+    replyFail === undefined
+      ? carrySourceFor("client_counter", clientCounterDigest)
+      : undefined;
+  const prevReply = counterSource?.receipt.clientReply;
+  const carryRead =
+    replyFail === undefined &&
+    counterSource !== undefined &&
+    prevReply?.counter !== undefined &&
+    prevReply.citation !== undefined;
+  if (carryRead && prevReply !== undefined && prevReply.counter !== undefined) {
+    const carried = prevReply.counter;
+    counterRecord = {
+      id: carried.id,
+      lever: carried.lever,
+      params: carried.params,
+      rationale: carried.rationale,
+      status: "tested",
+    };
+    citation = prevReply.citation;
+    carriedForward.push("client_counter");
+  } else if (replyFail === undefined) {
+    const extractor = new OpenRouterClientCounterExtractor({
+      gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
+      model,
+    });
+    const read = await extractor.extract({
+      id: "client_counter",
+      excerpts: replyExcerpts,
+    });
+    if (read.status === "needs_review") {
+      replyFail = { reason: read.reason, detail: read.detail };
+    } else {
+      citation = read.citation;
+      counterRecord = {
+        id: "client",
+        lever: read.candidate.lever,
+        params: {
+          amount_cents: read.candidate.amount_cents,
+          date: read.candidate.date,
+          split_count: read.candidate.split_count,
+          net_days: read.candidate.net_days,
+        },
+        rationale: read.candidate.rationale,
+        status: "tested",
+      };
+    }
+    reran.push("client_counter");
+  }
+
+  if (replyFail === undefined && counterRecord !== undefined) {
+    const resolved = resolvePool(connectors, model, config);
+    if (!resolved.ok) {
+      replyFail = {
+        reason: "workers_unavailable",
+        detail: resolved.receipt.detail ?? "no worker pool available",
+      };
+    } else {
+      const tested = await testClientCandidate({
+        base: prepared.base,
+        readings: prepared.searchReadings,
+        record: counterRecord,
+        pool: resolved.pool,
+      });
+      if (!tested.ok) {
+        replyFail = { reason: tested.reason, detail: tested.detail };
+      } else {
+        counterRecord = tested.record;
+        workers = tested.workers;
+      }
+    }
+  }
+
+  if (replyFail !== undefined) {
+    clientReply = {
+      status: "needs_review",
+      ...replyFileMeta,
+      reason: replyFail.reason,
+      detail: replyFail.detail,
+      ...(gate !== undefined ? { gate } : {}),
+      ...(citation !== undefined ? { citation } : {}),
+      ...(counterRecord !== undefined ? { counter: counterRecord } : {}),
+      ...(workers !== undefined ? { workers } : {}),
+    };
+    blockedReasons.push({ reason: replyFail.reason, detail: replyFail.detail });
+  } else if (counterRecord !== undefined && citation !== undefined) {
+    const counterFields = {
+      ...replyFileMeta,
+      citation,
+      counter: counterRecord,
+      ...(workers !== undefined ? { workers } : {}),
+      ...(gate !== undefined ? { gate } : {}),
+    };
+    if (counterRecord.passesAll === true) {
+      clientReply = { status: "safe", ...counterFields };
+    } else {
+      // The client's counter fails: find the smallest tested change that
+      // passes, seeded with the client's record and its failing brackets.
+      clientReplySearchDigest = clientReplyCallDigest({
+        base: prepared.base,
+        readings: prepared.searchReadings,
+        seed: counterRecord,
+        model,
+        systemPromptSuffix: CLIENT_REPLY_PROMPT_SUFFIX,
+      });
+      let response: CounterofferReceipt;
+      const replySource = carrySourceFor(
+        "client_reply_search",
+        clientReplySearchDigest,
+      );
+      const prevResponse = replySource?.receipt.clientReply?.response;
+      const canCarry =
+        replySource !== undefined &&
+        prevResponse !== undefined &&
+        (prevResponse.status === "found" || prevResponse.status === "not_found");
+      if (canCarry && prevResponse !== undefined && replySource !== undefined) {
+        const carried = await carrySearch(
+          { runId: replySource.runId, receipt: replySource.receipt },
+          prevResponse,
+          prepared,
+          connectors,
+          model,
+          config,
+        );
+        response = carried.receipt;
+        if (carried.carried) carriedForward.push("client_reply_search");
+        else reran.push("client_reply_search");
+      } else {
+        const resolved = resolvePool(connectors, model, config);
+        if (!resolved.ok) {
+          response = resolved.receipt;
+        } else {
+          response = await runCounterofferSearch({
+            base: prepared.base,
+            readings: prepared.searchReadings,
+            model,
+            chatConfig: chatConfig(
+              connectors.openrouterConn.gatewayBaseUrl,
+              searchTimeoutMs(),
+              undefined,
+              fetch,
+            ),
+            pool: resolved.pool,
+            ...(config.chat !== undefined ? { chat: config.chat } : {}),
+            conditionalReleases,
+            seedRecords: [counterRecord],
+            idPrefix: "reply-",
+            systemPromptSuffix: CLIENT_REPLY_PROMPT_SUFFIX,
+          });
+        }
+        reran.push("client_reply_search");
+      }
+      if (response.status === "found") {
+        clientReply = { status: "countered", ...counterFields, response };
+      } else if (response.status === "not_found") {
+        clientReply = { status: "no_fix", ...counterFields, response };
+        blockedReasons.push({
+          reason: "client_counter_no_fix",
+          detail:
+            "the client's proposed change fails and the follow-up search found no tested change that keeps cash at or above the floor",
+        });
+      } else {
+        const reason = response.reason ?? "client_reply_needs_review";
+        const detail =
+          response.detail ?? `client reply search stopped: ${response.stopReason}`;
+        clientReply = {
+          status: "needs_review",
+          ...counterFields,
+          reason,
+          detail,
+          response,
+        };
+        blockedReasons.push({ reason, detail });
+      }
+    }
+  }
+
+  timer.record("client_reply");
+  return { clientReply, clientReplySearchDigest };
+}
+
+// The evidence->decision->runner pipeline. The typed questions cover the
+// operative (second) amendment; the other files' sections feed flags and
+// human-review citation verification.
+export async function runPipeline(config: PipelineConfig): Promise<PipelineResult> {
+  const timer = new StageTimer();
+  const blockedReasons: { reason: string; detail: string }[] = [];
+
+  // --- Connectors -------------------------------------------------------------
+  const {
+    connectors,
+    sourceTuple,
+    fetched,
+    cashFile,
+    replyFile,
+    sections,
+    excerpts,
+  } = await collectSources(config, timer);
+  const { openrouterConn, typesafeConn } = connectors;
+  const { sectionDigests, replyExcerpts } = await buildEvidenceContext(
+    sections,
+    replyFile,
+    config.pdfText ?? extractPdfLines,
+    timer,
+  );
+  const {
+    model,
+    decisionExcerpts,
+    question,
+    decisionCallDigest,
+    scheduleCallDigest,
+    clientCounterDigest,
+    clientGateDigest,
+  } = prepareDecisionInputs(excerpts, replyExcerpts, typesafeConn, config);
+  const { previous, carrySourceFor, baselineOk } = buildCarryContext(config);
+  const reran: string[] = [];
+  const carriedForward: string[] = [];
+
+  const { decision, schedule } = await runTypedCalls({
+    decisionCallDigest,
+    scheduleCallDigest,
+    question,
+    decisionExcerpts,
+    openrouterConn,
+    typesafeConn,
+    model,
+    carrySourceFor,
+    reran,
+    carriedForward,
+    timer,
+  });
+
+  const {
+    flags,
+    humanReview,
+    overrides,
+    effectiveAction,
+    assumptions,
+    cashSource,
+    expectedCheck,
+    readings,
+    prepared,
+    searchCallDigest,
+  } = await runRunnerStage({
+    sections,
+    decision,
+    schedule,
+    cashFile,
+    model,
+    config,
+    blockedReasons,
+    timer,
+  });
+  const counteroffer = await runCounterofferStage({
+    prepared,
+    schedule,
+    searchCallDigest,
+    connectors,
+    model,
+    config,
+    carrySourceFor,
+    reran,
+    carriedForward,
+    blockedReasons,
+    timer,
+  });
+  const replyStage = await runReplyStage({
+    replyFile,
+    replyExcerpts,
+    prepared,
+    schedule,
+    connectors,
+    model,
+    config,
+    clientGateDigest,
+    clientCounterDigest,
+    carrySourceFor,
+    reran,
+    carriedForward,
+    blockedReasons,
+    timer,
+  });
+  const clientReply = replyStage.clientReply;
+  const clientReplySearchDigest = replyStage.clientReplySearchDigest;
+  timer.finish();
+
+  const receipt = assembleReceipt({
+    config,
+    previous,
+    baselineOk,
+    sourceTuple,
+    fetched,
+    cashFile,
+    replyFile,
+    sections,
+    sectionDigests,
+    digests: {
+      decisionCallDigest,
+      scheduleCallDigest,
+      searchCallDigest,
+      clientGateDigest,
+      clientCounterDigest,
+      clientReplySearchDigest,
+    },
+    blockedReasons,
+    reran,
+    carriedForward,
+    decision,
+    question,
+    effectiveAction,
+    overrides,
+    schedule,
+    decisionExcerpts,
+    humanReview,
+    flags,
+    readings,
+    assumptions,
+    cashSource,
+    expectedCheck,
+    counteroffer,
+    clientReply,
+  });
+
 
   return { receipt, sourceTuple, sections, timingsMs: timer.timings };
 }
