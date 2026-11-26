@@ -5,10 +5,11 @@ import type { CashAssumptionsBase } from "./cash-file.ts";
 
 export type TermsAssumptions = CashAssumptionsBase;
 
-export type TermsReadingId = "partial_months_billed" | "partial_months_not_billed";
+export type TermsReadingId = "partial_months_prorated" | "partial_months_not_billed";
 
 export const TERMS_READING_LABELS: Record<TermsReadingId, string> = {
-  partial_months_billed: "Partial months billed",
+  partial_months_prorated:
+    "Partial months billed pro rata by calendar day (whole dollars) — owner's reading; the agreement does not say.",
   partial_months_not_billed: "Partial months not billed",
 };
 
@@ -29,7 +30,7 @@ function lastDayOfMonth(ym: string): string {
   return dateString(dayNumber(nextMonth(ym) + "-01") - 1);
 }
 
-// The calendar months a reading invoices in: billed takes every month that
+// The calendar months a reading invoices in: prorated takes every month that
 // overlaps the term; not_billed keeps only months wholly inside it.
 export function invoiceMonths(
   reading: TermsReadingId,
@@ -74,6 +75,21 @@ function invoiceDate(ym: string, rule: { day: number | "month_end" }): string {
   return `${ym}-${String(day).padStart(2, "0")}`;
 }
 
+// Days of the term inside a calendar month (the month is known to overlap).
+function termDaysInMonth(ym: string, termStartIso: string, termEndIso: string): number {
+  const first = `${ym}-01`;
+  const last = lastDayOfMonth(ym);
+  const lo = first > termStartIso ? first : termStartIso;
+  const hi = last < termEndIso ? last : termEndIso;
+  return dayNumber(hi) - dayNumber(lo) + 1;
+}
+
+// fee × days-in-term ÷ days-in-month, rounded to the nearest whole dollar
+// (half up), all in integer cents.
+export function proratedCents(amountCents: number, days: number, monthDays: number): number {
+  return Math.floor((amountCents * days * 2 + monthDays * 100) / (monthDays * 200)) * 100;
+}
+
 // Builds the as-signed payment rules for one reading. Recurring fees expand
 // into invoices on the reading's months; payment_terms turns each invoice into
 // an on_acceptance rule, otherwise it is paid on the invoice date itself.
@@ -97,7 +113,15 @@ export function buildTermPaymentRules(
     }
     for (const ym of invoiceMonths(reading, terms.termStart.iso, terms.termEnd.iso)) {
       const date = invoiceDate(ym, day);
-      const base = { id: `invoice-${ym}`, amountCents: feeCents };
+      const amountCents =
+        reading === "partial_months_prorated"
+          ? proratedCents(
+              feeCents,
+              termDaysInMonth(ym, terms.termStart.iso, terms.termEnd.iso),
+              Number(lastDayOfMonth(ym).slice(8)),
+            )
+          : feeCents;
+      const base = { id: `invoice-${ym}`, amountCents };
       rules.push(
         netDays === undefined
           ? { ...base, kind: "on_date", date }
@@ -109,7 +133,7 @@ export function buildTermPaymentRules(
               netDays,
             },
       );
-      totalCents += feeCents;
+      totalCents += amountCents;
     }
   }
 
@@ -154,7 +178,7 @@ export function buildTermPaymentRules(
 // opening date must fall on or before it.
 export function firstPaymentDate(terms: ValidatedPaymentTerms): string | undefined {
   let earliest: number | undefined;
-  for (const reading of ["partial_months_billed", "partial_months_not_billed"] as const) {
+  for (const reading of ["partial_months_prorated", "partial_months_not_billed"] as const) {
     const built = buildTermPaymentRules(terms, reading);
     if (!built.ok) continue;
     for (const rule of built.rules) {
@@ -196,7 +220,7 @@ function termsRunnerInput(args: {
 }
 
 const READING_DESCRIPTIONS: Record<TermsReadingId, string> = {
-  partial_months_billed:
+  partial_months_prorated:
     "an invoice on the last day of every calendar month that overlaps the term",
   partial_months_not_billed:
     "invoices only for calendar months wholly inside the term",
@@ -210,7 +234,7 @@ export function buildTermsReadings(args: {
   labelPrefix: string;
 }): { ok: true; inputs: Record<TermsReadingId, Record<string, unknown>> } | { ok: false; error: TermsBuildError } {
   const inputs: Partial<Record<TermsReadingId, Record<string, unknown>>> = {};
-  for (const reading of ["partial_months_billed", "partial_months_not_billed"] as const) {
+  for (const reading of ["partial_months_prorated", "partial_months_not_billed"] as const) {
     const built = buildTermPaymentRules(args.terms, reading);
     if (!built.ok) return built;
     inputs[reading] = termsRunnerInput({

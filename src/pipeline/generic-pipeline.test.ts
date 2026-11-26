@@ -276,7 +276,7 @@ describe("runGenericPipeline", () => {
 
     // Both readings ran and agreed with the coordinator's digests.
     expect(receipt.readings.map((r) => r.id)).toEqual([
-      "partial_months_billed",
+      "partial_months_prorated",
       "partial_months_not_billed",
     ]);
     expect(receipt.readings[0]?.inputDigest).toMatch(/^[0-9a-f]{64}$/);

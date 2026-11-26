@@ -9,6 +9,8 @@ import {
   buildTermsReadings,
   firstPaymentDate,
   invoiceMonths,
+  proratedCents,
+  TERMS_READING_LABELS,
 } from "./terms.ts";
 import type { TermsAssumptions } from "./terms.ts";
 
@@ -84,9 +86,39 @@ function aviatTerms(): ValidatedPaymentTerms {
   };
 }
 
+describe("proratedCents", () => {
+  it("prorates the partial first and last months to whole dollars", () => {
+    expect(proratedCents(500000, 3, 31)).toBe(48400); // May 2024: 3/31 → $484
+    expect(proratedCents(500000, 29, 30)).toBe(483300); // Sep 2024: 29/30 → $4,833
+  });
+
+  it("leaves a full month unprorated", () => {
+    expect(proratedCents(500000, 30, 30)).toBe(500000);
+    expect(proratedCents(500000, 31, 31)).toBe(500000);
+  });
+
+  it("rounds to the nearest dollar, half up", () => {
+    // $15.50 × 1/31 = $0.50 exactly → half up → $1.
+    expect(proratedCents(1550, 1, 31)).toBe(100);
+    // $15.20 × 1/31 = $0.49 → down → $0.
+    expect(proratedCents(1520, 1, 31)).toBe(0);
+    // $50,005 × 15/31 = $24,195.97 → $24,196.
+    expect(proratedCents(5000500, 15, 31)).toBe(2419600);
+  });
+});
+
+describe("reading labels", () => {
+  it("shows the owner's pro-rata label on the page", () => {
+    expect(TERMS_READING_LABELS.partial_months_prorated).toBe(
+      "Partial months billed pro rata by calendar day (whole dollars) — owner's reading; the agreement does not say.",
+    );
+    expect(TERMS_READING_LABELS.partial_months_not_billed).toBe("Partial months not billed");
+  });
+});
+
 describe("invoiceMonths", () => {
   it("billed covers every month overlapping the term", () => {
-    expect(invoiceMonths("partial_months_billed", "2024-05-29", "2024-09-29")).toEqual([
+    expect(invoiceMonths("partial_months_prorated", "2024-05-29", "2024-09-29")).toEqual([
       "2024-05",
       "2024-06",
       "2024-07",
@@ -106,17 +138,19 @@ describe("invoiceMonths", () => {
 
 describe("buildTermPaymentRules", () => {
   it("expands the recurring fee into month-end invoices with net-30 terms", () => {
-    const built = buildTermPaymentRules(aviatTerms(), "partial_months_billed");
+    const built = buildTermPaymentRules(aviatTerms(), "partial_months_prorated");
     expect(built.ok).toBe(true);
     if (!built.ok) return;
     expect(built.rules).toEqual([
-      { id: "invoice-2024-05", kind: "on_acceptance", amountCents: 500000, deliveryDate: "2024-05-31", acceptanceWindowDays: 0, netDays: 30 },
+      // May 29–31 is 3 of 31 days: 500000*3/31 = 48387.09…¢ → $484.
+      { id: "invoice-2024-05", kind: "on_acceptance", amountCents: 48400, deliveryDate: "2024-05-31", acceptanceWindowDays: 0, netDays: 30 },
       { id: "invoice-2024-06", kind: "on_acceptance", amountCents: 500000, deliveryDate: "2024-06-30", acceptanceWindowDays: 0, netDays: 30 },
       { id: "invoice-2024-07", kind: "on_acceptance", amountCents: 500000, deliveryDate: "2024-07-31", acceptanceWindowDays: 0, netDays: 30 },
       { id: "invoice-2024-08", kind: "on_acceptance", amountCents: 500000, deliveryDate: "2024-08-31", acceptanceWindowDays: 0, netDays: 30 },
-      { id: "invoice-2024-09", kind: "on_acceptance", amountCents: 500000, deliveryDate: "2024-09-30", acceptanceWindowDays: 0, netDays: 30 },
+      // Sep 1–29 is 29 of 30 days: 500000*29/30 = 483333.33…¢ → $4,833.
+      { id: "invoice-2024-09", kind: "on_acceptance", amountCents: 483300, deliveryDate: "2024-09-30", acceptanceWindowDays: 0, netDays: 30 },
     ]);
-    expect(built.totalCents).toBe(2500000);
+    expect(built.totalCents).toBe(2031700);
   });
 
   it("drops partial months in the not_billed reading", () => {
@@ -168,7 +202,7 @@ describe("buildTermPaymentRules", () => {
       termEnd: null,
       confidence: 0.9,
     };
-    const built = buildTermPaymentRules(terms, "partial_months_billed");
+    const built = buildTermPaymentRules(terms, "partial_months_prorated");
     expect(built.ok).toBe(true);
     if (!built.ok) return;
     expect(built.rules).toEqual([
@@ -182,13 +216,13 @@ describe("buildTermPaymentRules", () => {
   it("fails when a monthly fee has no invoice day rule or no terms build", () => {
     const noDay = aviatTerms();
     noDay.terms = noDay.terms.filter((t) => t.id !== "term-2");
-    expect(buildTermPaymentRules(noDay, "partial_months_billed")).toMatchObject({
+    expect(buildTermPaymentRules(noDay, "partial_months_prorated")).toMatchObject({
       ok: false,
       error: { reason: "unbuildable_terms" },
     });
     const none = aviatTerms();
     none.terms = [none.terms[2]!];
-    expect(buildTermPaymentRules(none, "partial_months_billed")).toMatchObject({
+    expect(buildTermPaymentRules(none, "partial_months_prorated")).toMatchObject({
       ok: false,
       error: { reason: "unbuildable_terms" },
     });
@@ -204,7 +238,7 @@ describe("buildTermsReadings", () => {
     });
     expect(built.ok).toBe(true);
     if (!built.ok) return;
-    for (const reading of ["partial_months_billed", "partial_months_not_billed"] as const) {
+    for (const reading of ["partial_months_prorated", "partial_months_not_billed"] as const) {
       const input = validateRunInput(built.inputs[reading]);
       expect(input.candidates).toHaveLength(1);
       expect(input.scenarios.map((s) => s.id)).toEqual(["on_time", "paid_15_days_late"]);
@@ -220,7 +254,7 @@ describe("buildTermsReadings", () => {
     });
     expect(built.ok).toBe(true);
     if (!built.ok) return;
-    const input = validateRunInput(built.inputs.partial_months_billed);
+    const input = validateRunInput(built.inputs.partial_months_prorated);
     const rule = input.candidates[0]?.paymentRules[0];
     expect(rule?.kind).toBe("on_acceptance");
     if (rule?.kind !== "on_acceptance") return;
@@ -237,7 +271,7 @@ describe("runFixture on the built readings", () => {
     });
     expect(built.ok).toBe(true);
     if (!built.ok) return;
-    const out = runFixture(built.inputs.partial_months_billed);
+    const out = runFixture(built.inputs.partial_months_prorated);
     const ledger = out.results.as_signed?.on_time?.ledger ?? [];
     const pays = ledger.filter((e) => e.kind === "payment").map((e) => `${e.id}@${e.date}`);
     expect(pays).toEqual([

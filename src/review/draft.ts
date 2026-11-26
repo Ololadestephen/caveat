@@ -335,7 +335,7 @@ export function renderTermsDraft(receipt: RunReceipt): string {
       ? receipt.paymentTerms.outcome.terms
       : undefined;
   if (terms !== undefined && terms.termStart !== null && terms.termEnd !== null) {
-    const billed = receipt.readings.find((r) => r.id === "partial_months_billed");
+    const billed = receipt.readings.find((r) => r.id === "partial_months_prorated");
     const notBilled = receipt.readings.find(
       (r) => r.id === "partial_months_not_billed",
     );
@@ -360,7 +360,7 @@ export function renderTermsDraft(receipt: RunReceipt): string {
             ).filter((e) => e.kind === "payment").length,
           );
     lines.push(
-      `${next()}. The agreement does not say whether partial months are billed. One reading invoices ${feeText} on the last day of every calendar month that overlaps the term (${terms.termStart.text} – ${terms.termEnd.text}); the other invoices only for calendar months wholly inside it. Caveat ran both readings — ${TERMS_READING_LABELS.partial_months_billed} produces ${billedCount} invoices, ${TERMS_READING_LABELS.partial_months_not_billed} ${notBilledCount}.`,
+      `${next()}. The agreement does not say whether partial months are billed. One reading bills ${feeText} pro rata by calendar day on the last day of every calendar month that overlaps the term (${terms.termStart.text} – ${terms.termEnd.text}); the other invoices only for calendar months wholly inside it. Caveat ran both readings — ${TERMS_READING_LABELS.partial_months_prorated} produces ${billedCount} invoices, ${TERMS_READING_LABELS.partial_months_not_billed} ${notBilledCount}.`,
     );
     lines.push("   Ask: which reading the parties intend, and whether May and September invoice in full.");
   }
