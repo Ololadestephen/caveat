@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runPipeline } from "./run-pipeline.ts";
 import { InProcessPool } from "../worker/pool.ts";
+import type { WorkerJob, WorkerJobResult } from "../worker/pool.ts";
 
 const config = {
   runId: "run-test",
@@ -196,6 +197,9 @@ function stubFetch(
     chatCounts?: Record<string, number>;
     file2Lines?: string[];
     cashBytes?: Uint8Array | undefined;
+    replyKind?: "pass" | "fail" | "unreadable";
+    counterJson?: unknown;
+    proposalJson?: unknown;
   } = {},
 ): void {
   const impl = (url: unknown, init?: unknown): Promise<Response> => {
@@ -215,7 +219,15 @@ function stubFetch(
         return Promise.resolve(chatResponse(DECISION_JSON));
       }
       if (schema === "counteroffer_proposal") {
-        return Promise.resolve(chatResponse(PROPOSAL_JSON));
+        return Promise.resolve(
+          chatResponse(opts.proposalJson !== undefined ? opts.proposalJson : PROPOSAL_JSON),
+        );
+      }
+      if (schema === "client_counter") {
+        if (opts.counterJson !== undefined) {
+          return Promise.resolve(chatResponse(opts.counterJson));
+        }
+        return Promise.resolve(chatResponse(CLIENT_COUNTER_JSON[opts.replyKind ?? "pass"]));
       }
       return Promise.resolve(chatResponse(SCHEDULE_JSON));
     }
@@ -232,6 +244,9 @@ function stubFetch(
             ...(opts.cashBytes !== undefined
               ? [{ id: "file-cash", type: "file", name: "my-cash.csv" }]
               : []),
+            ...(opts.replyKind !== undefined
+              ? [{ id: "file-reply", type: "file", name: "04-client-reply.pdf" }]
+              : []),
           ],
         }),
       );
@@ -245,6 +260,24 @@ function stubFetch(
         jsonResponse({
           id: "file-cash",
           name: "my-cash.csv",
+          size: bytes.byteLength,
+          sha1: createHash("sha1").update(bytes).digest("hex"),
+          file_version: { id: opts.versionId ?? "v1" },
+          modified_at: "2026-01-01T00:00:00Z",
+        }),
+      );
+    }
+    if (opts.replyKind !== undefined && u.startsWith(`${BOX}/2.0/files/file-reply/content`)) {
+      return Promise.resolve(
+        new Response(replyBytes(opts.replyKind), { status: 200 }),
+      );
+    }
+    if (opts.replyKind !== undefined && u.startsWith(`${BOX}/2.0/files/file-reply?`)) {
+      const bytes = replyBytes(opts.replyKind);
+      return Promise.resolve(
+        jsonResponse({
+          id: "file-reply",
+          name: "04-client-reply.pdf",
           size: bytes.byteLength,
           sha1: createHash("sha1").update(bytes).digest("hex"),
           file_version: { id: opts.versionId ?? "v1" },
@@ -301,10 +334,73 @@ const FILE2_LINES_CHANGED = [
   "consultant on January 2, 2027.",
 ];
 
+function replyBytes(kind: "pass" | "fail" | "unreadable"): Uint8Array {
+  return new TextEncoder().encode(`pdf-bytes-reply-${kind}`);
+}
+
+const REPLY_LINES_PASS = [
+  "SYNTHETIC CLIENT REPLY - TEST FIXTURE",
+  "1. Response",
+  "Thank you for the proposed change to the escrow schedule in the Second Amendment.",
+  "2. Counterproposal",
+  "We propose that $36,000 of the escrow funding be paid to you as an upfront",
+  "deposit on October 1, 2026, with the January 2, 2027 release reduced by the",
+  "same amount.",
+  "3. Other Terms",
+  "All other terms of the Second Amendment remain unchanged.",
+];
+
+const REPLY_LINES_FAIL = REPLY_LINES_PASS.map((l) => l.replace("$36,000", "$500"));
+
+const CLIENT_COUNTER_JSON: Record<"pass" | "fail" | "unreadable", unknown> = {
+  pass: {
+    readable: true,
+    lever: "upfront_deposit",
+    amount_text: "$36,000",
+    date_text: "October 1, 2026",
+    split_count_text: null,
+    net_days_text: null,
+    excerpt_id: "04-client-reply.pdf#§2",
+    quote:
+      "We propose that $36,000 of the escrow funding be paid to you as an upfront deposit on October 1, 2026, with the January 2, 2027 release reduced by the same amount.",
+    unclear_note: null,
+    confidence: 0.95,
+  },
+  fail: {
+    readable: true,
+    lever: "upfront_deposit",
+    amount_text: "$500",
+    date_text: "October 1, 2026",
+    split_count_text: null,
+    net_days_text: null,
+    excerpt_id: "04-client-reply.pdf#§2",
+    quote:
+      "We propose that $500 of the escrow funding be paid to you as an upfront deposit on October 1, 2026, with the January 2, 2027 release reduced by the same amount.",
+    unclear_note: null,
+    confidence: 0.95,
+  },
+  unreadable: {
+    readable: false,
+    lever: null,
+    amount_text: null,
+    date_text: null,
+    split_count_text: null,
+    net_days_text: null,
+    excerpt_id: null,
+    quote: null,
+    unclear_note: "the letter proposes two different changes",
+    confidence: 0.9,
+  },
+};
+
 // The pdfText seam: canned page lines per byte payload.
 function cannedPdfLines(bytes: Uint8Array) {
   const text = new TextDecoder().decode(bytes);
-  const lines = text.includes("file-2")
+  const lines = text.includes("reply-pass")
+    ? REPLY_LINES_PASS
+    : text.includes("reply-fail") || text.includes("reply-unreadable")
+      ? REPLY_LINES_FAIL
+      : text.includes("file-2")
     ? text.includes(FILE2_CHANGED_MARKER)
       ? FILE2_LINES_CHANGED
       : FILE2_LINES
@@ -746,5 +842,174 @@ describe("owner cash file", () => {
     expect(receipt.readings).toEqual([]);
     expect(receipt.expectedCheck).toBeUndefined();
     expect(receipt.counteroffer).toBeUndefined();
+  });
+});
+
+describe("client reply", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const runOpts = (extra: Record<string, unknown> = {}) => ({
+    ...config,
+    reviewsDir: writeReviewsDir(),
+    connections: CONNECTIONS,
+    pdfText: cannedPdfLines,
+    assertExpected: false,
+    ...extra,
+  });
+  const POOL = () => new InProcessPool(["wa-test", "wb-test"]);
+
+  it("safe: a passing counter is tested on every worker", async () => {
+    stubFetch({ replyKind: "pass" });
+    const pool = POOL();
+    const result = await runPipeline(runOpts({ workerPool: pool }));
+    const r = result.receipt;
+    expect(r.status).toBe("reviewable");
+
+    const reply = r.clientReply;
+    expect(reply?.status).toBe("safe");
+    expect(reply?.fileName).toBe("04-client-reply.pdf");
+    expect(reply?.citation?.quote).toContain("$36,000");
+    expect(reply?.counter?.id).toBe("client");
+    expect(reply?.counter?.lever).toBe("upfront_deposit");
+    expect(reply?.counter?.passesAll).toBe(true);
+    expect([...(reply?.workers ?? [])].sort()).toEqual(["wa-test", "wb-test"]);
+    expect(reply?.counter?.workers?.sort()).toEqual(["wa-test", "wb-test"]);
+    expect(reply?.response).toBeUndefined();
+
+    // The reply is a source and its sections are digested, but its sections
+    // stay out of the contract's section list.
+    expect(r.sources.map((s) => s.fileName)).toContain("04-client-reply.pdf");
+    expect(r.sources.find((s) => s.fileName === "04-client-reply.pdf")?.edgarUrl).toBeNull();
+    expect(r.typedCallDigests?.client_counter).toBeTruthy();
+    expect(r.sectionDigests?.["04-client-reply.pdf#§2"]).toBeTruthy();
+    expect(result.sections.every((s) => s.fileName !== "04-client-reply.pdf")).toBe(true);
+    expect(result.sourceTuple).toHaveLength(4);
+  });
+
+  it("countered: a failing counter seeds a follow-up search it can bound but never win", async () => {
+    stubFetch({ replyKind: "fail" });
+    const pool = POOL();
+    const r = (await runPipeline(runOpts({ workerPool: pool }))).receipt;
+    expect(r.status).toBe("reviewable");
+
+    const reply = r.clientReply;
+    expect(reply?.status).toBe("countered");
+    expect(reply?.counter?.passesAll).toBe(false);
+    const response = reply?.response;
+    expect(response?.status).toBe("found");
+    expect(response?.best).toBe("reply-r1c1");
+    // The seed joined the brackets and can bound the best — it is never a
+    // round candidate and so can never be chosen as best.
+    expect(response?.bound?.candidate).toBe("client");
+    for (const round of response?.rounds ?? []) {
+      for (const c of round.candidates) {
+        expect(c.id).toMatch(/^reply-/);
+      }
+    }
+    expect(r.typedCallDigests?.client_reply_search).toBeTruthy();
+  });
+
+  it("no_fix: no passing follow-up adds the client_counter_no_fix block", async () => {
+    stubFetch({
+      replyKind: "fail",
+      proposalJson: { round_note: "nothing helps", done: true, candidates: [] },
+    });
+    const r = (await runPipeline(runOpts({ workerPool: POOL() }))).receipt;
+    const reply = r.clientReply;
+    expect(reply?.status).toBe("no_fix");
+    expect(reply?.response?.status).toBe("not_found");
+    expect(r.status).toBe("needs_review");
+    expect(r.blockedReasons.map((b) => b.reason)).toContain("client_counter_no_fix");
+  });
+
+  it("needs_review: an unreadable letter routes to human review", async () => {
+    stubFetch({ replyKind: "unreadable" });
+    const r = (await runPipeline(runOpts({ workerPool: POOL() }))).receipt;
+    const reply = r.clientReply;
+    expect(reply?.status).toBe("needs_review");
+    expect(reply?.reason).toBe("counter_unreadable");
+    expect(reply?.detail).toContain("two different changes");
+    expect(reply?.counter).toBeUndefined();
+    expect(r.status).toBe("needs_review");
+    expect(r.blockedReasons.map((b) => b.reason)).toContain("counter_unreadable");
+  });
+
+  it("needs_review on a single-worker pool", async () => {
+    stubFetch({ replyKind: "pass" });
+    const r = (
+      await runPipeline(runOpts({ workerPool: new InProcessPool(["wa-test"]) }))
+    ).receipt;
+    const reply = r.clientReply;
+    expect(reply?.status).toBe("needs_review");
+    expect(reply?.reason).toBe("workers_unavailable");
+    expect(r.status).toBe("needs_review");
+  });
+
+  it("needs_review on worker disagreement", async () => {
+    stubFetch({ replyKind: "pass" });
+    class DisagreeingPool extends InProcessPool {
+      async runBatch(
+        worker: string,
+        jobs: WorkerJob[],
+      ): Promise<WorkerJobResult[]> {
+        const results = await super.runBatch(worker, jobs);
+        if (worker === "wb-test") {
+          for (const r of results) {
+            if (r.jobId.startsWith("client@") && r.ok) {
+              (r.output as { resultDigest: string }).resultDigest = "tampered";
+            }
+          }
+        }
+        return results;
+      }
+    }
+    const r = (
+      await runPipeline(runOpts({ workerPool: new DisagreeingPool(["wa-test", "wb-test"]) }))
+    ).receipt;
+    const reply = r.clientReply;
+    expect(reply?.status).toBe("needs_review");
+    expect(reply?.reason).toBe("worker_disagreement");
+    expect(r.status).toBe("needs_review");
+  });
+
+  it("carries the reply read by call digest when nothing relevant changed", async () => {
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ replyKind: "pass", chatCounts });
+    const first = await runPipeline(
+      runOpts({ runId: "run-1", workerPool: POOL() }),
+    );
+    expect(first.receipt.clientReply?.status).toBe("safe");
+    expect(chatCounts["client_counter"]).toBe(1);
+
+    stubFetch({ replyKind: "pass", versionId: "v2", chatCounts });
+    const second = await runPipeline(
+      runOpts({
+        runId: "run-2",
+        trigger: "watcher",
+        workerPool: POOL(),
+        previous: {
+          runId: "run-1",
+          receipt: first.receipt,
+          sourceTuple: first.sourceTuple,
+        },
+      }),
+    );
+    const r = second.receipt;
+    // Same letter bytes: the read was carried, no second model call.
+    expect(chatCounts["client_counter"]).toBe(1);
+    expect(r.incremental?.carriedForward).toContain("client_counter");
+    expect(r.clientReply?.status).toBe("safe");
+    expect(r.clientReply?.counter?.passesAll).toBe(true);
+  });
+
+  it("a run without a reply stays byte-identical", async () => {
+    stubFetch();
+    const r = (await runPipeline(runOpts({ workerPool: POOL() }))).receipt;
+    expect(r.clientReply).toBeUndefined();
+    expect(Object.keys(r.typedCallDigests ?? {})).toEqual([
+      "release_timing",
+      "escrow_schedule",
+      "counteroffer_search",
+    ]);
   });
 });

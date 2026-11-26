@@ -7,6 +7,7 @@ import type {
   ReceiptReading,
   RunReceipt,
 } from "./receipt.ts";
+import type { CounterofferReceipt } from "../search/loop.ts";
 
 const MONTH_NAMES = [
   "January",
@@ -492,6 +493,18 @@ Passes all ${scenarioCount(best)} tested scenario checks${lowestPart}; change si
   }
 
   // --- Per-round tables ----------------------------------------------------------
+  const roundsHtml = renderSearchRounds(search);
+
+  return `<section class="counteroffer">
+  <h2>Counteroffer search</h2>
+${outcome}
+${roundsHtml}
+</section>`;
+}
+
+// The round tables plus the rejected-candidate review table; shared by the
+// main counteroffer search and the client-reply follow-up search.
+function renderSearchRounds(search: CounterofferReceipt): string {
   const rejected: { id: string; lever: string; rejection: { by: string; code: string; field?: string; detail: string } }[] = [];
   const roundsHtml = search.rounds
     .map((round) => {
@@ -559,12 +572,112 @@ ${workerCaption}`;
     <tr><th>Candidate</th><th>Lever</th><th>Rejected by</th><th>Code</th><th>Field</th><th>Detail</th></tr>
 ${reviewRows}
   </table>`;
+  return `${roundsHtml}
+${reviewHtml}`;
+}
 
-  return `<section class="counteroffer">
-  <h2>Counteroffer search</h2>
-${outcome}
-${roundsHtml}
-${reviewHtml}
+// The client's reply letter: what it proposed, how that tested on every
+// worker, and the follow-up search when it failed.
+function renderClientReply(receipt: RunReceipt): string {
+  const reply = receipt.clientReply;
+  if (reply === undefined) return "";
+
+  const head = `  <p class="caption">Client reply letter <code>${escapeHtml(reply.fileName)}</code> (version ${escapeHtml(reply.versionTag)}).</p>`;
+  const quoteHtml =
+    reply.citation === undefined
+      ? ""
+      : `  <h3>The client's words</h3>
+  <blockquote>&ldquo;${escapeHtml(reply.citation.quote)}&rdquo;<br><span class="caption">${escapeHtml(reply.citation.excerptId)}${reply.citation.page !== undefined ? `, page ${reply.citation.page}` : ""}</span></blockquote>`;
+  const counter = reply.counter;
+  const termHtml =
+    counter === undefined
+      ? ""
+      : `  <p>The client proposes: <strong>${escapeHtml(counter.summary ?? `${counter.lever} ${JSON.stringify(counter.params)}`)}</strong></p>`;
+  const testedCaption =
+    reply.workers === undefined || reply.workers.length === 0
+      ? ""
+      : `  <p class="caption">Tested on ${reply.workers.map(escapeHtml).join(", ")}</p>`;
+  const resultsHtml =
+    counter === undefined || counter.perScenario === undefined
+      ? ""
+      : `  <table>
+    <tr><th>Reading / scenario</th><th>Result</th></tr>
+    <tr><td colspan="2">${candidateResultCells(counter)}</td></tr>
+  </table>
+${testedCaption}`;
+
+  const failingLowest = Object.entries(counter?.perScenario ?? {})
+    .flatMap(([readingId, scenarios]) =>
+      Object.entries(scenarios)
+        .filter(([, r]) => !r.passes)
+        .map(([scenarioId, r]) => ({ where: `${readingId}/${scenarioId}`, lowest: r.lowest })),
+    )
+    .reduce(
+      (acc, r) =>
+        acc === null || r.lowest.balanceCents < acc.lowest.balanceCents ? r : acc,
+      null as { where: string; lowest: { date: string; balanceCents: number } } | null,
+    );
+
+  let verdict: string;
+  if (reply.status === "safe") {
+    verdict = `  <div class="banner banner--ok"><strong>Safe:</strong> the client's counter keeps cash at or above the floor in every scenario.</div>`;
+  } else if (reply.status === "needs_review") {
+    verdict = `  <div class="banner banner--blocked"><strong>Client reply needs human review.</strong> ${escapeHtml(reply.reason ?? "")}${reply.detail !== undefined ? ` — ${escapeHtml(reply.detail)}` : ""}</div>`;
+  } else {
+    const notSafe =
+      failingLowest === null
+        ? "<strong>Not safe:</strong> the client's counter fails at least one scenario check."
+        : `<strong>Not safe:</strong> the client's counter leaves a lowest balance of ${formatCents(failingLowest.lowest.balanceCents)} on ${escapeHtml(formatDate(failingLowest.lowest.date))} in ${escapeHtml(failingLowest.where)}.`;
+    verdict = `  <div class="banner banner--warn">${notSafe}</div>`;
+  }
+
+  const response = reply.response;
+  let responseHtml = "";
+  if (response !== undefined) {
+    const best =
+      response.best === null
+        ? undefined
+        : response.rounds.flatMap((r) => r.candidates).find((c) => c.id === response.best);
+    const boundRecord =
+      response.bound === null || response.bound === undefined
+        ? undefined
+        : (response.rounds
+            .flatMap((r) => r.candidates)
+            .find((c) => c.id === response.bound?.candidate) ??
+          // The bound can be the seed record — it lives in allRecords, not in
+          // any round's candidate list.
+          (reply.counter?.id === response.bound?.candidate
+            ? reply.counter
+            : undefined));
+    let responseOutcome: string;
+    if (response.status === "found" && best !== undefined) {
+      const boundLine =
+        boundRecord === undefined
+          ? `<br>No smaller ${escapeHtml(best.lever)} candidate was tested, so this is the smallest passing tested change, not a proven minimum.`
+          : `<br>Tested bound: ${escapeHtml(boundRecord.summary ?? boundRecord.id)} fails at least one scenario check (gap ${
+              response.bound?.gap.unit === "days"
+                ? `${response.bound.gap.value} days`
+                : formatCents(response.bound?.gap.value ?? 0)
+            }).`;
+      responseOutcome = `  <div class="banner banner--ok"><strong>Counterproposal: ${escapeHtml(best.summary ?? best.id)}</strong>${boundLine}</div>`;
+    } else if (response.status === "needs_review") {
+      responseOutcome = `  <div class="banner banner--blocked"><strong>Reply search needs human review.</strong> ${escapeHtml(response.reason ?? response.stopReason)}${response.detail !== undefined ? ` — ${escapeHtml(response.detail)}` : ""}</div>`;
+    } else {
+      responseOutcome = `  <div class="banner banner--warn"><strong>No fix found.</strong> No tested change within ${response.rounds.length} rounds kept cash at or above the floor in every scenario.</div>`;
+    }
+    responseHtml = `  <h3>Our counterproposal search</h3>
+${responseOutcome}
+${renderSearchRounds(response)}`;
+  }
+
+  return `<section class="client-reply">
+  <h2>Client reply</h2>
+${head}
+${quoteHtml}
+${termHtml}
+${resultsHtml}
+${verdict}
+${responseHtml}
 </section>`;
 }
 
@@ -601,6 +714,7 @@ ${renderHumanReview(receipt)}
 ${renderFlags(receipt)}
 ${renderResults(receipt)}
 ${renderCounteroffer(receipt)}
+${renderClientReply(receipt)}
 ${renderPolicyNotes(receipt)}`;
 }
 

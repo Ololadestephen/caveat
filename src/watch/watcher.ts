@@ -106,7 +106,7 @@ function recordEvent(
 // Folder files the pipeline will consume when present. A listed optional
 // file that is absent from the run's tuple counts as a change (a first
 // upload must replan); removing one is caught by the tuple walk below.
-export const OPTIONAL_SOURCE_FILES = ["my-cash.csv"];
+export const OPTIONAL_SOURCE_FILES = ["my-cash.csv", "04-client-reply.pdf"];
 
 // True when the folder listing's files exactly cover the latest run's tuple:
 // same names, same file ids, same version ids. Extra folder entries are

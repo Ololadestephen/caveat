@@ -189,3 +189,101 @@ describe("invalid owner cash file closing line", () => {
     );
   });
 });
+
+describe("renderDraft — your reply", () => {
+  const META = {
+    fileName: "04-client-reply.pdf",
+    versionTag: "abc123def456",
+    sha12: "000aaa111bbb",
+  };
+  const CITATION = {
+    excerptId: "04-client-reply.pdf#§2",
+    quote:
+      "We propose that $3,000 of the escrow funding be paid to you as an upfront deposit on October 1, 2026",
+    page: 1,
+  };
+  const SUMMARY =
+    "pay $3,000 of the escrow funding to the consultant as cash at signing, reducing the Jan 2, 2027 release";
+  const counter = (passesAll: boolean) => ({
+    id: "client",
+    lever: "upfront_deposit" as const,
+    params: {
+      amount_cents: 300000,
+      date: "2026-10-01",
+      split_count: null,
+      net_days: null,
+    },
+    rationale: "client counter",
+    status: "tested" as const,
+    rankCents: 300000,
+    summary: SUMMARY,
+    passesAll,
+    perScenario: {
+      retainer_superseded: {
+        no_extensions: {
+          passes: passesAll,
+          lowest: { date: "2026-12-15", balanceCents: passesAll ? 1100000 : 800000 },
+          firstBreach: null,
+        },
+      },
+    },
+    workers: ["caveat-wa", "caveat-wb"],
+  });
+
+  it("safe: the reply block accepts the proposal as written", () => {
+    const receipt = JSON.parse(JSON.stringify(RECEIPT)) as RunReceipt;
+    receipt.clientReply = {
+      status: "safe",
+      ...META,
+      citation: CITATION,
+      counter: counter(true),
+      workers: ["caveat-wa", "caveat-wb"],
+    };
+    const draft = renderDraft(receipt);
+    expect(draft).toContain(
+      `Your reply (04-client-reply.pdf, version abc123def456): Your proposal (${SUMMARY}, quoted from your letter: "${CITATION.quote}") keeps our cash at or above the floor in every case we tested. We can accept it as written.`,
+    );
+    // The block sits immediately after the opening paragraph.
+    expect(draft.indexOf("Your reply")).toBeLessThan(draft.indexOf("1. Escrow is not cash yet"));
+  });
+
+  it("countered: the reply block proposes the tested alternative", () => {
+    const receipt = JSON.parse(JSON.stringify(RECEIPT)) as RunReceipt;
+    const best = {
+      id: "reply-r1c1",
+      lever: "upfront_deposit" as const,
+      params: { amount_cents: 600000, date: "2026-10-01", split_count: null, net_days: null },
+      rationale: "bigger deposit",
+      status: "tested" as const,
+      rankCents: 600000,
+      summary: "pay $6,000 of the escrow funding to the consultant as cash at signing",
+      passesAll: true,
+    };
+    receipt.clientReply = {
+      status: "countered",
+      ...META,
+      citation: CITATION,
+      counter: counter(false),
+      workers: ["caveat-wa", "caveat-wb"],
+      response: {
+        status: "found",
+        stopReason: "model_done",
+        model: "m",
+        best: "reply-r1c1",
+        humanReview: [],
+        bound: { candidate: "client", gap: { unit: "cents", value: 300000 } },
+        rounds: [{ round: 1, modelNote: "n", done: true, candidates: [best] }],
+      },
+    };
+    const draft = renderDraft(receipt);
+    // floor $10,000 minus failing low $8,000 = $2,000 under.
+    expect(draft).toContain(
+      `Your reply (04-client-reply.pdf, version abc123def456): Your proposal (${SUMMARY}) still leaves cash $2,000 under our floor on December 15, 2026. We propose instead: pay $6,000 of the escrow funding to the consultant as cash at signing.`,
+    );
+    expect(draft.indexOf("Your reply")).toBeLessThan(draft.indexOf("1. Escrow is not cash yet"));
+  });
+
+  it("no block at all without a reply", () => {
+    expect(renderDraft(RECEIPT)).not.toContain("Your reply");
+  });
+});

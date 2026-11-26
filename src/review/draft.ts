@@ -100,6 +100,60 @@ export function renderDraft(receipt: RunReceipt): string {
   lines.push("Points to raise before relying on the Second Amendment:");
   lines.push("");
 
+  // Your reply — only for a client counter that tested safe or countered; a
+  // needs_review or no_fix reply blocks the run, so the draft is never
+  // exportable then anyway.
+  const reply = receipt.clientReply;
+  if (
+    reply !== undefined &&
+    (reply.status === "safe" || reply.status === "countered") &&
+    reply.counter !== undefined
+  ) {
+    const summary = reply.counter.summary ?? reply.counter.lever;
+    if (reply.status === "safe") {
+      const quotePart =
+        reply.citation !== undefined
+          ? `, quoted from your letter: "${reply.citation.quote}"`
+          : "";
+      lines.push(
+        `Your reply (${reply.fileName}, version ${reply.versionTag}): Your proposal (${summary}${quotePart}) keeps our cash at or above the floor in every case we tested. We can accept it as written.`,
+      );
+    } else {
+      const failing = Object.values(reply.counter.perScenario ?? {})
+        .flatMap((scenarios) => Object.values(scenarios))
+        .filter((r) => !r.passes)
+        .reduce<{ date: string; balanceCents: number } | null>(
+          (acc, r) => (acc === null || r.lowest.balanceCents < acc.balanceCents ? r.lowest : acc),
+          null,
+        );
+      const underPart =
+        failing === null
+          ? "still fails at least one scenario check"
+          : `still leaves cash ${money(receipt.assumptions.floorCents - failing.balanceCents)} under our floor on ${formatDate(failing.date)}`;
+      const response = reply.response;
+      const best =
+        response !== undefined && response.best !== null
+          ? response.rounds.flatMap((r) => r.candidates).find((c) => c.id === response.best)
+          : undefined;
+      const insteadPart =
+        best === undefined
+          ? " No tested alternative passed every scenario."
+          : ` We propose instead: ${best.summary ?? best.id}.`;
+      const boundRecord =
+        response?.bound === null || response?.bound === undefined
+          ? undefined
+          : response.rounds.flatMap((r) => r.candidates).find((c) => c.id === response.bound?.candidate);
+      const boundPart =
+        boundRecord === undefined
+          ? ""
+          : ` A smaller version (${boundRecord.summary ?? boundRecord.id}) failed the same tests.`;
+      lines.push(
+        `Your reply (${reply.fileName}, version ${reply.versionTag}): Your proposal (${summary}) ${underPart}.${insteadPart}${boundPart}`,
+      );
+    }
+    lines.push("");
+  }
+
   let n = 0;
   const next = () => {
     n += 1;

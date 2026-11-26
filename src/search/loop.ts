@@ -38,6 +38,8 @@ export type SearchCandidateRecord = {
   perScenario?: Record<string, Record<string, CompactResult>> | undefined;
   inputDigests?: Record<string, string> | undefined;
   resultDigests?: Record<string, string> | undefined;
+  // For the client counter record: every worker it was tested on.
+  workers?: string[];
 };
 
 export type SearchRound = {
@@ -104,6 +106,15 @@ export type SearchArgs = {
   maxRounds?: number;
   chat?: typeof callStructuredChat;
   conditionalReleases?: { id: string; amountCents: number; date: string; extensionId: string }[];
+  // Already-tested records seeded into the brackets (the client's own
+  // counter). They join allRecords and the prompt but never rounds, so they
+  // can serve as the bound yet can never be chosen as best.
+  seedRecords?: SearchCandidateRecord[];
+  // Prefix for generated candidate ids ("reply-" keeps reply-search ids
+  // distinct from the main search's).
+  idPrefix?: string;
+  // Extra system-prompt text appended to COUNTEROFFER_SYSTEM_PROMPT.
+  systemPromptSuffix?: string;
 };
 
 const DEFAULT_MAX_ROUNDS = 4;
@@ -350,7 +361,22 @@ function buildUserPrompt(args: {
     conditionalReleases: search.conditionalReleases ?? [],
     scenarios,
     baseline,
-    testedBrackets: testedBrackets(previousRounds.flatMap((r) => r.candidates)),
+    testedBrackets: testedBrackets([
+      ...(search.seedRecords ?? []),
+      ...previousRounds.flatMap((r) => r.candidates),
+    ]),
+    ...(search.seedRecords !== undefined && search.seedRecords.length > 0
+      ? {
+          clientCounter: search.seedRecords.map((c) => ({
+            id: c.id,
+            lever: c.lever,
+            params: c.params,
+            ...(c.summary !== undefined ? { summary: c.summary } : {}),
+            passesAll: c.passesAll ?? null,
+            ...(c.perScenario !== undefined ? { perScenario: c.perScenario } : {}),
+          })),
+        }
+      : {}),
     previousRounds: rounds,
   });
 }
@@ -364,7 +390,7 @@ export async function runCounterofferSearch(args: SearchArgs): Promise<Counterof
   const rounds: SearchRound[] = [];
   const escrowIds = new Set(args.base.rules.map((r) => r.id));
   const seenRules = new Map<string, string>(); // rules digest -> first candidate id
-  const allRecords: SearchCandidateRecord[] = [];
+  const allRecords: SearchCandidateRecord[] = [...(args.seedRecords ?? [])];
 
   // Both readings already pass as signed: nothing to search.
   if (args.readings.every((r) => allPass(r.asSignedResults))) {
@@ -390,7 +416,7 @@ export async function runCounterofferSearch(args: SearchArgs): Promise<Counterof
   for (let round = 1; round <= maxRounds; round += 1) {
     const chatResult: ChatResult = await chat(args.chatConfig, {
       model,
-      systemPrompt: COUNTEROFFER_SYSTEM_PROMPT,
+      systemPrompt: COUNTEROFFER_SYSTEM_PROMPT + (args.systemPromptSuffix ?? ""),
       userPrompt: buildUserPrompt({ round, maxRounds, search: args, previousRounds: rounds }),
       schemaName: PROPOSAL_SCHEMA_NAME,
       schema: PROPOSAL_SCHEMA,
@@ -430,7 +456,7 @@ export async function runCounterofferSearch(args: SearchArgs): Promise<Counterof
     const runnable: { record: SearchCandidateRecord; escrowRules: PaymentRule[] }[] = [];
     proposal.candidates.forEach((p, index) => {
       const record: SearchCandidateRecord = {
-        id: `r${round}c${index + 1}`,
+        id: `${args.idPrefix ?? ""}r${round}c${index + 1}`,
         lever: p.lever,
         params: {
           amount_cents: p.amount_cents,
@@ -627,6 +653,25 @@ export function counterofferCallDigest(args: {
   });
 }
 
+// The digest for the client-reply follow-up search: the same inputs as the
+// main search plus the seed record and the reply-specific prompt text.
+export function clientReplyCallDigest(args: {
+  base: SearchBase;
+  readings: SearchReading[];
+  seed: SearchCandidateRecord;
+  model: string;
+  systemPromptSuffix: string;
+}): string {
+  return digestValue({
+    base: args.base,
+    inputs: args.readings.map((r) => ({ id: r.id, input: r.rawInput })),
+    seed: args.seed,
+    model: args.model,
+    systemPrompt: COUNTEROFFER_SYSTEM_PROMPT + args.systemPromptSuffix,
+    schema: PROPOSAL_SCHEMA,
+  });
+}
+
 // Re-verifies a carried-forward best candidate: recompile the same lever, run
 // it once on the first worker for both readings, and require the worker's
 // result digests to match the previous run's records.
@@ -728,4 +773,148 @@ export async function reverifyBestCandidate(args: {
     }
   }
   return { ok: true, worker };
+}
+
+// The reply-search addendum: the main search's system prompt is unchanged;
+// the follow-up search gets this appended (and the digest covers it).
+export const CLIENT_REPLY_PROMPT_SUFFIX =
+  "\n\nThis search answers the client's reply. clientCounter is the change the client proposed and the runner's result for it; it is already included in testedBrackets and failed at least one scenario. Look for the smallest passing change as before; when the client's lever can work, narrow that lever first so the response stays close to what the client offered.";
+
+// Tests the client's proposed candidate on every pool worker at once: the
+// same compile and job construction as a search round, but each worker runs
+// both readings and all workers must agree on every result digest.
+export async function testClientCandidate(args: {
+  base: SearchBase;
+  readings: SearchReading[];
+  record: SearchCandidateRecord;
+  pool: WorkerPool;
+}): Promise<
+  | { ok: true; record: SearchCandidateRecord; workers: string[] }
+  | { ok: false; reason: string; detail: string }
+> {
+  const { base, readings, record, pool } = args;
+  const workers = [...pool.workers];
+  if (workers.length < 2) {
+    return {
+      ok: false,
+      reason: "workers_unavailable",
+      detail: `the client reply test needs at least 2 workers, the pool has ${workers.length}`,
+    };
+  }
+  const compiled = compileCandidate(base, {
+    lever: record.lever,
+    amount_cents: record.params.amount_cents,
+    date: record.params.date,
+    split_count: record.params.split_count,
+    net_days: record.params.net_days,
+    rationale: record.rationale,
+  });
+  if (!compiled.ok) {
+    return { ok: false, reason: compiled.code, detail: compiled.detail };
+  }
+  record.rankCents = compiled.rankCents;
+  record.centDays = compiled.centDays;
+  record.summary = compiled.summary;
+
+  const escrowIds = new Set(base.rules.map((r) => r.id));
+  const jobs: WorkerJob[] = readings.map((reading) => {
+    const asSigned = reading.rawInput.candidates[0];
+    const nonEscrow = (asSigned?.paymentRules ?? []).filter((r) => !escrowIds.has(r.id));
+    return {
+      jobId: `${record.id}@${reading.id}`,
+      input: {
+        ...reading.rawInput,
+        candidates: [
+          {
+            id: record.id,
+            rankCents: compiled.rankCents,
+            totalCents: asSigned?.totalCents ?? 0,
+            paymentRules: [...compiled.escrowRules, ...nonEscrow],
+          },
+        ],
+      },
+    };
+  });
+  const localDigests = new Map(jobs.map((j) => [j.jobId, digestValue(j.input)]));
+
+  let perWorker: [string, WorkerJobResult[]][];
+  try {
+    perWorker = await Promise.all(
+      workers.map(async (worker) => [worker, await pool.runBatch(worker, jobs)] as const),
+    );
+  } catch (error) {
+    if (error instanceof WorkerUnavailableError) {
+      return { ok: false, reason: "workers_unavailable", detail: error.message };
+    }
+    throw error;
+  }
+
+  // Every worker must return a valid, digest-matching, identical result.
+  const agreed = new Map<string, string>();
+  for (const [worker, results] of perWorker) {
+    for (const reading of readings) {
+      const jobId = `${record.id}@${reading.id}`;
+      const result = results.find((r) => r.jobId === jobId);
+      if (result === undefined) {
+        return {
+          ok: false,
+          reason: "workers_unavailable",
+          detail: `worker ${worker} returned no result for ${jobId}`,
+        };
+      }
+      if (!result.ok) {
+        return {
+          ok: false,
+          reason: result.code,
+          detail: `worker ${worker}: ${result.message}`,
+        };
+      }
+      const output = result.output;
+      if (
+        output.runnerVersion !== RUNNER_VERSION ||
+        output.inputDigest !== localDigests.get(jobId)
+      ) {
+        return {
+          ok: false,
+          reason: "worker_digest_mismatch",
+          detail: `worker ${worker} output for ${jobId} does not match the coordinator's input digest`,
+        };
+      }
+      const seen = agreed.get(reading.id);
+      if (seen === undefined) {
+        agreed.set(reading.id, output.resultDigest);
+      } else if (seen !== output.resultDigest) {
+        return {
+          ok: false,
+          reason: "worker_disagreement",
+          detail: `worker ${worker} resultDigest for ${jobId} differs from another worker's`,
+        };
+      }
+    }
+  }
+
+  const firstResults = perWorker[0]?.[1] ?? [];
+  record.perScenario = {};
+  record.inputDigests = {};
+  record.resultDigests = {};
+  for (const reading of readings) {
+    const result = firstResults.find((r) => r.jobId === `${record.id}@${reading.id}`);
+    if (result === undefined || !result.ok) continue; // checked above
+    const perScenario: Record<string, CompactResult> = {};
+    for (const [scenarioId, scenarioResult] of Object.entries(
+      result.output.results[record.id] ?? {},
+    )) {
+      perScenario[scenarioId] = compact(scenarioResult);
+    }
+    record.perScenario[reading.id] = perScenario;
+    record.inputDigests[reading.id] = result.output.inputDigest;
+    record.resultDigests[reading.id] = result.output.resultDigest;
+  }
+  record.passesAll = readings.every((reading) =>
+    reading.rawInput.scenarios.every(
+      (scen) => record.perScenario?.[reading.id]?.[scen.id]?.passes === true,
+    ),
+  );
+  record.workers = workers;
+  return { ok: true, record, workers };
 }

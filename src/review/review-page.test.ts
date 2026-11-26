@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RunReceipt } from "./receipt.ts";
+import type { SearchCandidateRecord } from "../search/loop.ts";
 import { renderReviewBody, renderReviewPage } from "./review-page.ts";
 import { fixtureReceipt } from "./fixture-receipt.ts";
 
@@ -690,5 +691,150 @@ describe("renderReviewPage — invalid owner cash file", () => {
     expect(html).toContain(
       "my-cash.csv (version abc123def456) could not be read: line 4: bad_amount: &#39;6000.5&#39; is not an amount like &quot;1234.56&quot;. No cash results were produced until it is fixed.",
     );
+  });
+});
+
+describe("renderReviewPage — client reply", () => {
+  const META = {
+    fileName: "04-client-reply.pdf",
+    versionTag: "abc123def456",
+    sha12: "000aaa111bbb",
+  };
+  const CITATION = {
+    excerptId: "04-client-reply.pdf#§2",
+    quote:
+      "We propose that $3,000 of the escrow funding be paid to you as an upfront deposit on October 1, 2026",
+    page: 1,
+  };
+  const SUMMARY =
+    "pay $3,000 of the escrow funding to the consultant as cash at signing, reducing the Jan 2, 2027 release";
+  const counter = (passesAll: boolean): SearchCandidateRecord => ({
+    id: "client",
+    lever: "upfront_deposit",
+    params: { amount_cents: 300000, date: "2026-10-01", split_count: null, net_days: null },
+    rationale: "client counter",
+    status: "tested",
+    rankCents: 300000,
+    summary: SUMMARY,
+    passesAll,
+    perScenario: {
+      retainer_superseded: {
+        no_extensions: {
+          passes: passesAll,
+          lowest: { date: "2026-12-15", balanceCents: passesAll ? 1100000 : 800000 },
+          firstBreach: passesAll
+            ? null
+            : { date: "2026-12-15", week: 11, balanceCents: 800000 },
+        },
+        all_extensions: {
+          passes: passesAll,
+          lowest: { date: "2026-12-15", balanceCents: passesAll ? 1100000 : 800000 },
+          firstBreach: null,
+        },
+      },
+      retainer_continues: {
+        no_extensions: {
+          passes: true,
+          lowest: { date: "2026-10-01", balanceCents: 2300000 },
+          firstBreach: null,
+        },
+        all_extensions: {
+          passes: true,
+          lowest: { date: "2026-10-01", balanceCents: 2300000 },
+          firstBreach: null,
+        },
+      },
+    },
+    workers: ["caveat-wa", "caveat-wb"],
+  });
+  const withReply = (reply: NonNullable<RunReceipt["clientReply"]>) => {
+    const receipt = JSON.parse(
+      JSON.stringify(fixtureReceipt("run-page-reply")),
+    ) as RunReceipt;
+    receipt.clientReply = reply;
+    return receipt;
+  };
+
+  it("safe: file, quote, term, per-scenario results and the safe verdict", () => {
+    const html = renderReviewPage(
+      withReply({ status: "safe", ...META, citation: CITATION, counter: counter(true), workers: ["caveat-wa", "caveat-wb"] }),
+    );
+    expect(html).toContain("Client reply");
+    expect(html).toContain("04-client-reply.pdf");
+    expect(html).toContain("version abc123def456");
+    expect(html).toContain("upfront deposit on October 1, 2026");
+    expect(html).toContain("page 1");
+    expect(html).toContain(SUMMARY);
+    expect(html).toContain("Tested on caveat-wa, caveat-wb");
+    expect(html).toContain("retainer_superseded / no_extensions: pass");
+    expect(html).toContain(
+      "Safe:",
+    );
+    expect(html).toContain("keeps cash at or above the floor in every scenario");
+    expect(html).not.toContain("counterproposal search");
+  });
+
+  it("countered: not-safe verdict plus the follow-up rounds, best and bound", () => {
+    const best = {
+      id: "reply-r1c1",
+      lever: "upfront_deposit" as const,
+      params: { amount_cents: 600000, date: "2026-10-01", split_count: null, net_days: null },
+      rationale: "bigger deposit",
+      status: "tested" as const,
+      rankCents: 600000,
+      summary: "pay $6,000 of the escrow funding to the consultant as cash at signing",
+      passesAll: true,
+      perScenario: counter(true).perScenario,
+    };
+    const response: RunReceipt["counteroffer"] = {
+      status: "found",
+      stopReason: "model_done",
+      model: "m",
+      best: "reply-r1c1",
+      humanReview: [],
+      bound: {
+        candidate: "client",
+        gap: { unit: "cents", value: 300000 },
+      },
+      rounds: [
+        {
+          round: 1,
+          modelNote: "a bigger deposit works",
+          done: true,
+          candidates: [best],
+        },
+      ],
+    };
+    const html = renderReviewPage(
+      withReply({
+        status: "countered",
+        ...META,
+        citation: CITATION,
+        counter: counter(false),
+        workers: ["caveat-wa", "caveat-wb"],
+        response,
+      }),
+    );
+    expect(html).toContain("Not safe:");
+    expect(html).toContain("$8,000");
+    expect(html).toContain("retainer_superseded/no_extensions");
+    expect(html).toContain("Our counterproposal search");
+    expect(html).toContain("Counterproposal: pay $6,000");
+    expect(html).toContain("reply-r1c1");
+    expect(html).toContain("a bigger deposit works");
+    // The bound is the seed record itself (not a round candidate).
+    expect(html).toContain(`Tested bound: ${SUMMARY}`);
+    expect(html).toContain("(gap $3,000.00)");
+  });
+
+  it("needs_review: reason and detail, no results table", () => {
+    const html = renderReviewPage(
+      withReply({ status: "needs_review", ...META, reason: "counter_unreadable", detail: "the letter proposes two different changes" }),
+    );
+    expect(html).toContain("Client reply needs human review.");
+    expect(html).toContain("counter_unreadable");
+    expect(html).toContain("the letter proposes two different changes");
+    expect(html).toContain("04-client-reply.pdf");
+    expect(html).not.toContain("Tested on");
   });
 });

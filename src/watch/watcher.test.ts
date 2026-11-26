@@ -376,4 +376,48 @@ describe("optional source files", () => {
     expect(getRun(db, "run-latest")?.status).toBe("stale");
     db.close();
   });
+
+  it("a first upload of 04-client-reply.pdf counts as a change", async () => {
+    const db = openDb(":memory:");
+    const tuple = makeTuple("v1");
+    seedRun(db, {
+      id: "run-latest",
+      createdAt: "2026-11-25T02:00:00.000Z",
+      status: "approved",
+      sourceTuple: tuple,
+      receipt: RECEIPT_WITH_DIGESTS,
+    });
+    const replyEntry: BoxEntry = {
+      id: "file-reply",
+      type: "file",
+      name: "04-client-reply.pdf",
+      sha1: "d".repeat(40),
+      versionId: "v3",
+    };
+    const confirmed: SourceTuple = [
+      ...tuple,
+      {
+        fileName: "04-client-reply.pdf",
+        fileId: "file-reply",
+        versionId: "v3",
+        sha256: "e".repeat(64),
+        size: 100,
+      },
+    ];
+    const { deps, state, started } = makeDeps(db, {
+      listing: [...entriesFor(tuple), replyEntry],
+      recheck: () =>
+        Promise.resolve({
+          ok: true,
+          tuple: confirmed,
+          changes: diffSourceTuple(tuple, confirmed),
+        }),
+    });
+    await watchTick(deps, state);
+    expect(state.lastResult).toBe("change_found");
+    expect(started).toHaveLength(1);
+    expect(started[0]?.args.sourceTuple).toEqual(confirmed);
+    expect(getRun(db, "run-latest")?.status).toBe("stale");
+    db.close();
+  });
 });

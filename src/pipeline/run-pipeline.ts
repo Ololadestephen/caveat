@@ -31,8 +31,13 @@ import {
   PlanError,
 } from "../plan/twinvee.ts";
 import type { TwinveeAssumptions } from "../plan/twinvee.ts";
+import {
+  CLIENT_COUNTER_SCHEMA,
+  OpenRouterClientCounterExtractor,
+} from "../interpret/client-counter.ts";
+import type { ClientCitation } from "../interpret/client-counter.ts";
 import { RECEIPT_VERSION } from "../review/receipt.ts";
-import type { IncrementalInfo, RunReceipt } from "../review/receipt.ts";
+import type { ClientReplyReceipt, IncrementalInfo, RunReceipt } from "../review/receipt.ts";
 import {
   validateRetainerReview,
   validateSourcedOverride,
@@ -49,9 +54,12 @@ import type { callStructuredChat } from "../interpret/chat.ts";
 import { buildSearchBase } from "../search/levers.ts";
 import type { SearchBase } from "../search/levers.ts";
 import {
+  CLIENT_REPLY_PROMPT_SUFFIX,
+  clientReplyCallDigest,
   counterofferCallDigest,
   reverifyBestCandidate,
   runCounterofferSearch,
+  testClientCandidate,
 } from "../search/loop.ts";
 import type {
   CounterofferReceipt,
@@ -83,6 +91,11 @@ const FILE_NAMES = [
 // Optional owner-provided cash numbers. Fetched and versioned like the PDFs
 // but never sectionized.
 const CASH_FILE_NAME = "my-cash.csv";
+
+// Optional client reply letter. Fetched and versioned like the PDFs, but its
+// sections stay out of the contract's section list (flags and human review
+// only apply to the three contract files).
+const REPLY_FILE_NAME = "04-client-reply.pdf";
 
 const EDGAR_URLS: Record<string, string> = {
   "01-consulting-agreement.pdf":
@@ -209,13 +222,18 @@ type FetchedFile = {
   versionPresent: boolean;
 };
 
-type CashFetched = FetchedFile & { fileId: string; versionId: string };
+type OptionalFetched = FetchedFile & { fileId: string; versionId: string };
 
 async function fetchSources(
   boxConn: Connection,
   folderName: string,
   timer: StageTimer,
-): Promise<{ sourceTuple: SourceTuple; fetched: FetchedFile[]; cashFile: CashFetched | undefined }> {
+): Promise<{
+  sourceTuple: SourceTuple;
+  fetched: FetchedFile[];
+  cashFile: OptionalFetched | undefined;
+  replyFile: OptionalFetched | undefined;
+}> {
   const folder = await timer.step(
     "box_folder",
     findFolderByName(boxConn.gatewayBaseUrl, "0", folderName),
@@ -246,30 +264,34 @@ async function fetchSources(
       size: evidence.metadata.size,
     });
   }
-  let cashFile: CashFetched | undefined;
-  const cashEntry = entries.find((e) => e.type === "file" && e.name === CASH_FILE_NAME);
-  if (cashEntry !== undefined) {
+  const fetchOptional = async (
+    name: string,
+  ): Promise<OptionalFetched | undefined> => {
+    const entry = entries.find((e) => e.type === "file" && e.name === name);
+    if (entry === undefined) return undefined;
     const evidence = await timer.step(
       "box_fetch",
-      fetchBoxFile(boxConn.gatewayBaseUrl, cashEntry.id),
+      fetchBoxFile(boxConn.gatewayBaseUrl, entry.id),
     );
-    cashFile = {
+    sourceTuple.push({
       fileName: evidence.metadata.name,
-      fileId: cashEntry.id,
+      fileId: entry.id,
+      versionId: evidence.metadata.fileVersionId,
+      sha256: evidence.sha256,
+      size: evidence.metadata.size,
+    });
+    return {
+      fileName: evidence.metadata.name,
+      fileId: entry.id,
       versionId: evidence.metadata.fileVersionId,
       bytes: evidence.bytes,
       sha256: evidence.sha256,
       versionPresent: evidence.metadata.fileVersionId.length > 0,
     };
-    sourceTuple.push({
-      fileName: evidence.metadata.name,
-      fileId: cashEntry.id,
-      versionId: evidence.metadata.fileVersionId,
-      sha256: evidence.sha256,
-      size: evidence.metadata.size,
-    });
-  }
-  return { sourceTuple, fetched, cashFile };
+  };
+  const cashFile = await fetchOptional(CASH_FILE_NAME);
+  const replyFile = await fetchOptional(REPLY_FILE_NAME);
+  return { sourceTuple, fetched, cashFile, replyFile };
 }
 
 async function sectionize(
@@ -692,7 +714,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   // --- Evidence: fetch all three PDFs -------------------------------------------
   timer.begin();
   const folderName = config.boxFolder ?? "caveat_TEST";
-  const { sourceTuple, fetched, cashFile } = await fetchSources(boxConn, folderName, timer);
+  const { sourceTuple, fetched, cashFile, replyFile } = await fetchSources(boxConn, folderName, timer);
   timer.record("box_fetch");
 
   // --- PDF text -> sections ------------------------------------------------------
@@ -707,6 +729,35 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     sectionDigests[`${section.fileName}#${section.sectionId}`] = createHash("sha256")
       .update(section.text)
       .digest("hex");
+  }
+
+  // The client reply letter (when present) is sectionized separately: its
+  // digests join sectionDigests under its own file name, but its sections
+  // stay out of the contract's sections/excerpts — flags and human review
+  // only apply to the contract PDFs.
+  const replyExcerpts: Excerpt[] = [];
+  if (replyFile !== undefined) {
+    const pages = await timer.step(
+      "pdf_text",
+      (config.pdfText ?? extractPdfLines)(replyFile.bytes),
+    );
+    const replySections = extractSections(replyFile.fileName, pages);
+    const versionLabel = `sha256 ${replyFile.sha256.slice(0, 12)}`;
+    for (const section of replySections) {
+      sectionDigests[`${section.fileName}#${section.sectionId}`] = createHash("sha256")
+        .update(section.text)
+        .digest("hex");
+      replyExcerpts.push({
+        id: `${section.fileName}#${section.sectionId}`,
+        text: section.text,
+        source: {
+          fileName: section.fileName,
+          versionLabel,
+          page: section.pages[0],
+          section: section.sectionId,
+        },
+      });
+    }
   }
 
   const model = config.decisionModel ?? DEFAULT_MODEL;
@@ -740,6 +791,18 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     questionId: "escrow_schedule",
     excerpts: excerptDigestInputs,
   });
+  const clientCounterDigest =
+    replyExcerpts.length === 0
+      ? "none"
+      : digestValue({
+          schemaName: "client_counter",
+          schema: CLIENT_COUNTER_SCHEMA,
+          systemPrompt: DECISION_SYSTEM_PROMPT,
+          model,
+          questionId: "client_counter",
+          excerpts: replyExcerpts.map((e) => ({ id: e.id, text: e.text })),
+        });
+  let clientReplySearchDigest = "none";
   const previous = config.previous;
   const prevDigests = previous?.receipt.typedCallDigests;
   // Only a run whose own receipt passed every gate may lend its answers; a
@@ -948,6 +1011,214 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     }
     timer.record("counteroffer");
   }
+
+  // --- Client reply --------------------------------------------------------------
+  // 04-client-reply.pdf, when present: read the one proposed change verbatim,
+  // test it on every worker, and when it fails run a seeded follow-up search.
+  // Runs only after the main search and only with no earlier blockers.
+  let clientReply: ClientReplyReceipt | undefined;
+  if (
+    replyFile !== undefined &&
+    replyExcerpts.length > 0 &&
+    prepared !== undefined &&
+    schedule.status === "extracted" &&
+    blockedReasons.length === 0
+  ) {
+    timer.begin();
+    const replyFileMeta = {
+      fileName: replyFile.fileName,
+      versionTag: versionTag({
+        fileId: replyFile.fileId,
+        versionId: replyFile.versionId,
+      }),
+      sha12: sha12(replyFile.sha256),
+    };
+    const prevReply = previous?.receipt.clientReply;
+    const conditionalReleases = schedule.schedule.releases
+      .filter((r) => r.extensionId !== undefined)
+      .map((r) => ({
+        id: r.id,
+        amountCents: r.amountCents,
+        date: r.date,
+        extensionId: r.extensionId as string,
+      }));
+
+    // The typed read carries by call digest like the other typed calls; the
+    // deterministic worker test always re-runs (it covers base + readings,
+    // which the read digest does not).
+    let counterRecord: SearchCandidateRecord | undefined;
+    let citation: ClientCitation | undefined;
+    let workers: string[] | undefined;
+    let replyFail: { reason: string; detail: string } | undefined;
+    const carryRead =
+      baselineOk &&
+      prevDigests?.client_counter === clientCounterDigest &&
+      prevReply?.counter !== undefined &&
+      prevReply.citation !== undefined;
+    if (carryRead && prevReply !== undefined && prevReply.counter !== undefined) {
+      const carried = prevReply.counter;
+      counterRecord = {
+        id: carried.id,
+        lever: carried.lever,
+        params: carried.params,
+        rationale: carried.rationale,
+        status: "tested",
+      };
+      citation = prevReply.citation;
+      carriedForward.push("client_counter");
+    } else {
+      const extractor = new OpenRouterClientCounterExtractor({
+        gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
+        model,
+      });
+      const read = await extractor.extract({
+        id: "client_counter",
+        excerpts: replyExcerpts,
+      });
+      if (read.status === "needs_review") {
+        replyFail = { reason: read.reason, detail: read.detail };
+      } else {
+        citation = read.citation;
+        counterRecord = {
+          id: "client",
+          lever: read.candidate.lever,
+          params: {
+            amount_cents: read.candidate.amount_cents,
+            date: read.candidate.date,
+            split_count: read.candidate.split_count,
+            net_days: read.candidate.net_days,
+          },
+          rationale: read.candidate.rationale,
+          status: "tested",
+        };
+      }
+      reran.push("client_counter");
+    }
+
+    if (replyFail === undefined && counterRecord !== undefined) {
+      const resolved = resolvePool(connectors, model, config);
+      if (!resolved.ok) {
+        replyFail = {
+          reason: "workers_unavailable",
+          detail: resolved.receipt.detail ?? "no worker pool available",
+        };
+      } else {
+        const tested = await testClientCandidate({
+          base: prepared.base,
+          readings: prepared.searchReadings,
+          record: counterRecord,
+          pool: resolved.pool,
+        });
+        if (!tested.ok) {
+          replyFail = { reason: tested.reason, detail: tested.detail };
+        } else {
+          counterRecord = tested.record;
+          workers = tested.workers;
+        }
+      }
+    }
+
+    if (replyFail !== undefined) {
+      clientReply = {
+        status: "needs_review",
+        ...replyFileMeta,
+        reason: replyFail.reason,
+        detail: replyFail.detail,
+        ...(citation !== undefined ? { citation } : {}),
+        ...(counterRecord !== undefined ? { counter: counterRecord } : {}),
+        ...(workers !== undefined ? { workers } : {}),
+      };
+      blockedReasons.push({ reason: replyFail.reason, detail: replyFail.detail });
+    } else if (counterRecord !== undefined && citation !== undefined) {
+      const counterFields = {
+        ...replyFileMeta,
+        citation,
+        counter: counterRecord,
+        ...(workers !== undefined ? { workers } : {}),
+      };
+      if (counterRecord.passesAll === true) {
+        clientReply = { status: "safe", ...counterFields };
+      } else {
+        // The client's counter fails: find the smallest tested change that
+        // passes, seeded with the client's record and its failing brackets.
+        clientReplySearchDigest = clientReplyCallDigest({
+          base: prepared.base,
+          readings: prepared.searchReadings,
+          seed: counterRecord,
+          model,
+          systemPromptSuffix: CLIENT_REPLY_PROMPT_SUFFIX,
+        });
+        let response: CounterofferReceipt;
+        const prevResponse = prevReply?.response;
+        const canCarry =
+          baselineOk &&
+          prevDigests !== undefined &&
+          prevDigests.client_reply_search === clientReplySearchDigest &&
+          prevResponse !== undefined &&
+          (prevResponse.status === "found" || prevResponse.status === "not_found");
+        if (canCarry && prevResponse !== undefined && previous !== undefined) {
+          const carried = await carrySearch(
+            previous,
+            prevResponse,
+            prepared,
+            connectors,
+            model,
+            config,
+          );
+          response = carried.receipt;
+          if (carried.carried) carriedForward.push("client_reply_search");
+          else reran.push("client_reply_search");
+        } else {
+          const resolved = resolvePool(connectors, model, config);
+          if (!resolved.ok) {
+            response = resolved.receipt;
+          } else {
+            response = await runCounterofferSearch({
+              base: prepared.base,
+              readings: prepared.searchReadings,
+              model,
+              chatConfig: chatConfig(
+                connectors.openrouterConn.gatewayBaseUrl,
+                searchTimeoutMs(),
+                undefined,
+                fetch,
+              ),
+              pool: resolved.pool,
+              ...(config.chat !== undefined ? { chat: config.chat } : {}),
+              conditionalReleases,
+              seedRecords: [counterRecord],
+              idPrefix: "reply-",
+              systemPromptSuffix: CLIENT_REPLY_PROMPT_SUFFIX,
+            });
+          }
+          reran.push("client_reply_search");
+        }
+        if (response.status === "found") {
+          clientReply = { status: "countered", ...counterFields, response };
+        } else if (response.status === "not_found") {
+          clientReply = { status: "no_fix", ...counterFields, response };
+          blockedReasons.push({
+            reason: "client_counter_no_fix",
+            detail:
+              "the client's proposed change fails and the follow-up search found no tested change that keeps cash at or above the floor",
+          });
+        } else {
+          const reason = response.reason ?? "client_reply_needs_review";
+          const detail =
+            response.detail ?? `client reply search stopped: ${response.stopReason}`;
+          clientReply = {
+            status: "needs_review",
+            ...counterFields,
+            reason,
+            detail,
+            response,
+          };
+          blockedReasons.push({ reason, detail });
+        }
+      }
+    }
+    timer.record("client_reply");
+  }
   timer.finish();
 
   const incremental: IncrementalInfo | undefined =
@@ -990,6 +1261,16 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
             },
           ]
         : []),
+      ...(replyFile !== undefined
+        ? [
+            {
+              fileName: replyFile.fileName,
+              versionLabel: `sha256 ${replyFile.sha256.slice(0, 12)}`,
+              versionPresent: replyFile.versionPresent,
+              edgarUrl: null,
+            },
+          ]
+        : []),
     ],
     cashSource,
     ...(expectedCheck !== undefined ? { expectedCheck } : {}),
@@ -998,6 +1279,14 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
       release_timing: decisionCallDigest,
       escrow_schedule: scheduleCallDigest,
       counteroffer_search: searchCallDigest,
+      // Only present when a reply letter was processed — runs without one stay
+      // byte-identical to runs predating the reply feature.
+      ...(clientCounterDigest !== "none"
+        ? { client_counter: clientCounterDigest }
+        : {}),
+      ...(clientReplySearchDigest !== "none"
+        ? { client_reply_search: clientReplySearchDigest }
+        : {}),
     },
     releaseTiming: { outcome: decision, question },
     effectiveAction,
@@ -1008,6 +1297,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     readings,
     assumptions,
     ...(counteroffer !== undefined ? { counteroffer } : {}),
+    ...(clientReply !== undefined ? { clientReply } : {}),
     ...(incremental !== undefined ? { incremental } : {}),
   };
 

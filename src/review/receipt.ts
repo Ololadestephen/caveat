@@ -3,7 +3,7 @@ import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import type { DecisionOutcome, Excerpt, Question } from "../interpret/types.ts";
 import type { PolicyAdjustment, TwinveeAssumptions } from "../plan/twinvee.ts";
 import type { ScenarioResult } from "../runner/types.ts";
-import type { CounterofferReceipt } from "../search/loop.ts";
+import type { CounterofferReceipt, SearchCandidateRecord } from "../search/loop.ts";
 import type { RetainerReview, SourcedOverride } from "./human-review.ts";
 
 export const RECEIPT_VERSION = "caveat-receipt/2";
@@ -27,6 +27,25 @@ export type ReceiptReading = {
 };
 
 export type ReceiptBlockedReason = { reason: string; detail: string };
+
+// The client-reply stage outcome. safe: the client's counter passes every
+// scenario. countered: it failed and the follow-up search found a passing
+// change. no_fix: it failed and the search found nothing. needs_review: the
+// read, test or search could not be trusted.
+export type ClientReplyReceipt = {
+  status: "safe" | "countered" | "no_fix" | "needs_review";
+  fileName: string;
+  versionTag: string;
+  sha12: string;
+  reason?: string;
+  detail?: string;
+  citation?: { excerptId: string; quote: string; page: number | undefined };
+  // The client's proposed change as a tested search record (id "client").
+  counter?: SearchCandidateRecord;
+  workers?: string[];
+  // The follow-up search, present on countered/no_fix/needs_review(search).
+  response?: CounterofferReceipt;
+};
 
 export type HumanReviewReceipt =
   | { status: "ok"; review: RetainerReview }
@@ -75,6 +94,8 @@ export type RunReceipt = {
     release_timing: string;
     escrow_schedule: string;
     counteroffer_search: string;
+    client_counter?: string;
+    client_reply_search?: string;
   };
   releaseTiming: { outcome: DecisionOutcome; question: Question } | null;
   // The action used downstream: the decided action, or a validated human
@@ -102,6 +123,10 @@ export type RunReceipt = {
   // What the expected-fixture check did this run; absent when the readings
   // never ran or the check was disabled.
   expectedCheck?: "matched" | "mismatch" | "skipped_custom_cash";
+  // The client's reply letter (04-client-reply.pdf), when present and the run
+  // reached the reply stage: what the client proposed, how it tested on every
+  // worker, and the follow-up search when it failed.
+  clientReply?: ClientReplyReceipt;
   // Added in v2 — absent on v1 receipts and on runs where the search never ran.
   counteroffer?: CounterofferReceipt;
   incremental?: IncrementalInfo;

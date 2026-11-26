@@ -1,4 +1,8 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
+import { extractPdfLines } from "./pdf-text.ts";
 import { groupItemsIntoLines } from "./pdf-text.ts";
 import { extractSections } from "./sections.ts";
 import type { PdfPageLines } from "./pdf-text.ts";
@@ -218,4 +222,31 @@ describe("extractSections — sequence enforcement", () => {
     expect(sections.map((s) => s.sectionId)).toEqual(["§3", "§3(a)"]);
     expect(sections[1]?.text).toContain("(c) Out of sequence");
   });
+});
+
+describe("reply fixtures", () => {
+  it.each(["reply-v1", "reply-v2"])(
+    "sectionizes fixtures/box/%s/04-client-reply.pdf",
+    async (dir) => {
+      const bytes = new Uint8Array(
+        readFileSync(
+          fileURLToPath(
+            new URL(`../../fixtures/box/${dir}/04-client-reply.pdf`, import.meta.url),
+          ),
+        ),
+      );
+      const pages = await extractPdfLines(bytes);
+      const sections = extractSections("04-client-reply.pdf", pages);
+      expect(sections.map((s) => s.sectionId)).toEqual([
+        "Recitals",
+        "§1",
+        "§2",
+        "§3",
+      ]);
+      expect(sections[0]?.text).toContain("SYNTHETIC CLIENT REPLY - TEST FIXTURE");
+      expect(sections[1]?.text).toContain("Second Amendment");
+      expect(sections[2]?.text).toContain("We propose");
+      expect(sections[3]?.text).toContain("All other terms");
+    },
+  );
 });
