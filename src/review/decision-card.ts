@@ -23,6 +23,7 @@ const REVIEW_REASON_LABELS: Record<NeedsReviewReason, string> = {
   unknown_excerpt: "Cited excerpt was not among the supplied excerpts",
   quote_not_verbatim: "Cited quote is not verbatim in the supplied excerpt",
   inconsistent_terms: "Extracted terms are internally inconsistent",
+  missing_term_bounds: "A recurring term is stated but the agreement term is not",
   model_mismatch: "Resolved model version was not allowed",
   missing_model_version: "Response did not report a model version",
   blocked: "Provider blocked the response",

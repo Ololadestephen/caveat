@@ -2,6 +2,7 @@ import { isRecord } from "../shape.ts";
 import type { DecisionProvider } from "./provider.ts";
 import { RELEASE_TIMING } from "./types.ts";
 import type { ValidatedRelease } from "./schedule.ts";
+import type { ValidatedTerm } from "./payment-terms.ts";
 import type { ClientCounterTexts } from "./client-counter.ts";
 import type { Lever } from "../search/levers.ts";
 import type {
@@ -266,6 +267,55 @@ export function buildCounterCrosscheckRequest(
       [COUNTER_CROSSCHECK_QUESTION]: { type: "noul", instructions },
     },
   };
+}
+
+// The per-term cross-check instruction restates the extraction's own texts so
+// Jev can verify them against the quote. Undefined when the term lacks the
+// fields its kind's instruction needs — the caller treats that as a failure.
+function termCrosscheckInstructions(term: ValidatedTerm): string | undefined {
+  switch (term.kind) {
+    case "fixed_date_payment": {
+      const when = term.dateText ?? term.recurrenceText;
+      if (term.amountText === null || when === null) return undefined;
+      const recurrence = term.recurrenceText === null ? "" : ` ${term.recurrenceText}`;
+      return `The quoted clause sets a cash fee of ${term.amountText}${recurrence}, paid or invoiced ${when}.`;
+    }
+    case "deposit":
+      if (term.amountText === null || term.dateText === null) return undefined;
+      return `The quoted clause requires a payment of ${term.amountText} ${term.dateText}.`;
+    case "payment_terms":
+      if (term.netDaysText === null) return undefined;
+      return `The quoted clause gives the client ${term.netDaysText} to pay an invoice.`;
+    case "escrow_release":
+      if (term.amountText === null || term.dateText === null) return undefined;
+      return `The quoted clause releases ${term.amountText} from escrow ${term.dateText}.`;
+  }
+}
+
+// One systemone request per distinct quote — a single request carries one
+// state, so terms citing the same quote share it. Undefined when any term
+// cannot build its instruction.
+export function buildTermCrosscheckRequests(
+  terms: ValidatedTerm[],
+  model: string,
+): { model: string; state: unknown; questions: Record<string, unknown> }[] | undefined {
+  const byQuote = new Map<string, ValidatedTerm[]>();
+  for (const t of terms) {
+    const group = byQuote.get(t.quote);
+    if (group === undefined) byQuote.set(t.quote, [t]);
+    else group.push(t);
+  }
+  const requests: { model: string; state: unknown; questions: Record<string, unknown> }[] = [];
+  for (const [quote, group] of byQuote) {
+    const questions: Record<string, unknown> = {};
+    for (const t of group) {
+      const instructions = termCrosscheckInstructions(t);
+      if (instructions === undefined) return undefined;
+      questions[`term_${t.id}`] = { type: "noul", instructions };
+    }
+    requests.push({ model, state: { quote }, questions });
+  }
+  return requests;
 }
 
 type PostResult =
@@ -642,5 +692,68 @@ export class JevDecisionProvider implements DecisionProvider {
       checks: [check],
       detail: `Jev could not confirm the extracted change (p = ${noul.toFixed(2)})`,
     };
+  }
+
+  // The payment-terms cross-check: one noul per extracted term over its own
+  // quote, batched per distinct quote. The instruction restates the extracted
+  // texts, so Jev should agree — a clear no is a mismatch naming the term, the
+  // middle band is undecided. The first disagreement stops the check.
+  async crosscheckPaymentTerms(
+    terms: ValidatedTerm[],
+    options?: { signal?: AbortSignal },
+  ): Promise<CrosscheckOutcome> {
+    const requests = buildTermCrosscheckRequests(terms, this.model);
+    if (requests === undefined) {
+      return {
+        status: "failed",
+        reason: "schema_mismatch",
+        detail: "an extracted term lacks the texts its cross-check instruction needs",
+      };
+    }
+    const termFor = new Map(terms.map((t) => [`term_${t.id}`, t]));
+    const checks: JevCrosscheck[] = [];
+    for (const request of requests) {
+      const res = await this.post(request, options);
+      if (!res.ok) return { status: "failed", reason: res.reason, detail: res.detail };
+      if (res.model !== this.model) {
+        return {
+          status: "failed",
+          reason: "model_mismatch",
+          detail: `systemone answered with model ${res.model}, expected ${this.model}`,
+        };
+      }
+      for (const name of Object.keys(request.questions)) {
+        const term = termFor.get(name);
+        const noul = parseNoul(res.answers[name]);
+        if (term === undefined || noul === undefined) {
+          return {
+            status: "failed",
+            reason: "schema_mismatch",
+            detail: `systemone answers.${name} missing or not a noul answer`,
+          };
+        }
+        checks.push({
+          question: name,
+          noul,
+          model: res.model,
+          ...(res.usage !== undefined ? { usage: res.usage } : {}),
+        });
+        if (noul <= 0.2) {
+          return {
+            status: "mismatch",
+            checks,
+            detail: `Jev disagreed on ${term.id}: the extraction's restated clause was rejected (p = ${noul.toFixed(2)})`,
+          };
+        }
+        if (noul < this.threshold) {
+          return {
+            status: "uncertain",
+            checks,
+            detail: `Jev could not confirm ${term.id} (p = ${noul.toFixed(2)})`,
+          };
+        }
+      }
+    }
+    return { status: "pass", checks };
   }
 }
