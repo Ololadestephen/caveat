@@ -16,7 +16,7 @@ import type { SourceTuple } from "../evidence/recheck.ts";
 import { DECISION_SYSTEM_PROMPT } from "../interpret/prompt.ts";
 import {
   buildGateRequest,
-  buildReleaseTimingRequest,
+  buildReleaseTimingDigestInput,
   JEV_MODEL,
   JevDecisionProvider,
 } from "../interpret/jev.ts";
@@ -796,10 +796,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   // never be carried as a Jev one (and vice versa).
   const decisionCallDigest =
     typesafeConn !== undefined
-      ? digestValue({
-          provider: "typesafe",
-          request: buildReleaseTimingRequest(question, JEV_MODEL),
-        })
+      ? digestValue(buildReleaseTimingDigestInput(question, JEV_MODEL))
       : digestValue({
           schemaName: `${question.spec.id}_decision`,
           schema: decisionSchema(question.spec.actions),

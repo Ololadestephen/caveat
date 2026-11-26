@@ -84,11 +84,16 @@ export type JevChoiceResult = {
   probabilities: Record<string, number>;
 };
 
-export type JevInfo = {
-  provider: "typesafe";
+// One systemone request's answer: each question records the model that
+// answered it and that request's usage.
+export type JevQuestionResult = JevChoiceResult & {
   model: string;
   usage?: JevUsage;
-  questions: Record<string, JevChoiceResult>;
+};
+
+export type JevInfo = {
+  provider: "typesafe";
+  questions: Record<string, JevQuestionResult>;
 };
 
 // The Jev letter gate's recorded answer on clientReply.

@@ -7,12 +7,13 @@ import type {
   JevChoiceResult,
   JevGate,
   JevInfo,
+  JevQuestionResult,
   JevUsage,
   NeedsReviewReason,
   Question,
 } from "./types.ts";
 
-export type { JevChoiceResult, JevGate, JevInfo, JevUsage } from "./types.ts";
+export type { JevChoiceResult, JevGate, JevInfo, JevQuestionResult, JevUsage } from "./types.ts";
 
 // TypeSafe's Jev via the TypeSafeAI Sprites Connector. Jev is a decision
 // model, not chat: one POST /v1/systemone with {model, state, questions}; each
@@ -33,8 +34,16 @@ const RELEASE_TIMING_CRITERIA: Record<string, string> = {
     "Payment depends on a transaction event such as signing or closing a merger.",
   ambiguous: "The excerpts do not clearly support exactly one of these.",
 };
-const CITATION_INSTRUCTIONS =
-  "Which excerpt most directly states when the consultant receives the cash compensation, including the payment or release dates?";
+// The citation question is asked only after the decision, so its wording can
+// name the exact clause the decision relies on.
+const SOURCE_INSTRUCTIONS_BY_ACTION: Record<string, string> = {
+  cash_on_fixed_date:
+    "Which excerpt states the first calendar date on which cash is paid directly to the Consultant?",
+  escrow_release:
+    "Which excerpt states the date of the first release of escrowed money to the Consultant that does not depend on any extension or other condition?",
+  transaction_triggered:
+    "Which excerpt states the transaction event that triggers payment to the Consultant?",
+};
 const GATE_INSTRUCTIONS =
   "The letter proposes exactly one change to the payment terms.";
 export const JEV_GATE_QUESTION = "single_payment_change";
@@ -71,19 +80,22 @@ function excerptKeys(excerpts: Excerpt[]): string[] {
   return excerpts.map((_, i) => `e${i + 1}`);
 }
 
-// The release-timing request: two choice questions in one call — the action
-// and the excerpt that states it. Exported so the call digest covers exactly
-// this payload.
-export function buildReleaseTimingRequest(
-  question: Question,
-  model: string,
-): { model: string; state: unknown; questions: Record<string, unknown> } {
-  const sourceCriteria = Object.fromEntries(
-    question.excerpts.map((e, i) => [
+function sourceCriteria(excerpts: Excerpt[]): Record<string, string> {
+  return Object.fromEntries(
+    excerpts.map((e, i) => [
       `e${i + 1}`,
       `Excerpt e${i + 1} (${e.source.section ?? e.id})`,
     ]),
   );
+}
+
+// The release-timing request: one choice question. The citation is a second
+// request, asked only after a confident non-ambiguous answer, because the
+// right clause to cite depends on the chosen action.
+export function buildReleaseTimingRequest(
+  question: Question,
+  model: string,
+): { model: string; state: unknown; questions: Record<string, unknown> } {
   return {
     model,
     state: jevState(question.excerpts),
@@ -93,11 +105,50 @@ export function buildReleaseTimingRequest(
         instructions: RELEASE_TIMING_INSTRUCTIONS,
         criteria: { ...RELEASE_TIMING_CRITERIA },
       },
+    },
+  };
+}
+
+// The citation request for a decided action. Callers must pass one of the
+// criteria keys — the switch on timing.choice guards it before this is built.
+export function buildSourceRequest(
+  excerpts: Excerpt[],
+  action: string,
+  model: string,
+): { model: string; state: unknown; questions: Record<string, unknown> } {
+  const instructions = SOURCE_INSTRUCTIONS_BY_ACTION[action];
+  if (instructions === undefined) {
+    throw new Error(`no source instructions for action ${action}`);
+  }
+  return {
+    model,
+    state: jevState(excerpts),
+    questions: {
       release_timing_source: {
         type: "choice",
-        instructions: CITATION_INSTRUCTIONS,
-        criteria: sourceCriteria,
+        instructions,
+        criteria: sourceCriteria(excerpts),
       },
+    },
+  };
+}
+
+// What the release-timing call digest covers: both questions, with all three
+// action-specific citation instruction strings — the one actually sent
+// depends on the answer, so a matching digest must commit to all of them.
+export function buildReleaseTimingDigestInput(
+  question: Question,
+  model: string,
+): Record<string, unknown> {
+  return {
+    provider: "typesafe",
+    decisionRequest: buildReleaseTimingRequest(question, model),
+    sourceRequest: {
+      model,
+      state: jevState(question.excerpts),
+      question: "release_timing_source",
+      instructionsByAction: { ...SOURCE_INSTRUCTIONS_BY_ACTION },
+      criteria: sourceCriteria(question.excerpts),
     },
   };
 }
@@ -243,51 +294,76 @@ export class JevDecisionProvider implements DecisionProvider {
     }
 
     const keys = excerptKeys(question.excerpts);
+    // Each answered question lands here under its name, with the model and
+    // usage of the request that produced it.
+    const answered: Record<string, JevQuestionResult> = {};
+    const jev = (): JevInfo => ({ provider: "typesafe", questions: { ...answered } });
+    const record = (name: string, q: JevChoiceResult, res: { model: string; usage: JevUsage | undefined }): void => {
+      answered[name] = {
+        ...q,
+        model: res.model,
+        ...(res.usage !== undefined ? { usage: res.usage } : {}),
+      };
+    };
+
     const res = await this.post(buildReleaseTimingRequest(question, this.model), options);
     if (!res.ok) return fail(res.reason, res.detail);
     if (res.model !== this.model) {
       return fail("model_mismatch", `systemone answered with model ${res.model}, expected ${this.model}`);
     }
     const timing = parseChoice(res.answers.release_timing, Object.keys(RELEASE_TIMING_CRITERIA));
-    const source = parseChoice(res.answers.release_timing_source, keys);
-    if (timing === undefined || source === undefined) {
+    if (timing === undefined) {
       return fail(
         "schema_mismatch",
-        `systemone answers ${timing === undefined ? "release_timing" : "release_timing_source"} missing, not a choice answer, or named an unknown option`,
+        "systemone answers.release_timing missing, not a choice answer, or named an unknown option",
       );
     }
-    const jev: JevInfo = {
-      provider: "typesafe",
-      model: res.model,
-      ...(res.usage !== undefined ? { usage: res.usage } : {}),
-      questions: { release_timing: timing, release_timing_source: source },
-    };
+    record("release_timing", timing, res);
 
     if (timing.choice === "ambiguous") {
       return fail(
         "ambiguous",
         `Jev chose ambiguous (confidence ${timing.confidence.toFixed(2)})`,
-        { jev },
+        { jev: jev() },
       );
     }
     if (timing.confidence < this.threshold) {
       return fail(
         "low_confidence",
         `release_timing confidence ${timing.confidence.toFixed(2)} below ${this.threshold.toFixed(2)}`,
-        { jev },
+        { jev: jev() },
       );
     }
+
+    // The citation is a second request whose wording depends on the action.
+    const res2 = await this.post(
+      buildSourceRequest(question.excerpts, timing.choice, this.model),
+      options,
+    );
+    if (!res2.ok) return fail(res2.reason, res2.detail, { jev: jev() });
+    if (res2.model !== this.model) {
+      return fail("model_mismatch", `systemone answered with model ${res2.model}, expected ${this.model}`, { jev: jev() });
+    }
+    const source = parseChoice(res2.answers.release_timing_source, keys);
+    if (source === undefined) {
+      return fail(
+        "schema_mismatch",
+        "systemone answers.release_timing_source missing, not a choice answer, or named an unknown option",
+        { jev: jev() },
+      );
+    }
+    record("release_timing_source", source, res2);
     if (source.confidence < this.threshold) {
       return fail(
         "low_confidence",
         `release_timing_source confidence ${source.confidence.toFixed(2)} below ${this.threshold.toFixed(2)}`,
-        { jev },
+        { jev: jev() },
       );
     }
 
     const excerpt = question.excerpts[keys.indexOf(source.choice)];
     if (excerpt === undefined) {
-      return fail("schema_mismatch", `release_timing_source chose unknown key ${source.choice}`, { jev });
+      return fail("schema_mismatch", `release_timing_source chose unknown key ${source.choice}`, { jev: jev() });
     }
     return {
       status: "decided",
@@ -299,8 +375,8 @@ export class JevDecisionProvider implements DecisionProvider {
       },
       provider: this.name,
       model: res.model,
-      jev,
-      latencyMs: res.latencyMs,
+      jev: jev(),
+      latencyMs: res.latencyMs + res2.latencyMs,
     };
   }
 

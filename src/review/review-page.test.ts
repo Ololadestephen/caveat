@@ -846,8 +846,6 @@ describe("renderReviewPage — client reply", () => {
 describe("renderReviewPage — Jev", () => {
   const JEV = {
     provider: "typesafe" as const,
-    model: "jev-1.14.0",
-    usage: { input_tokens: 9, output_tokens: 2 },
     questions: {
       release_timing: {
         choice: "escrow_release",
@@ -858,11 +856,15 @@ describe("renderReviewPage — Jev", () => {
           transaction_triggered: 0.02,
           ambiguous: 0.01,
         },
+        model: "jev-1.14.0",
+        usage: { input_tokens: 9, output_tokens: 2 },
       },
       release_timing_source: {
         choice: "e1",
         confidence: 0.9,
         probabilities: { e1: 0.9, e2: 0.1 },
+        model: "jev-1.14.0",
+        usage: { input_tokens: 9, output_tokens: 2 },
       },
     },
   };
@@ -887,7 +889,7 @@ describe("renderReviewPage — Jev", () => {
       "Decided by Jev (jev-1.14.0) through the TypeSafeAI Connector",
     );
     expect(html).toContain("release_timing");
-    expect(html).toContain("release_timing_source");
+    expect(html).toContain("Source clause (asked after the decision)");
     expect(html).toContain("95.0%");
     expect(html).toContain("escrow_release (chosen)");
     expect(html).toContain("e1 (chosen)");

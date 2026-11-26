@@ -85,7 +85,15 @@ function servedByLine(servedBy: string | undefined): string {
 
 // "Decided by Jev (jev-1.14.0) through the TypeSafeAI Connector" plus a small
 // probability table per answered question; the chosen option is marked.
+const JEV_TABLE_LABELS: Record<string, string> = {
+  release_timing_source: "Source clause (asked after the decision)",
+};
+
 function jevBlock(jev: JevInfo): string {
+  const model =
+    jev.questions.release_timing?.model ??
+    Object.values(jev.questions)[0]?.model ??
+    "";
   const tables = Object.entries(jev.questions)
     .map(([name, q]) => {
       const rows = Object.entries(q.probabilities)
@@ -94,7 +102,7 @@ function jevBlock(jev: JevInfo): string {
             `    <tr${option === q.choice ? ' class="jev-chosen"' : ""}><td>${escapeHtml(option)}${option === q.choice ? " (chosen)" : ""}</td><td>${(p * 100).toFixed(1)}%</td></tr>`,
         )
         .join("\n");
-      return `  <h3>${escapeHtml(name)}</h3>
+      return `  <h3>${escapeHtml(JEV_TABLE_LABELS[name] ?? name)}</h3>
   <p class="caption">confidence ${q.confidence.toFixed(2)}</p>
   <table class="jev-probs">
     <tr><th>option</th><th>p</th></tr>
@@ -102,7 +110,7 @@ ${rows}
   </table>`;
     })
     .join("\n");
-  return `<p class="decision-jev">Decided by Jev (${escapeHtml(jev.model)}) through the TypeSafeAI Connector</p>
+  return `<p class="decision-jev">Decided by Jev${model === "" ? "" : ` (${escapeHtml(model)})`} through the TypeSafeAI Connector</p>
 ${tables}`;
 }
 

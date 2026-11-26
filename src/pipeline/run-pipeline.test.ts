@@ -249,10 +249,14 @@ function stubFetch(
       const kind =
         questions !== undefined && "release_timing" in questions
           ? "release_timing"
-          : questions !== undefined && "single_payment_change" in questions
-            ? "client_letter_gate"
-            : "other";
+          : questions !== undefined && "release_timing_source" in questions
+            ? "release_timing_source"
+            : questions !== undefined && "single_payment_change" in questions
+              ? "client_letter_gate"
+              : "other";
       opts.typesafe?.calls?.push(kind);
+      const decisionAnswers =
+        opts.typesafe?.decisionAnswers ?? JEV_DECIDED_ANSWERS;
       const answers =
         kind === "client_letter_gate"
           ? {
@@ -261,7 +265,7 @@ function stubFetch(
                 noul: opts.typesafe?.gateNoul ?? 0.95,
               },
             }
-          : (opts.typesafe?.decisionAnswers ?? JEV_DECIDED_ANSWERS);
+          : { [kind]: decisionAnswers[kind as keyof typeof decisionAnswers] };
       return Promise.resolve(
         jsonResponse({
           model: "jev-1.14.0",
@@ -1200,7 +1204,8 @@ describe("Jev provider", () => {
     expect(outcome?.model).toBe("jev-1.14.0");
     expect(outcome?.jev?.questions.release_timing?.choice).toBe("escrow_release");
     expect(outcome?.jev?.questions.release_timing_source?.choice).toBe("e1");
-    expect(outcome?.jev?.usage?.input_tokens).toBe(9);
+    expect(outcome?.jev?.questions.release_timing?.usage?.input_tokens).toBe(9);
+    expect(outcome?.jev?.questions.release_timing_source?.model).toBe("jev-1.14.0");
     if (outcome?.status === "decided") {
       expect(outcome.decision.action).toBe("escrow_release");
       expect(outcome.decision.cited_clause.excerpt_id).toBe(
@@ -1211,7 +1216,11 @@ describe("Jev provider", () => {
     }
     // No OpenRouter release_timing call was made at all.
     expect(chatCounts.release_timing_decision).toBeUndefined();
-    expect(calls).toEqual(["release_timing", "client_letter_gate"]);
+    expect(calls).toEqual([
+      "release_timing",
+      "release_timing_source",
+      "client_letter_gate",
+    ]);
     // The gate passed and was recorded; extraction stayed on OpenRouter.
     expect(r.clientReply?.status).toBe("safe");
     expect(r.clientReply?.gate?.noul).toBe(0.95);
@@ -1239,7 +1248,11 @@ describe("Jev provider", () => {
       "counter_not_single_change",
     );
     // The gate ran; the OpenRouter extraction never did.
-    expect(calls).toEqual(["release_timing", "client_letter_gate"]);
+    expect(calls).toEqual([
+      "release_timing",
+      "release_timing_source",
+      "client_letter_gate",
+    ]);
     expect(chatCounts.client_counter).toBeUndefined();
     expect(reply?.counter).toBeUndefined();
   });
