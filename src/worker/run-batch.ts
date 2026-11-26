@@ -51,7 +51,13 @@ async function readStdin(): Promise<string> {
 
 // stdin: {"jobs":[{"jobId","input"}]} — stdout: exactly one JSON line.
 async function main(): Promise<void> {
-  const request: unknown = JSON.parse(await readStdin());
+  let request: unknown;
+  try {
+    request = JSON.parse(await readStdin());
+  } catch {
+    process.stderr.write("expected stdin JSON {jobs:[{jobId,input}]}\n");
+    process.exit(2);
+  }
   const jobs =
     typeof request === "object" && request !== null && Array.isArray((request as { jobs?: unknown }).jobs)
       ? ((request as { jobs: BatchJob[] }).jobs)

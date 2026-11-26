@@ -27,7 +27,11 @@ const HEADER = "kind,date,amount_usd";
 const AMOUNT_RE = /^(\d{1,9})(?:\.(\d{2}))?$/;
 const NOTE = "Owner cash file my-cash.csv";
 
-function fail(line: number, code: CashFileCode, detail: string): CashFileResult {
+function failAt(
+  line: number,
+  code: CashFileCode,
+  detail: string,
+): { ok: false; line: number; code: CashFileCode; detail: string } {
   return { ok: false, line, code, detail };
 }
 
@@ -41,19 +45,72 @@ function parseAmount(text: string): number | null {
   return dollars * 100 + cents;
 }
 
+type ParsedRows =
+  | {
+      ok: true;
+      opening: { date: string; cents: number; line: number } | undefined;
+      floor: { cents: number } | undefined;
+      costs: { date: string; cents: number; line: number }[];
+    }
+  | { ok: false; line: number; code: CashFileCode; detail: string };
+
+// Each data row: field count, kind, date and amount, sorted into opening /
+// floor / costs. First failure wins, in file order.
+function parseRows(rows: { raw: string; line: number }[]): ParsedRows {
+  let opening: { date: string; cents: number; line: number } | undefined;
+  let floor: { cents: number } | undefined;
+  const costs: { date: string; cents: number; line: number }[] = [];
+
+  for (const row of rows.slice(1)) {
+    const fields = row.raw.split(",");
+    if (fields.length !== 3) {
+      return failAt(row.line, "bad_row", `expected 3 comma-separated fields, got ${fields.length}`);
+    }
+    const [kind, date, amount] = fields as [string, string, string];
+    if (kind !== "opening" && kind !== "floor" && kind !== "cost") {
+      return failAt(row.line, "bad_kind", `kind must be opening, floor or cost, got '${kind}'`);
+    }
+    if (kind === "floor") {
+      if (date !== "") {
+        return failAt(row.line, "bad_date", "a floor row must have an empty date");
+      }
+    } else if (!isValidDateString(date)) {
+      return failAt(row.line, "bad_date", `'${date}' is not a real YYYY-MM-DD date`);
+    }
+    const cents = parseAmount(amount);
+    if (cents === null) {
+      return failAt(row.line, "bad_amount", `'${amount}' is not an amount like "1234.56"`);
+    }
+    if (kind === "opening") {
+      if (opening !== undefined) {
+        return failAt(row.line, "duplicate_opening", "opening may appear exactly once");
+      }
+      opening = { date, cents, line: row.line };
+    } else if (kind === "floor") {
+      if (floor !== undefined) {
+        return failAt(row.line, "duplicate_floor", "floor may appear exactly once");
+      }
+      floor = { cents };
+    } else {
+      costs.push({ date, cents, line: row.line });
+    }
+  }
+  return { ok: true, opening, floor, costs };
+}
+
 // Parses the owner's cash file (kind,date,amount_usd rows) into the same
 // assumption shape the demo fixture provides. escrowFundingDate and
 // escrowFundingNote stay on the fallback: the funding date is a labelled
 // contract-timing assumption, not a cash number.
 export function parseCashFile(bytes: Uint8Array, fallback: TwinveeAssumptions): CashFileResult {
   if (bytes.byteLength > MAX_BYTES) {
-    return fail(0, "too_large", `file is ${bytes.byteLength} bytes; the limit is ${MAX_BYTES}`);
+    return failAt(0, "too_large", `file is ${bytes.byteLength} bytes; the limit is ${MAX_BYTES}`);
   }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    return fail(1, "bad_header", "file is not valid UTF-8");
+    return failAt(1, "bad_header", "file is not valid UTF-8");
   }
   const lines = text.split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
@@ -62,62 +119,37 @@ export function parseCashFile(bytes: Uint8Array, fallback: TwinveeAssumptions): 
     line: i + 1,
   }));
   if (rows.length === 0 || rows[0]!.raw !== HEADER) {
-    return fail(1, "bad_header", `the first line must be exactly '${HEADER}'`);
+    return failAt(1, "bad_header", `the first line must be exactly '${HEADER}'`);
   }
 
-  let opening: { date: string; cents: number; line: number } | undefined;
-  let floor: { cents: number } | undefined;
-  const costs: { date: string; cents: number; line: number }[] = [];
+  const parsed = parseRows(rows);
+  if (!parsed.ok) return parsed;
+  return buildCashAssumptions(parsed, rows.length, fallback);
+}
 
-  for (const row of rows.slice(1)) {
-    const fields = row.raw.split(",");
-    if (fields.length !== 3) {
-      return fail(row.line, "bad_row", `expected 3 comma-separated fields, got ${fields.length}`);
-    }
-    const [kind, date, amount] = fields as [string, string, string];
-    if (kind !== "opening" && kind !== "floor" && kind !== "cost") {
-      return fail(row.line, "bad_kind", `kind must be opening, floor or cost, got '${kind}'`);
-    }
-    if (kind === "floor") {
-      if (date !== "") {
-        return fail(row.line, "bad_date", "a floor row must have an empty date");
-      }
-    } else if (!isValidDateString(date)) {
-      return fail(row.line, "bad_date", `'${date}' is not a real YYYY-MM-DD date`);
-    }
-    const cents = parseAmount(amount);
-    if (cents === null) {
-      return fail(row.line, "bad_amount", `'${amount}' is not an amount like "1234.56"`);
-    }
-    if (kind === "opening") {
-      if (opening !== undefined) {
-        return fail(row.line, "duplicate_opening", "opening may appear exactly once");
-      }
-      opening = { date, cents, line: row.line };
-    } else if (kind === "floor") {
-      if (floor !== undefined) {
-        return fail(row.line, "duplicate_floor", "floor may appear exactly once");
-      }
-      floor = { cents };
-    } else {
-      costs.push({ date, cents, line: row.line });
-    }
-  }
+// Presence, range and ordering checks on the parsed rows, then the
+// assumptions record itself.
+function buildCashAssumptions(
+  parsed: Extract<ParsedRows, { ok: true }>,
+  totalLines: number,
+  fallback: TwinveeAssumptions,
+): CashFileResult {
+  const { opening, floor, costs } = parsed;
 
   if (opening === undefined) {
-    return fail(rows.length, "missing_opening", "the file has no opening row");
+    return failAt(totalLines, "missing_opening", "the file has no opening row");
   }
   if (floor === undefined) {
-    return fail(rows.length, "missing_floor", "the file has no floor row");
+    return failAt(totalLines, "missing_floor", "the file has no floor row");
   }
   if (costs.length === 0) {
-    return fail(rows.length, "no_costs", "the file has no cost rows");
+    return failAt(totalLines, "no_costs", "the file has no cost rows");
   }
   if (costs.length > MAX_COSTS) {
-    return fail(rows.length, "too_many_costs", `the file has ${costs.length} cost rows; the limit is ${MAX_COSTS}`);
+    return failAt(totalLines, "too_many_costs", `the file has ${costs.length} cost rows; the limit is ${MAX_COSTS}`);
   }
   if (dayNumber(opening.date) > dayNumber(fallback.escrowFundingDate)) {
-    return fail(
+    return failAt(
       opening.line,
       "opening_after_funding",
       `the opening date ${opening.date} is after the escrow funding date ${fallback.escrowFundingDate}`,
@@ -127,7 +159,7 @@ export function parseCashFile(bytes: Uint8Array, fallback: TwinveeAssumptions): 
   const rangeEnd = `${oy! + 2}-${String(om).padStart(2, "0")}-${String(od).padStart(2, "0")}`;
   for (const cost of costs) {
     if (dayNumber(cost.date) < dayNumber(opening.date) || dayNumber(cost.date) > dayNumber(rangeEnd)) {
-      return fail(
+      return failAt(
         cost.line,
         "cost_out_of_range",
         `cost on ${cost.date} must fall on or after the opening date ${opening.date} and within 24 months of it`,

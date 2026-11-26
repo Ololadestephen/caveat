@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import type { Server } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { pathToFileURL } from "node:url";
 
 import { isRecord } from "../shape.ts";
@@ -7,6 +7,47 @@ import { runBatchJobs } from "./run-batch.ts";
 import type { BatchJob } from "./run-batch.ts";
 
 const MAX_BODY_BYTES = 1024 * 1024;
+
+function handleRunBatch(req: IncomingMessage, res: ServerResponse): void {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let tooLarge = false;
+  req.on("data", (chunk: Buffer) => {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES && !tooLarge) {
+      tooLarge = true;
+      res.writeHead(413, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "request body too large" }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on("end", () => {
+    if (tooLarge) return;
+    let body: unknown;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "request body was not valid JSON" }));
+      return;
+    }
+    const jobs =
+      isRecord(body) &&
+      Array.isArray(body.jobs) &&
+      body.jobs.every((j) => isRecord(j) && typeof j.jobId === "string")
+        ? (body.jobs as BatchJob[])
+        : undefined;
+    if (jobs === undefined) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "expected JSON {jobs:[{jobId,input}]}" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(runBatchJobs(jobs)));
+  });
+}
 
 // The worker's only surface: a health check and the runner batch endpoint,
 // reached through the worker's org-private Sprite URL via its Custom API
@@ -23,44 +64,7 @@ export function createWorkerServer(): Server {
     }
 
     if (method === "POST" && path === "/run-batch") {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      let tooLarge = false;
-      req.on("data", (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > MAX_BODY_BYTES && !tooLarge) {
-          tooLarge = true;
-          res.writeHead(413, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "request body too large" }));
-          req.destroy();
-          return;
-        }
-        chunks.push(chunk);
-      });
-      req.on("end", () => {
-        if (tooLarge) return;
-        let body: unknown;
-        try {
-          body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        } catch {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "request body was not valid JSON" }));
-          return;
-        }
-        const jobs =
-          isRecord(body) &&
-          Array.isArray(body.jobs) &&
-          body.jobs.every((j) => isRecord(j) && typeof j.jobId === "string")
-            ? (body.jobs as BatchJob[])
-            : undefined;
-        if (jobs === undefined) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "expected JSON {jobs:[{jobId,input}]}" }));
-          return;
-        }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(runBatchJobs(jobs)));
-      });
+      handleRunBatch(req, res);
       return;
     }
 

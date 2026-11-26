@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { findFolderByName, listFolder } from "../evidence/box.ts";
 import { diffSourceTuple, recheckFolder } from "../evidence/recheck.ts";
-import type { SourceTuple } from "../evidence/recheck.ts";
+import type { RecheckOutcome, SourceTuple } from "../evidence/recheck.ts";
 import { listConnections } from "../gateway.ts";
 import type { Connection } from "../gateway.ts";
 import type { RunReceipt } from "../review/receipt.ts";
@@ -127,13 +127,142 @@ function listingMatchesTuple(
   return true;
 }
 
+// Listing check plus the full-bytes recheck. Returns the confirmed tuple when
+// the folder really changed; undefined ends the tick — lastResult and any
+// event are already written.
+async function confirmChange(
+  deps: WatcherDeps,
+  state: WatcherState,
+  fns: {
+    findFolder: NonNullable<WatcherDeps["findFolder"]>;
+    listItems: NonNullable<WatcherDeps["listFolderItems"]>;
+    recheck: NonNullable<WatcherDeps["recheck"]>;
+    box: Connection;
+  },
+): Promise<{ confirmed: SourceTuple; outcome: Extract<RecheckOutcome, { ok: true }> } | undefined> {
+  const { findFolder, listItems, recheck, box } = fns;
+  const folder = await findFolder(box.gatewayBaseUrl, "0", deps.boxFolder);
+  if (folder === undefined) {
+    state.lastResult = "box_unavailable";
+    recordEvent(deps, "unavailable", { detail: `folder ${deps.boxFolder} not found` });
+    return undefined;
+  }
+  const listing = await listItems(box.gatewayBaseUrl, folder.id, {
+    fields: POLL_FIELDS,
+  });
+
+  // A run that failed before reading Box stores an empty tuple; it must not
+  // become the baseline, or every listing would match it vacuously.
+  const latestRun = listRuns(deps.db).find(
+    (r) => (parseTuple(r.source_tuple_json)?.length ?? 0) > 0,
+  );
+  const latestTuple =
+    latestRun === undefined ? undefined : parseTuple(latestRun.source_tuple_json);
+  if (latestTuple !== undefined && listingMatchesTuple(listing, latestTuple)) {
+    state.lastResult = "no_change";
+    return undefined;
+  }
+
+  // The listing differs (or there is no baseline): confirm with full bytes.
+  const outcome = await recheck(
+    box.gatewayBaseUrl,
+    "0",
+    deps.boxFolder,
+    latestTuple ?? [],
+    { timeoutMs: deps.recheckTimeoutMs ?? 30_000 },
+  );
+  if (!outcome.ok) {
+    state.lastResult = "box_unavailable";
+    recordEvent(deps, "unavailable", { detail: outcome.detail });
+    return undefined;
+  }
+  const confirmed = outcome.tuple;
+
+  // Trigger only when the confirmed tuple differs from the latest run's —
+  // if the watcher's own run for this tuple already failed, do not retry it.
+  if (
+    latestTuple !== undefined &&
+    latestRun !== undefined &&
+    diffSourceTuple(latestTuple, confirmed).length === 0
+  ) {
+    state.lastResult = "no_change";
+    return undefined;
+  }
+  return { confirmed, outcome };
+}
+
+// Mark stale every run still holding a verdict whose tuple differs, then
+// record the change and start the run on the confirmed tuple.
+function startWatcherRun(
+  deps: WatcherDeps,
+  state: WatcherState,
+  confirmed: SourceTuple,
+  outcome: Extract<RecheckOutcome, { ok: true }>,
+): void {
+  for (const run of listRuns(deps.db)) {
+    if (
+      run.status !== "approved" &&
+      run.status !== "reviewable" &&
+      run.status !== "needs_review"
+    ) {
+      continue;
+    }
+    const runTuple = parseTuple(run.source_tuple_json);
+    if (runTuple === undefined) continue;
+    const changes = diffSourceTuple(runTuple, confirmed);
+    if (changes.length > 0) {
+      markStale(deps.db, run.id, JSON.stringify(changes));
+    }
+  }
+  recordEvent(deps, "changed", { changes: outcome.changes });
+  state.lastResult = "change_found";
+
+  // Baseline for incremental work: the most recent run whose stored receipt
+  // passed every gate and carries digests; see selectBaseline.
+  const previous = selectBaseline(deps.db);
+  const carrySources = selectCarrySources(deps.db);
+
+  const runId = deps.startRun({
+    trigger: "watcher",
+    sourceTuple: confirmed,
+    ...(previous !== undefined ? { previous } : {}),
+    carrySources,
+    onFinish: (status) => {
+      if (status === "failed") {
+        recordEvent(
+          deps,
+          "run_failed",
+          {
+            detail: "the watcher-started run failed; start a run manually to retry",
+          },
+          runId,
+        );
+      }
+    },
+  });
+  recordEvent(deps, "run_started", { changes: outcome.changes }, runId);
+}
+
 // One watcher tick. Exported for tests; startWatcher schedules it.
+// Dependency defaults for a tick — each is overridable in tests.
+function resolveDeps(deps: WatcherDeps): {
+  now: NonNullable<WatcherDeps["now"]>;
+  connections: NonNullable<WatcherDeps["connections"]>;
+  findFolder: NonNullable<WatcherDeps["findFolder"]>;
+  listItems: NonNullable<WatcherDeps["listFolderItems"]>;
+  recheck: NonNullable<WatcherDeps["recheck"]>;
+} {
+  return {
+    now: deps.now ?? (() => new Date()),
+    connections: deps.connections ?? listConnections,
+    findFolder: deps.findFolder ?? findFolderByName,
+    listItems: deps.listFolderItems ?? listFolder,
+    recheck: deps.recheck ?? recheckFolder,
+  };
+}
+
 export async function watchTick(deps: WatcherDeps, state: WatcherState): Promise<void> {
-  const now = deps.now ?? (() => new Date());
-  const connections = deps.connections ?? listConnections;
-  const findFolder = deps.findFolder ?? findFolderByName;
-  const listItems = deps.listFolderItems ?? listFolder;
-  const recheck = deps.recheck ?? recheckFolder;
+  const { now, connections, findFolder, listItems, recheck } = resolveDeps(deps);
   state.lastCheckedAt = now().toISOString();
 
   // A run in flight already holds the folder state in flux; do nothing.
@@ -151,97 +280,16 @@ export async function watchTick(deps: WatcherDeps, state: WatcherState): Promise
       return;
     }
 
-    const folder = await findFolder(box.gatewayBaseUrl, "0", deps.boxFolder);
-    if (folder === undefined) {
-      state.lastResult = "box_unavailable";
-      recordEvent(deps, "unavailable", { detail: `folder ${deps.boxFolder} not found` });
-      return;
-    }
-    const listing = await listItems(box.gatewayBaseUrl, folder.id, {
-      fields: POLL_FIELDS,
+    const change = await confirmChange(deps, state, {
+      findFolder,
+      listItems,
+      recheck,
+      box,
     });
+    if (change === undefined) return;
+    const { confirmed, outcome } = change;
 
-    // A run that failed before reading Box stores an empty tuple; it must not
-    // become the baseline, or every listing would match it vacuously.
-    const latestRun = listRuns(deps.db).find(
-      (r) => (parseTuple(r.source_tuple_json)?.length ?? 0) > 0,
-    );
-    const latestTuple =
-      latestRun === undefined ? undefined : parseTuple(latestRun.source_tuple_json);
-    if (latestTuple !== undefined && listingMatchesTuple(listing, latestTuple)) {
-      state.lastResult = "no_change";
-      return;
-    }
-
-    // The listing differs (or there is no baseline): confirm with full bytes.
-    const outcome = await recheck(
-      box.gatewayBaseUrl,
-      "0",
-      deps.boxFolder,
-      latestTuple ?? [],
-      { timeoutMs: deps.recheckTimeoutMs ?? 30_000 },
-    );
-    if (!outcome.ok) {
-      state.lastResult = "box_unavailable";
-      recordEvent(deps, "unavailable", { detail: outcome.detail });
-      return;
-    }
-    const confirmed = outcome.tuple;
-
-    // Trigger only when the confirmed tuple differs from the latest run's —
-    // if the watcher's own run for this tuple already failed, do not retry it.
-    if (
-      latestTuple !== undefined &&
-      latestRun !== undefined &&
-      diffSourceTuple(latestTuple, confirmed).length === 0
-    ) {
-      state.lastResult = "no_change";
-      return;
-    }
-
-    // Mark stale every run still holding a verdict whose tuple differs.
-    for (const run of listRuns(deps.db)) {
-      if (
-        run.status !== "approved" &&
-        run.status !== "reviewable" &&
-        run.status !== "needs_review"
-      ) {
-        continue;
-      }
-      const runTuple = parseTuple(run.source_tuple_json);
-      if (runTuple === undefined) continue;
-      const changes = diffSourceTuple(runTuple, confirmed);
-      if (changes.length > 0) {
-        markStale(deps.db, run.id, JSON.stringify(changes));
-      }
-    }
-    recordEvent(deps, "changed", { changes: outcome.changes });
-    state.lastResult = "change_found";
-
-    // Baseline for incremental work: the most recent run whose stored receipt
-    // passed every gate and carries digests; see selectBaseline.
-    const previous = selectBaseline(deps.db);
-    const carrySources = selectCarrySources(deps.db);
-
-    const runId = deps.startRun({
-      trigger: "watcher",
-      sourceTuple: confirmed,
-      ...(previous !== undefined ? { previous } : {}),
-      carrySources,
-      onFinish: (status) => {
-        if (status === "failed") {
-          recordEvent(
-            deps,
-            "run_failed",
-            {
-              detail: "the watcher-started run failed; start a run manually to retry",
-            },
-            runId,
-          );
-        }
-      },
-    });
-    recordEvent(deps, "run_started", { changes: outcome.changes }, runId);
+    startWatcherRun(deps, state, confirmed, outcome);
   } catch (error) {
     state.lastResult = "error";
     recordEvent(deps, "error", {
@@ -256,6 +304,20 @@ export type Watcher = {
   stop: () => void;
 };
 
+// Runs one tick unless one is already in flight; the interval keeps firing
+// even while a slow tick is still running, so re-entry is guarded here.
+function fireTick(
+  deps: WatcherDeps,
+  state: WatcherState,
+  tick: { ticking: boolean },
+): void {
+  if (tick.ticking) return;
+  tick.ticking = true;
+  void watchTick(deps, state).finally(() => {
+    tick.ticking = false;
+  });
+}
+
 // First tick ~5 s after start, then every interval. intervalMs 0 disables the
 // watcher entirely (an inert object is returned so the UI can still read it).
 export function startWatcher(deps: WatcherDeps): Watcher {
@@ -263,14 +325,8 @@ export function startWatcher(deps: WatcherDeps): Watcher {
   if (deps.intervalMs <= 0) {
     return { state, stop: () => {} };
   }
-  let ticking = false;
-  const fire = (): void => {
-    if (ticking) return;
-    ticking = true;
-    void watchTick(deps, state).finally(() => {
-      ticking = false;
-    });
-  };
+  const tick = { ticking: false };
+  const fire = (): void => fireTick(deps, state, tick);
   const first = setTimeout(fire, 5_000);
   const interval = setInterval(fire, deps.intervalMs);
   first.unref();

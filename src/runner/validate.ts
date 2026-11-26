@@ -10,13 +10,13 @@ export class RunInputError extends Error {
   }
 }
 
-function fail(path: string, message: string): never {
+function failInput(path: string, message: string): never {
   throw new RunInputError(path, message);
 }
 
 function asObject(value: unknown, path: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    fail(path, "expected an object");
+    failInput(path, "expected an object");
   }
   return value as Record<string, unknown>;
 }
@@ -27,7 +27,7 @@ function rejectUnknownKeys(
   path: string,
 ): void {
   for (const key of Object.keys(obj)) {
-    if (!allowed.includes(key)) fail(path ? `${path}.${key}` : key, "unknown field");
+    if (!allowed.includes(key)) failInput(path ? `${path}.${key}` : key, "unknown field");
   }
 }
 
@@ -35,7 +35,7 @@ function reqString(obj: Record<string, unknown>, key: string, path: string): str
   const value = obj[key];
   const field = path ? `${path}.${key}` : key;
   if (typeof value !== "string" || value.length === 0) {
-    fail(field, "expected a non-empty string");
+    failInput(field, "expected a non-empty string");
   }
   return value;
 }
@@ -49,7 +49,7 @@ function optString(
   const field = path ? `${path}.${key}` : key;
   if (value === undefined) return undefined;
   if (typeof value !== "string" || value.length === 0) {
-    fail(field, "expected a non-empty string");
+    failInput(field, "expected a non-empty string");
   }
   return value;
 }
@@ -58,7 +58,7 @@ function reqCount(obj: Record<string, unknown>, key: string, path: string): numb
   const value = obj[key];
   const field = path ? `${path}.${key}` : key;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    fail(field, "expected a non-negative integer");
+    failInput(field, "expected a non-negative integer");
   }
   return value;
 }
@@ -72,13 +72,13 @@ function reqDate(obj: Record<string, unknown>, key: string, path: string): strin
   const value = obj[key];
   const field = path ? `${path}.${key}` : key;
   if (typeof value !== "string" || !isValidDateString(value)) {
-    fail(field, "expected a valid YYYY-MM-DD calendar date");
+    failInput(field, "expected a valid YYYY-MM-DD calendar date");
   }
   return value;
 }
 
 function validateCosts(value: unknown, path: string): CostInput[] {
-  if (!Array.isArray(value)) fail(path, "expected an array");
+  if (!Array.isArray(value)) failInput(path, "expected an array");
   const seen = new Set<string>();
   const costs: CostInput[] = [];
   value.forEach((item, i) => {
@@ -86,7 +86,7 @@ function validateCosts(value: unknown, path: string): CostInput[] {
     const obj = asObject(item, p);
     rejectUnknownKeys(obj, ["id", "date", "amountCents"], p);
     const id = reqString(obj, "id", p);
-    if (seen.has(id)) fail(`${p}.id`, `duplicate id "${id}"`);
+    if (seen.has(id)) failInput(`${p}.id`, `duplicate id "${id}"`);
     seen.add(id);
     costs.push({ id, date: reqDate(obj, "date", p), amountCents: reqCount(obj, "amountCents", p) });
   });
@@ -132,7 +132,7 @@ function validateRule(item: unknown, path: string): PaymentRule {
       return rule;
     }
     default:
-      return fail(`${path}.kind`, `unknown payment rule kind ${JSON.stringify(kind)}`);
+      return failInput(`${path}.kind`, `unknown payment rule kind ${JSON.stringify(kind)}`);
   }
 }
 
@@ -142,12 +142,12 @@ function validateCandidate(item: unknown, path: string): Candidate {
   const id = reqString(obj, "id", path);
   const rankCents = reqCount(obj, "rankCents", path);
   const totalCents = reqCount(obj, "totalCents", path);
-  if (!Array.isArray(obj.paymentRules)) fail(`${path}.paymentRules`, "expected an array");
+  if (!Array.isArray(obj.paymentRules)) failInput(`${path}.paymentRules`, "expected an array");
   const seen = new Set<string>();
   const paymentRules = (obj.paymentRules as unknown[]).map((rule, i) => {
     const validated = validateRule(rule, `${path}.paymentRules[${i}]`);
     if (seen.has(validated.id)) {
-      fail(`${path}.paymentRules[${i}].id`, `duplicate id "${validated.id}"`);
+      failInput(`${path}.paymentRules[${i}].id`, `duplicate id "${validated.id}"`);
     }
     seen.add(validated.id);
     return validated;
@@ -160,7 +160,7 @@ function validateCandidate(item: unknown, path: string): Candidate {
     )
     .reduce((sum, rule) => sum + rule.amountCents, 0);
   if (receivable !== totalCents) {
-    fail(
+    failInput(
       `${path}.totalCents`,
       `payment and escrow_deposit amounts sum to ${receivable}, expected totalCents ${totalCents}`,
     );
@@ -172,7 +172,7 @@ function validateCandidate(item: unknown, path: string): Candidate {
   const releases = paymentRules.filter((rule) => rule.kind === "escrow_release");
   const releaseSum = releases.reduce((sum, rule) => sum + rule.amountCents, 0);
   if (depositSum !== releaseSum) {
-    fail(
+    failInput(
       `${path}.paymentRules`,
       `escrow_release amounts sum to ${releaseSum}, escrow_deposit amounts sum to ${depositSum}`,
     );
@@ -182,7 +182,7 @@ function validateCandidate(item: unknown, path: string): Candidate {
     const firstDeposit = Math.min(...deposits.map((rule) => dayNumber(rule.date)));
     for (const release of releases) {
       if (dayNumber(release.date) < firstDeposit) {
-        fail(
+        failInput(
           `${path}.paymentRules`,
           `escrow_release "${release.id}" dated ${release.date} precedes the first escrow deposit`,
         );
@@ -204,11 +204,11 @@ function validateScenario(item: unknown, path: string): Scenario {
     obj.extraCosts === undefined ? [] : validateCosts(obj.extraCosts, `${path}.extraCosts`);
   const granted = obj.extensionsGranted;
   if (granted !== undefined && !Array.isArray(granted)) {
-    fail(`${path}.extensionsGranted`, "expected an array");
+    failInput(`${path}.extensionsGranted`, "expected an array");
   }
   const extensionsGranted = ((granted ?? []) as unknown[]).map((entry, i) => {
     if (typeof entry !== "string" || entry.length === 0) {
-      fail(`${path}.extensionsGranted[${i}]`, "expected a non-empty string");
+      failInput(`${path}.extensionsGranted[${i}]`, "expected a non-empty string");
     }
     return entry;
   });
@@ -253,7 +253,7 @@ export function validateRunInput(raw: unknown): RunInput {
   if (obj.demoAssumptions !== undefined) {
     for (const key of ["openingCents", "floorCents", "costs"]) {
       if (obj[key] !== undefined) {
-        fail(key, "must be set inside demoAssumptions, not at top level");
+        failInput(key, "must be set inside demoAssumptions, not at top level");
       }
     }
     const demo = asObject(obj.demoAssumptions, "demoAssumptions");
@@ -269,17 +269,17 @@ export function validateRunInput(raw: unknown): RunInput {
   }
   const costIds = new Set(costs.map((cost) => cost.id));
 
-  if (!Array.isArray(obj.candidates)) fail("candidates", "expected an array");
+  if (!Array.isArray(obj.candidates)) failInput("candidates", "expected an array");
   const candidates = (obj.candidates as unknown[]).map((cand, i) =>
     validateCandidate(cand, `candidates[${i}]`),
   );
   const candidateIds = new Set<string>();
   for (const cand of candidates) {
-    if (candidateIds.has(cand.id)) fail("candidates", `duplicate candidate id "${cand.id}"`);
+    if (candidateIds.has(cand.id)) failInput("candidates", `duplicate candidate id "${cand.id}"`);
     candidateIds.add(cand.id);
     for (const rule of cand.paymentRules) {
       if (costIds.has(rule.id)) {
-        fail(
+        failInput(
           "candidates",
           `payment rule id "${rule.id}" on candidate "${cand.id}" duplicates a cost id`,
         );
@@ -287,17 +287,17 @@ export function validateRunInput(raw: unknown): RunInput {
     }
   }
 
-  if (!Array.isArray(obj.scenarios)) fail("scenarios", "expected an array");
+  if (!Array.isArray(obj.scenarios)) failInput("scenarios", "expected an array");
   const scenarios = (obj.scenarios as unknown[]).map((scen, i) =>
     validateScenario(scen, `scenarios[${i}]`),
   );
   const scenarioIds = new Set<string>();
   for (const scen of scenarios) {
-    if (scenarioIds.has(scen.id)) fail("scenarios", `duplicate scenario id "${scen.id}"`);
+    if (scenarioIds.has(scen.id)) failInput("scenarios", `duplicate scenario id "${scen.id}"`);
     scenarioIds.add(scen.id);
     for (const extra of scen.extraCosts) {
       if (costIds.has(extra.id)) {
-        fail(
+        failInput(
           `scenarios.${scen.id}.extraCosts`,
           `extra cost id "${extra.id}" duplicates a cost id`,
         );
@@ -306,7 +306,7 @@ export function validateRunInput(raw: unknown): RunInput {
     for (const cand of candidates) {
       for (const rule of cand.paymentRules) {
         if (scen.extraCosts.some((extra) => extra.id === rule.id)) {
-          fail(
+          failInput(
             `scenarios.${scen.id}.extraCosts`,
             `extra cost id "${rule.id}" duplicates a payment rule id on candidate "${cand.id}"`,
           );
@@ -315,17 +315,17 @@ export function validateRunInput(raw: unknown): RunInput {
     }
   }
 
-  if (!Array.isArray(obj.passingScenarios)) fail("passingScenarios", "expected an array");
+  if (!Array.isArray(obj.passingScenarios)) failInput("passingScenarios", "expected an array");
   const passingSeen = new Set<string>();
   const passingScenarios = (obj.passingScenarios as unknown[]).map((entry, i) => {
     if (typeof entry !== "string" || entry.length === 0) {
-      fail(`passingScenarios[${i}]`, "expected a non-empty string");
+      failInput(`passingScenarios[${i}]`, "expected a non-empty string");
     }
     if (!scenarioIds.has(entry)) {
-      fail(`passingScenarios[${i}]`, `unknown scenario id "${entry}"`);
+      failInput(`passingScenarios[${i}]`, `unknown scenario id "${entry}"`);
     }
     if (passingSeen.has(entry)) {
-      fail(`passingScenarios[${i}]`, `duplicate scenario id "${entry}"`);
+      failInput(`passingScenarios[${i}]`, `duplicate scenario id "${entry}"`);
     }
     passingSeen.add(entry);
     return entry;

@@ -152,6 +152,34 @@ export function validateClientCounter(
   if (topError !== undefined) return invalid("schema_mismatch", topError);
   const raw = parsed as unknown as RawCounter;
 
+  const readableError = checkReadable(raw);
+  if (readableError !== undefined) return readableError;
+  const lever = raw.lever as Lever;
+
+  const chain = checkVerbatimChain(raw, excerpts);
+  if ("reason" in chain) return chain;
+  const { excerpt } = chain;
+
+  const spec = TEXT_FIELD_SPECS[lever];
+  const fieldError = checkFieldSpec(raw, lever, spec);
+  if (fieldError !== undefined) return fieldError;
+
+  const parsed_ = parseCounterFields(raw, lever, spec);
+  if ("reason" in parsed_) return parsed_;
+  const { candidate } = parsed_;
+
+  const confidenceError = checkConfidence(raw, threshold);
+  if (confidenceError !== undefined) return confidenceError;
+
+  return {
+    ok: true,
+    candidate,
+    citation: { excerptId: raw.excerpt_id as string, quote: raw.quote as string, page: excerpt.page },
+  };
+}
+
+// The unreadable exit and the lever check — in that order.
+function checkReadable(raw: RawCounter): Invalid | undefined {
   if (raw.readable === false) {
     return invalid(
       "counter_unreadable",
@@ -166,9 +194,16 @@ export function validateClientCounter(
   if (typeof raw.lever !== "string" || !LEVERS.includes(raw.lever as Lever)) {
     return invalid("schema_mismatch", "lever must be one of the four levers when readable");
   }
-  const lever = raw.lever as Lever;
-  const excerptById = new Map(excerpts.map((e, index) => [e.id, { index, text: e.text, page: e.source.page }]));
+  return undefined;
+}
 
+// The verbatim chain: excerpt_id names a supplied excerpt, quote is verbatim
+// in it, and every non-null text field is verbatim within the quote.
+function checkVerbatimChain(
+  raw: RawCounter,
+  excerpts: Excerpt[],
+): Invalid | { excerpt: { index: number; text: string; page: number } } {
+  const excerptById = new Map(excerpts.map((e, index) => [e.id, { index, text: e.text, page: e.source.page }]));
   if (typeof raw.excerpt_id !== "string" || raw.excerpt_id.length === 0) {
     return invalid("schema_mismatch", "excerpt_id must be a non-empty string");
   }
@@ -195,8 +230,15 @@ export function validateClientCounter(
       return invalid("quote_not_verbatim", `${field} is not verbatim within the quote`);
     }
   }
+  return { excerpt };
+}
 
-  const spec = TEXT_FIELD_SPECS[lever];
+// The field set for the lever: required fields non-null, disallowed fields null.
+function checkFieldSpec(
+  raw: RawCounter,
+  lever: Lever,
+  spec: (typeof TEXT_FIELD_SPECS)[Lever],
+): Invalid | undefined {
   for (const field of spec.required) {
     if (raw[field as keyof RawCounter] === null) {
       return invalid("missing_field", `${lever} requires ${field}`);
@@ -207,7 +249,15 @@ export function validateClientCounter(
       return invalid("unexpected_field", `${lever} does not take ${field}`);
     }
   }
+  return undefined;
+}
 
+// The field formats: each allowed text field parses to its typed value.
+function parseCounterFields(
+  raw: RawCounter,
+  lever: Lever,
+  spec: (typeof TEXT_FIELD_SPECS)[Lever],
+): Invalid | { candidate: ProposedCandidate } {
   const candidate: ProposedCandidate = {
     lever,
     amount_cents: null,
@@ -256,7 +306,11 @@ export function validateClientCounter(
     }
     candidate.net_days = days;
   }
+  return { candidate };
+}
 
+// The confidence gate: a number in [0,1] at or above the threshold.
+function checkConfidence(raw: RawCounter, threshold: number): Invalid | undefined {
   const confidence = raw.confidence;
   if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
     return invalid("schema_mismatch", "confidence must be a number between 0 and 1");
@@ -267,12 +321,7 @@ export function validateClientCounter(
       `self-reported confidence ${confidence} is below threshold ${threshold}`,
     );
   }
-
-  return {
-    ok: true,
-    candidate,
-    citation: { excerptId: raw.excerpt_id, quote: raw.quote, page: excerpt.page },
-  };
+  return undefined;
 }
 
 export class OpenRouterClientCounterExtractor {

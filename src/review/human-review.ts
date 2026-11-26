@@ -86,7 +86,7 @@ function sectionTexts(
     .map((s) => s.text);
 }
 
-function invalid(detail: string): ReviewValidation<never> {
+function invalidReview(detail: string): ReviewValidation<never> {
   return { ok: false, reason: "review_citation_invalid", detail };
 }
 
@@ -153,44 +153,44 @@ export function validateRetainerReview(
   raw: unknown,
   sections: Sections,
 ): ReviewValidation<RetainerReview> {
-  if (!isRecord(raw)) return invalid("retainer review is not a JSON object");
+  if (!isRecord(raw)) return invalidReview("retainer review is not a JSON object");
   const questionId = reqString(raw, "questionId");
   const reviewer = reqString(raw, "reviewer");
   const reviewedAt = reqString(raw, "reviewedAt");
   if (questionId === undefined || reviewer === undefined || reviewedAt === undefined) {
-    return invalid("questionId, reviewer and reviewedAt must be non-empty strings");
+    return invalidReview("questionId, reviewer and reviewedAt must be non-empty strings");
   }
 
   const base = raw.baseRetainer;
-  if (!isRecord(base)) return invalid("baseRetainer must be an object");
+  if (!isRecord(base)) return invalidReview("baseRetainer must be an object");
   const baseAnswer = reqString(base, "answer");
-  if (baseAnswer === undefined) return invalid("baseRetainer.answer must be a non-empty string");
+  if (baseAnswer === undefined) return invalidReview("baseRetainer.answer must be a non-empty string");
   const baseCitations = parseCitations(base.citations, "baseRetainer.citations", sections);
-  if ("error" in baseCitations) return invalid(baseCitations.error);
+  if ("error" in baseCitations) return invalidReview(baseCitations.error);
 
   let continuesReading: RetainerReview["baseRetainer"]["continuesReading"];
   if (base.continuesReading !== undefined) {
     if (!isRecord(base.continuesReading)) {
-      return invalid("baseRetainer.continuesReading must be an object");
+      return invalidReview("baseRetainer.continuesReading must be an object");
     }
     const amount = parseReadingCitation(
       base.continuesReading.amount,
       "baseRetainer.continuesReading.amount",
       sections,
     );
-    if ("error" in amount) return invalid(amount.error);
+    if ("error" in amount) return invalidReview(amount.error);
     const payDay = parseReadingCitation(
       base.continuesReading.payDay,
       "baseRetainer.continuesReading.payDay",
       sections,
     );
-    if ("error" in payDay) return invalid(payDay.error);
+    if ("error" in payDay) return invalidReview(payDay.error);
     const termEnd = parseReadingCitation(
       base.continuesReading.termEnd,
       "baseRetainer.continuesReading.termEnd",
       sections,
     );
-    if ("error" in termEnd) return invalid(termEnd.error);
+    if ("error" in termEnd) return invalidReview(termEnd.error);
     continuesReading = {
       amount: amount.citation,
       payDay: payDay.citation,
@@ -199,29 +199,29 @@ export function validateRetainerReview(
   }
 
   const first = raw.firstAmendmentPay;
-  if (!isRecord(first)) return invalid("firstAmendmentPay must be an object");
+  if (!isRecord(first)) return invalidReview("firstAmendmentPay must be an object");
   const firstAnswer = reqString(first, "answer");
-  if (firstAnswer === undefined) return invalid("firstAmendmentPay.answer must be a non-empty string");
+  if (firstAnswer === undefined) return invalidReview("firstAmendmentPay.answer must be a non-empty string");
   const firstCitations = parseCitations(
     first.citations,
     "firstAmendmentPay.citations",
     sections,
   );
-  if ("error" in firstCitations) return invalid(firstCitations.error);
+  if ("error" in firstCitations) return invalidReview(firstCitations.error);
 
   const baseNote = optString(base, "note");
   const firstCash = optString(first, "cashEffectInWindow");
   const firstNote = optString(first, "note");
   const revisionNote = optString(raw, "revisionNote");
   if (!baseNote.ok || !firstCash.ok || !firstNote.ok || !revisionNote.ok) {
-    return invalid("note, cashEffectInWindow and revisionNote must be non-empty strings when present");
+    return invalidReview("note, cashEffectInWindow and revisionNote must be non-empty strings when present");
   }
   const revision = raw.revision;
   if (
     revision !== undefined &&
     (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1)
   ) {
-    return invalid("revision must be a positive integer when present");
+    return invalidReview("revision must be a positive integer when present");
   }
 
   return {
@@ -254,7 +254,7 @@ export function validateSourcedOverride(
   raw: unknown,
   sections: Sections,
 ): ReviewValidation<SourcedOverride> {
-  if (!isRecord(raw)) return invalid("override is not a JSON object");
+  if (!isRecord(raw)) return invalidReview("override is not a JSON object");
   const questionId = reqString(raw, "questionId");
   const answer = reqString(raw, "answer");
   const reviewer = reqString(raw, "reviewer");
@@ -265,10 +265,10 @@ export function validateSourcedOverride(
     reviewer === undefined ||
     reviewedAt === undefined
   ) {
-    return invalid("questionId, answer, reviewer and reviewedAt must be non-empty strings");
+    return invalidReview("questionId, answer, reviewer and reviewedAt must be non-empty strings");
   }
   const citations = parseCitations(raw.citations, "citations", sections);
-  if ("error" in citations) return invalid(citations.error);
+  if ("error" in citations) return invalidReview(citations.error);
   return {
     ok: true,
     value: { questionId, answer, citations: citations.citations, reviewer, reviewedAt },
