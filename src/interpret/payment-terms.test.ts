@@ -29,19 +29,6 @@ function excerpts(): Excerpt[] {
   ];
 }
 
-function term(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    kind: "fixed_date_payment",
-    amount_text: "$5,000.00",
-    date_text: "the last day of the invoiced month",
-    recurrence_text: "per month",
-    net_days_text: null,
-    excerpt_id: "02.pdf#§3.1",
-    quote: "pay Consultant $5,000.00 per month.",
-    ...overrides,
-  };
-}
-
 // The four Aviat terms plus the term bounds, all verbatim.
 function aviatParsed(): Record<string, unknown> {
   return {
