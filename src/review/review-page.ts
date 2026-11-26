@@ -40,20 +40,21 @@ const WEEKDAY_NAMES = [
 ];
 
 // "2027-01-02" → "January 2, 2027"
-function formatDate(iso: string): string {
+export function formatDate(iso: string): string {
   const [year, month, day] = iso.split("-");
   return `${MONTH_NAMES[Number(month) - 1]} ${Number(day)}, ${year}`;
 }
 
-function weekdayName(iso: string): string {
+export function weekdayName(iso: string): string {
   return WEEKDAY_NAMES[weekday(dayNumber(iso))] ?? "";
 }
 
 function formatCents(cents: number): string {
-  const dollars = Math.floor(cents / 100);
-  const rest = String(Math.abs(cents % 100)).padStart(2, "0");
+  const abs = Math.abs(cents);
+  const dollars = Math.floor(abs / 100);
+  const rest = String(abs % 100).padStart(2, "0");
   const grouped = String(dollars).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `$${grouped}.${rest}`;
+  return `${cents < 0 ? "-" : ""}$${grouped}.${rest}`;
 }
 
 const MONTH_ABBR = [
@@ -72,16 +73,17 @@ const MONTH_ABBR = [
 ];
 
 // "2026-12-15" → "Dec 15, 2026"
-function formatDateShort(iso: string): string {
+export function formatDateShort(iso: string): string {
   const [year, month, day] = iso.split("-");
   return `${MONTH_ABBR[Number(month) - 1]} ${Number(day)}, ${year}`;
 }
 
 // $8,000 whole dollars, else $8,000.50 — headline phrasing drops the cents.
-function formatMoneyShort(cents: number): string {
-  const grouped = String(Math.floor(cents / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  const rest = cents % 100;
-  return rest === 0 ? `$${grouped}` : `$${grouped}.${String(rest).padStart(2, "0")}`;
+export function formatMoneyShort(cents: number): string {
+  const abs = Math.abs(cents);
+  const grouped = String(Math.floor(abs / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const rest = abs % 100;
+  return `${cents < 0 ? "-" : ""}$${grouped}${rest === 0 ? "" : `.${String(rest).padStart(2, "0")}`}`;
 }
 
 function excerptFor(excerpts: readonly Excerpt[], excerptId: string): Excerpt | undefined {
@@ -104,7 +106,7 @@ const INCREMENTAL_LABELS: Record<string, string> = {
 
 // The "What changed in Box" section — only on runs that were based on a
 // previous run (the watcher's incremental reruns).
-function renderIncremental(receipt: RunReceipt): string {
+export function renderIncremental(receipt: RunReceipt): string {
   const inc = receipt.incremental;
   if (inc === undefined) return "";
 
@@ -157,7 +159,7 @@ function renderIncremental(receipt: RunReceipt): string {
 </section>`;
 }
 
-function renderSources(receipt: RunReceipt): string {
+export function renderSources(receipt: RunReceipt): string {
   const items = receipt.sources
     .map((s) => {
       const link =
@@ -272,6 +274,7 @@ function renderHumanReview(receipt: RunReceipt): string {
   <p>The review record is invalid: ${escapeHtml(hr.reason)} — ${escapeHtml(hr.detail)}</p>
 </section>`;
   }
+  if (hr.status === "not_applicable") return "";
   const { review } = hr;
   const base = review.baseRetainer;
   const revisionPart =
@@ -312,7 +315,7 @@ ${firstNote}${citationLines(first.citations)}
 ${revisionNote}</section>`;
 }
 
-function renderFlags(receipt: RunReceipt): string {
+export function renderFlags(receipt: RunReceipt): string {
   if (receipt.flags.length === 0) {
     return `<section class="flags">
   <h2>Flags</h2>
@@ -348,7 +351,7 @@ function scenarioRows(results: Record<string, ScenarioResult>): string {
     .join("\n");
 }
 
-function renderReading(reading: ReceiptReading): string {
+export function renderReading(reading: ReceiptReading): string {
   const passing =
     reading.smallestPassingCandidate === null
       ? "none"
@@ -368,7 +371,7 @@ ${rows}
 </article>`;
 }
 
-function renderResults(receipt: RunReceipt): string {
+export function renderResults(receipt: RunReceipt): string {
   if (receipt.status !== "reviewable" || receipt.readings.length === 0) {
     return `<section class="results">
   <h2>Results</h2>
@@ -381,7 +384,7 @@ ${receipt.readings.map(renderReading).join("\n")}
 </section>`;
 }
 
-function renderPolicyNotes(receipt: RunReceipt): string {
+export function renderPolicyNotes(receipt: RunReceipt): string {
   const items: string[] = [];
   for (const reading of receipt.readings) {
     for (const { scenarioId, adjustments } of reading.adjustments) {
@@ -439,7 +442,7 @@ function renderHeadline(receipt: RunReceipt): string {
 <span class="caption">Reading: ${escapeHtml(worst.label)} (one of two unresolved readings). ${cashCaption}</span></p>`;
 }
 
-function renderCashNumbers(receipt: RunReceipt): string {
+export function renderCashNumbers(receipt: RunReceipt): string {
   const a = receipt.assumptions;
   if (receipt.cashSource?.kind === "owner_file_invalid") {
     const cash = receipt.cashSource;

@@ -2,6 +2,7 @@ import { isRecord } from "../shape.ts";
 import type { DecisionProvider } from "./provider.ts";
 import { RELEASE_TIMING } from "./types.ts";
 import type { ValidatedRelease } from "./schedule.ts";
+import type { ValidatedTerm } from "./payment-terms.ts";
 import type { ClientCounterTexts } from "./client-counter.ts";
 import type { Lever } from "../search/levers.ts";
 import type {
@@ -189,6 +190,46 @@ export function buildSourceRequest(
   };
 }
 
+export const TERM_CLAUSE_INSTRUCTIONS =
+  "Which excerpt states when this agreement's term starts and ends?";
+
+// The term-clause citation names the file as well as the section: generic
+// contracts spread their clauses across two exhibits with the same numbers.
+function fileSectionCriteria(excerpts: Excerpt[]): Record<string, string> {
+  return Object.fromEntries(
+    excerpts.map((e, i) => [
+      `e${i + 1}`,
+      `Excerpt e${i + 1} (${e.source.fileName} ${e.source.section ?? e.id})`,
+    ]),
+  );
+}
+
+// One choice question over every excerpt: Jev picks the clause that states
+// the agreement's term bounds.
+export function buildTermClauseRequest(
+  excerpts: Excerpt[],
+  model: string,
+): { model: string; state: unknown; questions: Record<string, unknown> } {
+  return {
+    model,
+    state: jevState(excerpts),
+    questions: {
+      term_clause: {
+        type: "choice",
+        instructions: TERM_CLAUSE_INSTRUCTIONS,
+        criteria: fileSectionCriteria(excerpts),
+      },
+    },
+  };
+}
+
+export function buildTermClauseDigestInput(
+  excerpts: Excerpt[],
+  model: string,
+): Record<string, unknown> {
+  return { provider: "typesafe", request: buildTermClauseRequest(excerpts, model) };
+}
+
 // What the release-timing call digest covers: both questions, with all three
 // action-specific citation instruction strings — the one actually sent
 // depends on the answer, so a matching digest must commit to all of them.
@@ -266,6 +307,63 @@ export function buildCounterCrosscheckRequest(
       [COUNTER_CROSSCHECK_QUESTION]: { type: "noul", instructions },
     },
   };
+}
+
+// The per-term cross-check instruction restates the extraction's own texts so
+// Jev can verify them against the quote. Undefined when the term lacks the
+// fields its kind's instruction needs — the caller treats that as a failure.
+function termCrosscheckInstructions(term: ValidatedTerm): string | undefined {
+  switch (term.kind) {
+    case "fixed_date_payment": {
+      const when = term.dateText ?? term.recurrenceText;
+      if (term.amountText === null || when === null) return undefined;
+      const recurrence = term.recurrenceText === null ? "" : ` ${term.recurrenceText}`;
+      return `The quoted clause sets a cash fee of ${term.amountText}${recurrence}, paid or invoiced ${when}.`;
+    }
+    case "deposit":
+      if (term.amountText === null || term.dateText === null) return undefined;
+      return `The quoted clause requires a payment of ${term.amountText} ${term.dateText}.`;
+    case "payment_terms":
+      if (term.netDaysText === null) return undefined;
+      return `The quoted clause gives the client ${term.netDaysText} to pay an invoice.`;
+    case "escrow_release":
+      if (term.amountText === null || term.dateText === null) return undefined;
+      return `The quoted clause releases ${term.amountText} from escrow ${term.dateText}.`;
+  }
+}
+
+// One systemone request per distinct quote — a single request carries one
+// state, so terms citing the same quote share it. Undefined when any term
+// cannot build its instruction.
+export function buildTermCrosscheckRequests(
+  terms: ValidatedTerm[],
+  model: string,
+): { model: string; state: unknown; questions: Record<string, unknown> }[] | undefined {
+  // A split-citation term's date text is verified against both quotes, so the
+  // group key (and the request state) is the quote pair, not quote alone.
+  const byQuotes = new Map<string, ValidatedTerm[]>();
+  for (const t of terms) {
+    const key = JSON.stringify([t.quote, t.dateQuote]);
+    const group = byQuotes.get(key);
+    if (group === undefined) byQuotes.set(key, [t]);
+    else group.push(t);
+  }
+  const requests: { model: string; state: unknown; questions: Record<string, unknown> }[] = [];
+  for (const group of byQuotes.values()) {
+    const first = group[0]!;
+    const state =
+      first.dateQuote === null
+        ? { quote: first.quote }
+        : { quote: first.quote, date_quote: first.dateQuote };
+    const questions: Record<string, unknown> = {};
+    for (const t of group) {
+      const instructions = termCrosscheckInstructions(t);
+      if (instructions === undefined) return undefined;
+      questions[`term_${t.id}`] = { type: "noul", instructions };
+    }
+    requests.push({ model, state, questions });
+  }
+  return requests;
 }
 
 type PostResult =
@@ -642,5 +740,100 @@ export class JevDecisionProvider implements DecisionProvider {
       checks: [check],
       detail: `Jev could not confirm the extracted change (p = ${noul.toFixed(2)})`,
     };
+  }
+
+  // The staged term-clause pick: one choice over every excerpt. The answer is
+  // used by the caller to narrow the bounds extraction when confident.
+  async pickTermClause(
+    excerpts: Excerpt[],
+    options?: { signal?: AbortSignal },
+  ): Promise<
+    | { status: "picked"; pick: JevQuestionResult }
+    | { status: "failed"; reason: NeedsReviewReason; detail: string }
+  > {
+    const res = await this.post(buildTermClauseRequest(excerpts, this.model), options);
+    if (!res.ok) return { status: "failed", reason: res.reason, detail: res.detail };
+    if (res.model !== this.model) {
+      return {
+        status: "failed",
+        reason: "model_mismatch",
+        detail: `systemone answered with model ${res.model}, expected ${this.model}`,
+      };
+    }
+    const pick = parseChoice(res.answers.term_clause, excerptKeys(excerpts));
+    if (pick === undefined) {
+      return {
+        status: "failed",
+        reason: "schema_mismatch",
+        detail: "systemone answers.term_clause missing or not a choice answer",
+      };
+    }
+    return {
+      status: "picked",
+      pick: { ...pick, model: res.model, ...(res.usage !== undefined ? { usage: res.usage } : {}) },
+    };
+  }
+
+  // The payment-terms cross-check: one noul per extracted term over its own
+  // quote, batched per distinct quote. The instruction restates the extracted
+  // texts, so Jev should agree — a clear no is a mismatch naming the term, the
+  // middle band is undecided. The first disagreement stops the check.
+  async crosscheckPaymentTerms(
+    terms: ValidatedTerm[],
+    options?: { signal?: AbortSignal },
+  ): Promise<CrosscheckOutcome> {
+    const requests = buildTermCrosscheckRequests(terms, this.model);
+    if (requests === undefined) {
+      return {
+        status: "failed",
+        reason: "schema_mismatch",
+        detail: "an extracted term lacks the texts its cross-check instruction needs",
+      };
+    }
+    const termFor = new Map(terms.map((t) => [`term_${t.id}`, t]));
+    const checks: JevCrosscheck[] = [];
+    for (const request of requests) {
+      const res = await this.post(request, options);
+      if (!res.ok) return { status: "failed", reason: res.reason, detail: res.detail };
+      if (res.model !== this.model) {
+        return {
+          status: "failed",
+          reason: "model_mismatch",
+          detail: `systemone answered with model ${res.model}, expected ${this.model}`,
+        };
+      }
+      for (const name of Object.keys(request.questions)) {
+        const term = termFor.get(name);
+        const noul = parseNoul(res.answers[name]);
+        if (term === undefined || noul === undefined) {
+          return {
+            status: "failed",
+            reason: "schema_mismatch",
+            detail: `systemone answers.${name} missing or not a noul answer`,
+          };
+        }
+        checks.push({
+          question: name,
+          noul,
+          model: res.model,
+          ...(res.usage !== undefined ? { usage: res.usage } : {}),
+        });
+        if (noul <= 0.2) {
+          return {
+            status: "mismatch",
+            checks,
+            detail: `Jev disagreed on ${term.id}: the extraction's restated clause was rejected (p = ${noul.toFixed(2)})`,
+          };
+        }
+        if (noul < this.threshold) {
+          return {
+            status: "uncertain",
+            checks,
+            detail: `Jev could not confirm ${term.id} (p = ${noul.toFixed(2)})`,
+          };
+        }
+      }
+    }
+    return { status: "pass", checks };
   }
 }

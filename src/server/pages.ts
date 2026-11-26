@@ -1,7 +1,9 @@
+import { CONTRACT_PROFILES } from "../contracts/profiles.ts";
 import type { SourceTuple } from "../evidence/recheck.ts";
 import { escapeHtml } from "../review/decision-card.ts";
 import type { RunReceipt } from "../review/receipt.ts";
 import { renderReviewBody } from "../review/review-page.ts";
+import { renderTermsReviewBody } from "../review/terms-page.ts";
 import type { ApprovalRow, ExportRow, RunRow, WatchEventRow } from "../store/db.ts";
 
 export function pageShell(title: string, revision: string, body: string): string {
@@ -43,9 +45,10 @@ function sourceSummary(tupleJson: string): string {
 export type WatcherView = {
   enabled: boolean;
   intervalMs: number;
-  boxFolder: string;
+  folders: { contract: string; boxFolder: string }[];
   lastCheckedAt: string | null;
-  lastResult: string | null;
+  // Last tick outcome per contract id.
+  results: Record<string, string | null>;
   events: WatchEventRow[];
 };
 
@@ -63,16 +66,24 @@ function renderWatcherLine(watcher: WatcherView | undefined): string {
     return `<p class="watcher"><strong>Box watcher:</strong> disabled.</p>`;
   }
   const seconds = Math.round(watcher.intervalMs / 1000);
+  const folders = watcher.folders
+    .map((f) => `${escapeHtml(f.boxFolder)} (${escapeHtml(f.contract)})`)
+    .join(", ");
   const last =
     watcher.lastCheckedAt === null
       ? "not checked yet"
-      : `${escapeHtml(watcher.lastCheckedAt)}, ${
-          WATCH_RESULT_LABELS[watcher.lastResult ?? ""] ?? "no change"
-        }`;
+      : `${escapeHtml(watcher.lastCheckedAt)} — ${watcher.folders
+          .map(
+            (f) =>
+              `${escapeHtml(f.contract)}: ${
+                WATCH_RESULT_LABELS[watcher.results[f.contract] ?? ""] ?? "no change"
+              }`,
+          )
+          .join(", ")}`;
   const events = watcher.events
     .map((e) => `<li>${escapeHtml(e.at)} — ${escapeHtml(e.result)}${e.run_id !== null ? ` (run <a href="/runs/${escapeHtml(e.run_id)}">${escapeHtml(e.run_id)}</a>)` : ""}</li>`)
     .join("");
-  return `<div class="watcher"><p><strong>Box watcher:</strong> checks the ${escapeHtml(watcher.boxFolder)} folder every ${seconds} s while the coordinator is awake. Last check: ${last}.</p>${
+  return `<div class="watcher"><p><strong>Box watcher:</strong> checks the ${folders} folders every ${seconds} s while the coordinator is awake. Last check: ${last}.</p>${
     watcher.events.length > 0 ? `<ul>${events}</ul>` : ""
   }</div>`;
 }
@@ -85,15 +96,17 @@ export function renderRunList(
   const rows = runs
     .map((run) => {
       const receiptSha = run.receipt_hash.length > 0 ? run.receipt_hash.slice(0, 12) : "—";
-      return `    <tr><td><a href="/runs/${escapeHtml(run.id)}">${escapeHtml(run.id)}</a></td><td>${statusBadge(run.status, run.superseded_by)}</td><td>${escapeHtml(run.created_at)}</td><td>${escapeHtml(run.trigger)}</td><td>${sourceSummary(run.source_tuple_json)}</td><td><code>${receiptSha}</code></td></tr>`;
+      return `    <tr><td><a href="/runs/${escapeHtml(run.id)}">${escapeHtml(run.id)}</a></td><td>${escapeHtml(run.contract)}</td><td>${statusBadge(run.status, run.superseded_by)}</td><td>${escapeHtml(run.created_at)}</td><td>${escapeHtml(run.trigger)}</td><td>${sourceSummary(run.source_tuple_json)}</td><td><code>${receiptSha}</code></td></tr>`;
     })
     .join("\n");
   return pageShell("Caveat runs", revision, `<nav><strong>Caveat</strong> — contract cash review</nav>
 <h1>Runs</h1>
 ${renderWatcherLine(watcher)}
-<form method="POST" action="/runs"><button type="submit">Start a run</button></form>
+<form method="POST" action="/runs"><label>Contract <select name="contract">${CONTRACT_PROFILES.map(
+    (p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.id)}</option>`,
+  ).join("")}</select></label> <button type="submit">Start a run</button></form>
 <table class="runs">
-  <tr><th>Run</th><th>Status</th><th>Created</th><th>Started by</th><th>Sources</th><th>Receipt</th></tr>
+  <tr><th>Run</th><th>Contract</th><th>Status</th><th>Created</th><th>Started by</th><th>Sources</th><th>Receipt</th></tr>
 ${rows}
 </table>`);
 }
@@ -213,7 +226,9 @@ export function renderRun(
   }
   const receipt = storedReceipt(run.receipt_json);
   if (receipt !== undefined) {
-    parts.push(renderReviewBody(receipt));
+    parts.push(
+      run.contract === "twinvee" ? renderReviewBody(receipt) : renderTermsReviewBody(receipt),
+    );
   }
   return pageShell(run.id, view.revision, parts.join("\n"));
 }

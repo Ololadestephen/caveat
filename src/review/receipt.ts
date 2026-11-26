@@ -1,4 +1,6 @@
 import type { EvidenceFlag } from "../evidence/flags.ts";
+import type { PaymentTermsOutcome, TermBound } from "../interpret/payment-terms.ts";
+import type { JevUsage } from "../interpret/types.ts";
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import type { ClientCounterTexts } from "../interpret/client-counter.ts";
 import type {
@@ -8,10 +10,12 @@ import type {
   JevGate,
   Question,
 } from "../interpret/types.ts";
+import type { TermsAssumptions } from "../plan/terms.ts";
 import type { PolicyAdjustment, TwinveeAssumptions } from "../plan/twinvee.ts";
 import type { ScenarioResult } from "../runner/types.ts";
 import type { CounterofferReceipt, SearchCandidateRecord } from "../search/loop.ts";
 import type { RetainerReview, SourcedOverride } from "./human-review.ts";
+import type { TermsReviewCheck } from "./terms-review.ts";
 
 export const RECEIPT_VERSION = "caveat-receipt/2";
 
@@ -63,7 +67,9 @@ export type ClientReplyReceipt = {
 
 export type HumanReviewReceipt =
   | { status: "ok"; review: RetainerReview }
-  | { status: "needs_review"; reason: "review_citation_invalid"; detail: string };
+  | { status: "needs_review"; reason: "review_citation_invalid"; detail: string }
+  // Generic payment-terms runs confirm terms through the terms review instead.
+  | { status: "not_applicable" };
 
 // The canonical record of a coordinator run. Contains no Box ids, URLs or raw
 // provider bodies — only validated outputs, digests and citations.
@@ -105,14 +111,19 @@ export type RunReceipt = {
   // Digest of exactly what determines each typed model call; a matching digest
   // means the call's inputs are identical and its outcome can be reused.
   typedCallDigests?: {
-    release_timing: string;
-    escrow_schedule: string;
-    counteroffer_search: string;
+    release_timing?: string;
+    escrow_schedule?: string;
+    counteroffer_search?: string;
     schedule_crosscheck?: string;
     client_letter_gate?: string;
     client_counter?: string;
     client_counter_crosscheck?: string;
     client_reply_search?: string;
+    // Generic payment-terms path.
+    payment_terms?: string;
+    terms_crosscheck?: string;
+    term_clause?: string;
+    term_bounds?: string;
   };
   releaseTiming: { outcome: DecisionOutcome; question: Question } | null;
   // The action used downstream: the decided action, or a validated human
@@ -129,7 +140,7 @@ export type RunReceipt = {
   humanReview: HumanReviewReceipt;
   flags: EvidenceFlag[];
   readings: ReceiptReading[];
-  assumptions: TwinveeAssumptions;
+  assumptions: TwinveeAssumptions | TermsAssumptions;
   // Which cash numbers the run used: the owner's my-cash.csv when present and
   // valid, else the demo fixture. An invalid owner file keeps its label and
   // the parse detail — the run is blocked and produces no cash results.
@@ -146,6 +157,34 @@ export type RunReceipt = {
   // What the expected-fixture check did this run; absent when the readings
   // never ran or the check was disabled.
   expectedCheck?: "matched" | "mismatch" | "skipped_custom_cash";
+  // The generic payment-terms path's extraction, Jev cross-check and reviewer
+  // confirmation (runs on a contract profile with path "payment_terms").
+  paymentTerms?: {
+    outcome: PaymentTermsOutcome;
+    excerpts: Excerpt[];
+    crosscheck?: JevCrosscheck[];
+    confirmation?: TermsReviewCheck;
+    // The staged bounds pass, when a recurring term needed bounds the main
+    // extraction left null: the Jev pick of the term clause, and the bounds
+    // extracted from the picked (or all) excerpts.
+    termClause?: {
+      question: "term_clause";
+      choice: string;
+      confidence: number;
+      probabilities: Record<string, number>;
+      model: string;
+      usage?: JevUsage;
+      // The pick met the confidence bar and only that excerpt was sent on.
+      narrowed: boolean;
+      carriedFrom?: string;
+    };
+    termBounds?: {
+      termStart: TermBound | null;
+      termEnd: TermBound | null;
+      model: string;
+      carriedFrom?: string;
+    };
+  };
   // The client's reply letter (04-client-reply.pdf), when present and the run
   // reached the reply stage: what the client proposed, how it tested on every
   // worker, and the follow-up search when it failed.

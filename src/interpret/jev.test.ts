@@ -8,6 +8,7 @@ import {
 import { digestValue } from "../runner/digest.ts";
 import { RELEASE_TIMING } from "./types.ts";
 import type { ValidatedRelease } from "./schedule.ts";
+import type { ValidatedTerm } from "./payment-terms.ts";
 import type { Excerpt, Question } from "./types.ts";
 
 const EXCERPTS: Excerpt[] = [
@@ -584,4 +585,148 @@ describe("JevDecisionProvider cross-checks", () => {
       expect(fetchImpl).not.toHaveBeenCalled();
     });
   });
+
+  describe("crosscheckPaymentTerms", () => {
+    const term = (
+      id: string,
+      kind: ValidatedTerm["kind"],
+      fields: Partial<ValidatedTerm>,
+      quote: string,
+    ): ValidatedTerm => ({
+      id,
+      kind,
+      amountText: null,
+      amountCents: null,
+      dateText: null,
+      date: null,
+      recurrenceText: null,
+      recurrence: "one_off",
+      netDaysText: null,
+      netDays: null,
+      excerptId: "e.pdf#§1",
+      quote,
+      dateExcerptId: null,
+      dateQuote: null,
+      ...fields,
+    });
+
+    it("pass: every term lands at or above the band, verbatim instructions per kind", async () => {
+      const terms = [
+        term("term-1", "fixed_date_payment", {
+          amountText: "$5,000.00",
+          dateText: "per month",
+          recurrenceText: "per month",
+        }, "fee quote"),
+        term("term-2", "payment_terms", { netDaysText: "net 30 days" }, "terms quote"),
+        term("term-3", "deposit", { amountText: "$2,000", dateText: "on signing" }, "deposit quote"),
+        term("term-4", "escrow_release", { amountText: "$9,000", dateText: "June 1, 2024" }, "release quote"),
+      ];
+      const fetchImpl = noulFetch({}, 0.95);
+      const out = await provider(fetchImpl).crosscheckPaymentTerms(terms);
+      expect(out.status).toBe("pass");
+      const reqs = bodies(fetchImpl);
+      expect(reqs).toHaveLength(4);
+      expect(reqs[0]?.questions["term_term-1"]?.instructions).toBe(
+        "The quoted clause sets a cash fee of $5,000.00 per month, paid or invoiced per month.",
+      );
+      expect(reqs[1]?.questions["term_term-2"]?.instructions).toBe(
+        "The quoted clause gives the client net 30 days to pay an invoice.",
+      );
+      expect(reqs[2]?.questions["term_term-3"]?.instructions).toBe(
+        "The quoted clause requires a payment of $2,000 on signing.",
+      );
+      expect(reqs[3]?.questions["term_term-4"]?.instructions).toBe(
+        "The quoted clause releases $9,000 from escrow June 1, 2024.",
+      );
+    });
+
+    it("a fixed_date_payment without a recurrence reads without it", async () => {
+      const terms = [
+        term("term-1", "fixed_date_payment", {
+          amountText: "$500",
+          dateText: "July 1, 2024",
+        }, "q"),
+      ];
+      const fetchImpl = noulFetch({}, 0.9);
+      const out = await provider(fetchImpl).crosscheckPaymentTerms(terms);
+      expect(out.status).toBe("pass");
+      expect(lastBody(fetchImpl).questions["term_term-1"]?.instructions).toBe(
+        "The quoted clause sets a cash fee of $500, paid or invoiced July 1, 2024.",
+      );
+    });
+
+    it("terms sharing one quote go in a single request", async () => {
+      const terms = [
+        term("term-1", "payment_terms", { netDaysText: "net 30 days" }, "shared"),
+        term("term-2", "payment_terms", { netDaysText: "net 30 days" }, "shared"),
+      ];
+      const fetchImpl = noulFetch({}, 0.9);
+      const out = await provider(fetchImpl).crosscheckPaymentTerms(terms);
+      expect(out.status).toBe("pass");
+      expect(bodies(fetchImpl)).toHaveLength(1);
+    });
+
+    it("a split-citation term adds its date quote to the request state", async () => {
+      const terms = [
+        term("term-1", "fixed_date_payment", {
+          amountText: "$5,000.00",
+          dateText: "the last day of the invoiced month",
+          recurrenceText: "per month",
+          dateExcerptId: "e.pdf#§2",
+          dateQuote: "the Fees on the last day of the invoiced month",
+        }, "fee quote"),
+      ];
+      const fetchImpl = noulFetch({}, 0.9);
+      const out = await provider(fetchImpl).crosscheckPaymentTerms(terms);
+      expect(out.status).toBe("pass");
+      expect(lastBody(fetchImpl).state).toEqual({
+        quote: "fee quote",
+        date_quote: "the Fees on the last day of the invoiced month",
+      });
+    });
+
+    it("mismatch: a clear no names the term", async () => {
+      const terms = [
+        term("term-1", "payment_terms", { netDaysText: "net 30 days" }, "q"),
+      ];
+      const fetchImpl = noulFetch({ "term_term-1": 0.05 });
+      const out = await provider(fetchImpl).crosscheckPaymentTerms(terms);
+      expect(out.status).toBe("mismatch");
+      if (out.status !== "mismatch") return;
+      expect(out.detail).toContain("term-1");
+      expect(out.checks[0]?.noul).toBe(0.05);
+    });
+
+    it("uncertain: the middle band is undecided", async () => {
+      const terms = [
+        term("term-1", "payment_terms", { netDaysText: "net 30 days" }, "q"),
+      ];
+      const fetchImpl = noulFetch({ "term_term-1": 0.5 });
+      const out = await provider(fetchImpl).crosscheckPaymentTerms(terms);
+      expect(out.status).toBe("uncertain");
+    });
+
+    it("failed: a term that cannot fill its instruction is a schema mismatch", async () => {
+      const terms = [term("term-1", "payment_terms", { netDaysText: null }, "q")];
+      const out = await provider(fetch).crosscheckPaymentTerms(terms);
+      expect(out.status).toBe("failed");
+      if (out.status !== "failed") return;
+      expect(out.reason).toBe("schema_mismatch");
+    });
+
+    it("failed: a missing noul answer is a schema mismatch", async () => {
+      const terms = [
+        term("term-1", "payment_terms", { netDaysText: "net 30 days" }, "q"),
+      ];
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(jevResponse({ "term_term-1": { type: "noul" } }));
+      const out = await provider(fetchImpl).crosscheckPaymentTerms(terms);
+      expect(out.status).toBe("failed");
+      if (out.status !== "failed") return;
+      expect(out.reason).toBe("schema_mismatch");
+    });
+  });
 });
+
+

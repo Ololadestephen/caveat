@@ -50,6 +50,7 @@ type Rig = {
   pipelineConfigs: {
     previous?: { runId: string };
     carrySources?: { runId: string }[];
+    contract?: string;
   }[];
 };
 
@@ -171,6 +172,24 @@ describe("caveat app", () => {
     const second = await post(r, "/runs");
     expect(second.status).toBe(409);
     expect(await second.text()).toContain("already in progress");
+  });
+
+  it("starts a run for the named contract and rejects unknown ones", async () => {
+    const r = await rig();
+    expect((await post(r, "/runs", "contract=bogus")).status).toBe(400);
+    const res = await post(r, "/runs", "contract=aviat");
+    expect(res.status).toBe(303);
+    const runId = res.headers.get("location")!.replace("/runs/", "");
+    const run = await waitForRun(r.db, runId);
+    expect(run.contract).toBe("aviat");
+    // The pipeline sees the contract so dispatch can pick the path.
+    expect(r.pipelineConfigs.at(-1)?.contract).toBe("aviat");
+  });
+
+  it("defaults a bare POST to the twinvee contract", async () => {
+    const r = await rig();
+    const runId = await startRun(r);
+    expect(getRun(r.db, runId)?.contract).toBe("twinvee");
   });
 
   it("rejects POSTs without a matching Origin", async () => {
@@ -464,6 +483,8 @@ describe("manual run baseline", () => {
     expect(runId).toBeTruthy();
     const config = r.pipelineConfigs.find((c) => (c as { runId?: string }).runId === runId);
     expect((config?.previous as { runId?: string } | undefined)?.runId).toBe("run-good");
-    expect(config?.carrySources?.map((s) => s.runId)).toEqual(["run-good"]);
+    // needs_review receipts join the pool so a review file can name them via
+    // extractedIn; the pipeline still only carries calls from reviewable ones.
+    expect(config?.carrySources?.map((s) => s.runId)).toEqual(["run-blocked", "run-good"]);
   });
 });

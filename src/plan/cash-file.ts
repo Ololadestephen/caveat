@@ -1,4 +1,5 @@
 import { isValidDateString, dayNumber } from "../runner/dates.ts";
+import type { CostInput } from "../runner/types.ts";
 import type { TwinveeAssumptions } from "./twinvee.ts";
 
 export type CashFileCode =
@@ -98,11 +99,20 @@ function parseRows(rows: { raw: string; line: number }[]): ParsedRows {
   return { ok: true, opening, floor, costs };
 }
 
-// Parses the owner's cash file (kind,date,amount_usd rows) into the same
-// assumption shape the demo fixture provides. escrowFundingDate and
-// escrowFundingNote stay on the fallback: the funding date is a labelled
-// contract-timing assumption, not a cash number.
-export function parseCashFile(bytes: Uint8Array, fallback: TwinveeAssumptions): CashFileResult {
+export type CashAssumptionsBase = {
+  note: string;
+  startDate: string;
+  openingCents: number;
+  floorCents: number;
+  costs: CostInput[];
+};
+
+export type CashRowsFailure = { ok: false; line: number; code: CashFileCode; detail: string };
+
+// Shared row parsing for both cash-file entry points.
+function parseCashRows(
+  bytes: Uint8Array,
+): { ok: true; parsed: Extract<ParsedRows, { ok: true }>; totalLines: number } | CashRowsFailure {
   if (bytes.byteLength > MAX_BYTES) {
     return failAt(0, "too_large", `file is ${bytes.byteLength} bytes; the limit is ${MAX_BYTES}`);
   }
@@ -124,16 +134,58 @@ export function parseCashFile(bytes: Uint8Array, fallback: TwinveeAssumptions): 
 
   const parsed = parseRows(rows);
   if (!parsed.ok) return parsed;
-  return buildCashAssumptions(parsed, rows.length, fallback);
+  return { ok: true, parsed, totalLines: rows.length };
 }
+
+// Parses the owner's cash file (kind,date,amount_usd rows) into the same
+// assumption shape the demo fixture provides. escrowFundingDate and
+// escrowFundingNote stay on the fallback: the funding date is a labelled
+// contract-timing assumption, not a cash number.
+export function parseCashFile(bytes: Uint8Array, fallback: TwinveeAssumptions): CashFileResult {
+  const rows = parseCashRows(bytes);
+  if (!rows.ok) return rows;
+  return buildCashAssumptions(rows.parsed, rows.totalLines, {
+    anchorDate: fallback.escrowFundingDate,
+    anchorLabel: "the escrow funding date",
+    build: (base) => ({
+      ...base,
+      escrowFundingDate: fallback.escrowFundingDate,
+      ...(fallback.escrowFundingNote !== undefined
+        ? { escrowFundingNote: fallback.escrowFundingNote }
+        : {}),
+    }),
+  });
+}
+
+// The generic path's cash file: the same row grammar, but the opening-date
+// anchor is the contract's first payment date rather than an escrow funding
+// date, and no escrow fields carry over.
+export function parseTermsCashFile(
+  bytes: Uint8Array,
+  firstPaymentDate: string,
+): { ok: true; assumptions: CashAssumptionsBase } | CashRowsFailure {
+  const rows = parseCashRows(bytes);
+  if (!rows.ok) return rows;
+  return buildCashAssumptions(rows.parsed, rows.totalLines, {
+    anchorDate: firstPaymentDate,
+    anchorLabel: "the first payment date",
+    build: (base) => base,
+  });
+}
+
+type AssumptionSpec<T> = {
+  anchorDate: string;
+  anchorLabel: string;
+  build: (base: CashAssumptionsBase) => T;
+};
 
 // Presence, range and ordering checks on the parsed rows, then the
 // assumptions record itself.
-function buildCashAssumptions(
+function buildCashAssumptions<T>(
   parsed: Extract<ParsedRows, { ok: true }>,
   totalLines: number,
-  fallback: TwinveeAssumptions,
-): CashFileResult {
+  spec: AssumptionSpec<T>,
+): { ok: true; assumptions: T } | CashRowsFailure {
   const { opening, floor, costs } = parsed;
 
   if (opening === undefined) {
@@ -148,11 +200,11 @@ function buildCashAssumptions(
   if (costs.length > MAX_COSTS) {
     return failAt(totalLines, "too_many_costs", `the file has ${costs.length} cost rows; the limit is ${MAX_COSTS}`);
   }
-  if (dayNumber(opening.date) > dayNumber(fallback.escrowFundingDate)) {
+  if (dayNumber(opening.date) > dayNumber(spec.anchorDate)) {
     return failAt(
       opening.line,
       "opening_after_funding",
-      `the opening date ${opening.date} is after the escrow funding date ${fallback.escrowFundingDate}`,
+      `the opening date ${opening.date} is after ${spec.anchorLabel} ${spec.anchorDate}`,
     );
   }
   const [oy, om, od] = opening.date.split("-").map(Number);
@@ -181,16 +233,12 @@ function buildCashAssumptions(
 
   return {
     ok: true,
-    assumptions: {
+    assumptions: spec.build({
       note: NOTE,
       startDate: opening.date,
-      escrowFundingDate: fallback.escrowFundingDate,
-      ...(fallback.escrowFundingNote !== undefined
-      ? { escrowFundingNote: fallback.escrowFundingNote }
-      : {}),
       openingCents: opening.cents,
       floorCents: floor.cents,
       costs: keyed.map((c) => ({ id: c.id, date: c.date, amountCents: c.cents })),
-    },
+    }),
   };
 }

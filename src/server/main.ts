@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { CONTRACT_PROFILES } from "../contracts/profiles.ts";
 import { listWatchEvents, openDb } from "../store/db.ts";
 import { startWatcher } from "../watch/watcher.ts";
 import type { Watcher } from "../watch/watcher.ts";
@@ -10,6 +11,11 @@ import type { WatcherView } from "./pages.ts";
 const dataDir = process.env.CAVEAT_DATA_DIR ?? "/home/sprite/caveat-data";
 const db = openDb(join(dataDir, "caveat.db"));
 const boxFolder = process.env.CAVEAT_BOX_FOLDER ?? "caveat_TEST";
+// Every profile's folder is ticked; the twinvee folder stays env-settable.
+const contracts = CONTRACT_PROFILES.map((p) => ({
+  id: p.id,
+  boxFolder: p.id === "twinvee" ? boxFolder : p.boxFolder,
+}));
 const watchIntervalMs = envNumber("CAVEAT_WATCH_INTERVAL_MS", 60000);
 
 let revision = "unknown";
@@ -33,9 +39,11 @@ const ctx = createAppContext({
   watcher: (): WatcherView => ({
     enabled: watchIntervalMs > 0,
     intervalMs: watchIntervalMs,
-    boxFolder,
+    folders: contracts.map((c) => ({ contract: c.id, boxFolder: c.boxFolder })),
     lastCheckedAt: watcherRef.current?.state.lastCheckedAt ?? null,
-    lastResult: watcherRef.current?.state.lastResult ?? null,
+    results: Object.fromEntries(
+      contracts.map((c) => [c.id, watcherRef.current?.state.results[c.id] ?? null]),
+    ),
     events: listWatchEvents(db, 5),
   }),
 });
@@ -45,7 +53,7 @@ const server = serveContext(ctx);
 // CAVEAT_WATCH_INTERVAL_MS is 0. Never uploads or writes to Box.
 watcherRef.current = startWatcher({
   db,
-  boxFolder,
+  contracts,
   intervalMs: watchIntervalMs,
   startRun: (args) => startRun(ctx, args),
 });

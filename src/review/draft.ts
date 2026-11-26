@@ -30,11 +30,13 @@ const MONTH_NAMES = [
   "December",
 ];
 
-// $8,000 when whole dollars, else $8,000.50 — never the "$x,xxx.00" page style.
+// $8,000 when whole dollars, else $8,000.50; -$7,000 when negative — never
+// the "$x,xxx.00" page style.
 function money(cents: number): string {
-  const grouped = String(Math.floor(cents / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  const rest = cents % 100;
-  return rest === 0 ? `$${grouped}` : `$${grouped}.${String(rest).padStart(2, "0")}`;
+  const abs = Math.abs(cents);
+  const grouped = String(Math.floor(abs / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const rest = abs % 100;
+  return `${cents < 0 ? "-" : ""}$${grouped}${rest === 0 ? "" : `.${String(rest).padStart(2, "0")}`}`;
 }
 
 function formatDate(iso: string): string {
@@ -293,4 +295,110 @@ export function renderDraft(receipt: RunReceipt): string {
     );
   }
   return `${lines.join("\n")}\n`;
+}
+
+
+// Picks the draft renderer for the run's contract.
+export function renderDraftFor(receipt: RunReceipt, contract: string): string {
+  return contract === "twinvee" ? renderDraft(receipt) : renderTermsDraft(receipt);
+}
+
+// The generic payment-terms draft — same deterministic discipline as the
+// escrow draft: every substitution comes from validated receipt fields.
+export function renderTermsDraft(receipt: RunReceipt): string {
+  const lines: string[] = [];
+  lines.push("DRAFT - NOT SENT - NOT LEGAL ADVICE");
+  lines.push(`Caveat contract notes (${DRAFT_VERSION})`);
+  lines.push(`Run: ${receipt.runId}`);
+  lines.push(`Receipt: sha256 ${receiptHash(receipt)}`);
+  lines.push(
+    "Prepared from these Box files (text renderings of public SEC EDGAR exhibits):",
+  );
+  for (const source of [...receipt.sources].sort((a, b) =>
+    a.fileName.localeCompare(b.fileName),
+  )) {
+    const url = source.edgarUrl ?? EDGAR_URLS[source.fileName] ?? "";
+    lines.push(`- ${source.fileName} (sha256 ${sha12(source)}) ${url}`.trimEnd());
+  }
+  lines.push("");
+  lines.push("Questions to raise before relying on this agreement:");
+  lines.push("");
+
+  let n = 0;
+  const next = () => {
+    n += 1;
+    return n;
+  };
+
+  // 1. The partial-month ambiguity is always raised when terms were confirmed.
+  const terms =
+    receipt.paymentTerms?.outcome.status === "extracted"
+      ? receipt.paymentTerms.outcome.terms
+      : undefined;
+  if (terms !== undefined && terms.termStart !== null && terms.termEnd !== null) {
+    const billed = receipt.readings.find((r) => r.id === "partial_months_prorated");
+    const notBilled = receipt.readings.find(
+      (r) => r.id === "partial_months_not_billed",
+    );
+    const fee = terms.terms.find(
+      (t) => t.kind === "fixed_date_payment" && t.recurrence === "monthly",
+    );
+    const feeText = fee?.amountText ?? "the monthly fee";
+    const billedCount =
+      billed === undefined
+        ? "every"
+        : String(
+            Object.values(billed.results.as_signed?.on_time?.ledger ?? []).filter(
+              (e) => e.kind === "payment",
+            ).length,
+          );
+    const notBilledCount =
+      notBilled === undefined
+        ? "fewer"
+        : String(
+            Object.values(
+              notBilled.results.as_signed?.on_time?.ledger ?? [],
+            ).filter((e) => e.kind === "payment").length,
+          );
+    lines.push(
+      `${next()}. The agreement does not say whether partial months are billed. One reading bills ${feeText} pro rata by calendar day on the last day of every calendar month that overlaps the term (${terms.termStart.text} – ${terms.termEnd.text}); the other invoices only for calendar months wholly inside it. Caveat ran both readings — under the pro-rata reading (partial months billed by calendar day; the agreement does not say) it produces ${billedCount} invoices; under the not-billed reading, ${notBilledCount}.`,
+    );
+    lines.push("   Ask: which reading the parties intend, and whether May and September invoice in full.");
+  }
+
+  // 2. The shortfall, in the same words as the page headline.
+  const floor = receipt.assumptions.floorCents;
+  let worst: { label: string; date: string; balanceCents: number } | undefined;
+  for (const reading of receipt.readings) {
+    for (const [scenarioId, result] of Object.entries(reading.results.as_signed ?? {})) {
+      if (result.lowest.balanceCents >= floor) continue;
+      if (worst === undefined || result.lowest.balanceCents < worst.balanceCents) {
+        worst = {
+          label: `${reading.label} / ${scenarioId}`,
+          date: result.lowest.date,
+          balanceCents: result.lowest.balanceCents,
+        };
+      }
+    }
+  }
+  if (worst !== undefined) {
+    lines.push(
+      `${next()}. Cash falls short of the floor: the lowest modeled balance is ${money(worst.balanceCents)} on ${formatDate(worst.date)}, ${money(floor - worst.balanceCents)} under the floor (${worst.label}).`,
+    );
+  }
+
+  // 3. The tested fix, only when a counteroffer search found one.
+  const search = receipt.counteroffer;
+  if (search !== undefined && search.status === "found" && search.best !== null) {
+    const best = search.rounds
+      .flatMap((r) => r.candidates)
+      .find((c) => c.id === search.best);
+    if (best !== undefined) {
+      lines.push(
+        `${next()}. Proposed change, tested by Caveat: ${best.summary ?? best.id}. Caveat's runner tested it against both scenarios under both readings; the receipt lists every candidate tried.`,
+      );
+    }
+  }
+  lines.push("");
+  return lines.join("\n") + "\n";
 }

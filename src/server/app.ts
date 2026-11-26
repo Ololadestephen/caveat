@@ -4,12 +4,13 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { recheckFolder } from "../evidence/recheck.ts";
 import type { SourceTuple, StaleChange } from "../evidence/recheck.ts";
+import { contractProfile, DEFAULT_CONTRACT } from "../contracts/profiles.ts";
 import { listConnections } from "../gateway.ts";
 import type { Connection } from "../gateway.ts";
-import { runPipeline } from "../pipeline/run-pipeline.ts";
+import { dispatchPipeline } from "../pipeline/dispatch.ts";
 import type { PipelineConfig } from "../pipeline/run-pipeline.ts";
 import { escapeHtml } from "../review/decision-card.ts";
-import { draftHash, receiptHash, renderDraft } from "../review/draft.ts";
+import { draftHash, receiptHash, renderDraftFor } from "../review/draft.ts";
 import type { RunReceipt } from "../review/receipt.ts";
 import { REVIEW_PAGE_CSS } from "../review/review-page.ts";
 import { canonicalJson } from "../runner/digest.ts";
@@ -148,7 +149,9 @@ function makeFinisher(
       const run = getRun(ctx.db, runId);
       if (run === undefined || run.status !== "running") return;
       finishRun(ctx.db, runId, status, reason, fields);
-      if (status === "reviewable" || status === "needs_review") supersedeOthers(ctx.db, runId);
+      if (status === "reviewable" || status === "needs_review") {
+        supersedeOthers(ctx.db, runId, run.contract);
+      }
       onFinish?.(status);
     } finally {
       hold.stop();
@@ -158,6 +161,7 @@ function makeFinisher(
 
 export type StartRunArgs = {
   trigger: "manual" | "watcher";
+  contract: string;
   previous?: { runId: string; receipt: RunReceipt; sourceTuple: SourceTuple };
   carrySources?: { runId: string; receipt: RunReceipt }[];
   // Stored on the row immediately (the watcher already confirmed it); the
@@ -175,13 +179,14 @@ function kickRun(ctx: AppContext, runId: string, args: StartRunArgs): void {
       runId,
       reviewsDir: deps.reviewsDir,
       fixturesDir: deps.fixturesDir,
-      boxFolder: deps.boxFolder,
+      boxFolder: contractProfile(args.contract)?.boxFolder ?? deps.boxFolder,
       trigger: args.trigger,
+      contract: args.contract,
       ...(deps.decisionModel !== undefined ? { decisionModel: deps.decisionModel } : {}),
       ...(args.previous !== undefined ? { previous: args.previous } : {}),
       ...(args.carrySources !== undefined ? { carrySources: args.carrySources } : {}),
     });
-    const draft = renderDraft(receipt);
+    const draft = renderDraftFor(receipt, args.contract);
     finish(receipt.status === "reviewable" ? "reviewable" : "needs_review",
       receipt.status === "needs_review"
         ? receipt.blockedReasons.map((r) => r.reason).join("; ") || "needs_review"
@@ -213,6 +218,7 @@ export function startRun(ctx: AppContext, args: StartRunArgs): string {
     draftText: "",
     draftHash: "",
     trigger: args.trigger,
+    contract: args.contract,
   });
   kickRun(ctx, runId, args);
   return runId;
@@ -316,7 +322,12 @@ async function handleExport(ctx: AppContext, res: ServerResponse, runId: string)
     if (box === undefined) {
       return blockExport(503, "blocked_unavailable", "box connector not configured", "<h1>Export blocked</h1><p>The Box connector is not configured.</p>");
     }
-    const outcome = await recheck(box.gatewayBaseUrl, "0", deps.boxFolder, tuple, {
+    const outcome = await recheck(
+      box.gatewayBaseUrl,
+      "0",
+      contractProfile(run.contract)?.boxFolder ?? deps.boxFolder,
+      tuple,
+      {
       timeoutMs: deps.recheckTimeoutMs,
     });
     if (!outcome.ok) {
@@ -347,7 +358,7 @@ async function handleExport(ctx: AppContext, res: ServerResponse, runId: string)
   res.end(run.draft_text);
 }
 
-function routeRequest(ctx: AppContext, req: IncomingMessage, res: ServerResponse): Promise<void> | void {
+async function routeRequest(ctx: AppContext, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const { db, deps } = ctx;
   const method = req.method ?? "GET";
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -380,11 +391,25 @@ function routeRequest(ctx: AppContext, req: IncomingMessage, res: ServerResponse
         ),
       );
     }
-    const previous = selectBaseline(db);
+    const body = new URLSearchParams(await readBody(req));
+    const requested = body.get("contract") ?? DEFAULT_CONTRACT;
+    if (contractProfile(requested) === undefined) {
+      return sendHtml(
+        res,
+        400,
+        pageShell(
+          "Unknown contract",
+          deps.revision,
+          `<h1>Unknown contract</h1><p>${escapeHtml(requested)} is not a configured contract profile.</p><p><a href="/">Runs</a></p>`,
+        ),
+      );
+    }
+    const previous = selectBaseline(db, requested);
     const runId = startRun(ctx, {
       trigger: "manual",
+      contract: requested,
       ...(previous !== undefined ? { previous } : {}),
-      carrySources: selectCarrySources(db),
+      carrySources: selectCarrySources(db, requested),
     });
     return redirect(res, `/runs/${runId}`);
   }
@@ -423,7 +448,7 @@ export function createAppContext(deps: AppDeps): AppContext {
   return {
     db: deps.db,
     deps,
-    pipeline: deps.pipeline ?? runPipeline,
+    pipeline: deps.pipeline ?? dispatchPipeline,
     connections: deps.connections ?? listConnections,
     recheck: deps.recheck ?? recheckFolder,
     holdTask: deps.holdTask ?? startTaskHold,

@@ -52,6 +52,7 @@ export type NeedsReviewReason =
   | "unknown_excerpt"
   | "quote_not_verbatim"
   | "inconsistent_terms"
+  | "missing_term_bounds"
   | "model_mismatch"
   | "missing_model_version"
   | "blocked"
