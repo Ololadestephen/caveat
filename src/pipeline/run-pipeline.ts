@@ -134,6 +134,9 @@ export type PipelineConfig = {
   // The run this one is based on. When its receipt carries digests, matching
   // typed calls reuse the previous outcomes instead of re-asking the model.
   previous?: { runId: string; receipt: RunReceipt; sourceTuple: SourceTuple };
+  // Every run whose stored receipt passed all gates, newest first — the pool
+  // each typed call may carry its answer from (per-call digest match).
+  carrySources?: { runId: string; receipt: RunReceipt }[];
 };
 
 export type PipelineResult = {
@@ -804,27 +807,43 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
         });
   let clientReplySearchDigest = "none";
   const previous = config.previous;
-  const prevDigests = previous?.receipt.typedCallDigests;
+  // The pool of carry sources, newest first; a source lends only the calls
+  // whose digest matches — needs_review receipts are filtered out even when a
+  // caller passes them. Without an explicit pool the baseline is the only
+  // source, matching the old behavior.
+  const carrySources = (
+    config.carrySources ?? (config.previous !== undefined ? [config.previous] : [])
+  ).filter(
+    (s) =>
+      s.receipt.status === "reviewable" && s.receipt.typedCallDigests !== undefined,
+  );
+  const carrySourceFor = (
+    key:
+      | "release_timing"
+      | "escrow_schedule"
+      | "counteroffer_search"
+      | "client_counter"
+      | "client_reply_search",
+    digest: string,
+  ): { runId: string; receipt: RunReceipt } | undefined =>
+    carrySources.find((s) => s.receipt.typedCallDigests?.[key] === digest);
   // Only a run whose own receipt passed every gate may lend its answers; a
   // blocked answer is always re-asked, never carried.
   const baselineOk =
     previous !== undefined &&
     previous.receipt.status === "reviewable" &&
     previous.receipt.sectionDigests !== undefined &&
-    prevDigests !== undefined;
+    previous.receipt.typedCallDigests !== undefined;
   const reran: string[] = [];
   const carriedForward: string[] = [];
 
   // --- Typed decision -------------------------------------------------------------
   timer.begin();
-  const prevDecision = previous?.receipt.releaseTiming?.outcome;
+  const decisionSource = carrySourceFor("release_timing", decisionCallDigest);
+  const prevDecision = decisionSource?.receipt.releaseTiming?.outcome;
   let decision: DecisionOutcome;
-  if (
-    baselineOk &&
-    prevDigests.release_timing === decisionCallDigest &&
-    prevDecision?.status === "decided"
-  ) {
-    decision = { ...prevDecision, carriedFrom: previous.runId };
+  if (prevDecision?.status === "decided" && decisionSource !== undefined) {
+    decision = { ...prevDecision, carriedFrom: decisionSource.runId };
     carriedForward.push("release_timing");
   } else {
     const provider = new OpenRouterDecisionProvider({
@@ -838,14 +857,11 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
 
   // --- Typed extraction --------------------------------------------------------------
   timer.begin();
-  const prevSchedule = previous?.receipt.schedule?.outcome;
+  const scheduleSource = carrySourceFor("escrow_schedule", scheduleCallDigest);
+  const prevSchedule = scheduleSource?.receipt.schedule?.outcome;
   let schedule: ScheduleOutcome;
-  if (
-    baselineOk &&
-    prevDigests.escrow_schedule === scheduleCallDigest &&
-    prevSchedule?.status === "extracted"
-  ) {
-    schedule = { ...prevSchedule, carriedFrom: previous.runId };
+  if (prevSchedule?.status === "extracted" && scheduleSource !== undefined) {
+    schedule = { ...prevSchedule, carriedFrom: scheduleSource.runId };
     carriedForward.push("escrow_schedule");
   } else {
     const extractor = new OpenRouterScheduleExtractor({
@@ -967,18 +983,17 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   ) {
     timer.begin();
     try {
-      const prevSearch = previous?.receipt.counteroffer;
+      const searchSource = carrySourceFor("counteroffer_search", searchCallDigest);
+      const prevSearch = searchSource?.receipt.counteroffer;
       const canCarry =
-        baselineOk &&
-        prevDigests !== undefined &&
-        prevDigests.counteroffer_search === searchCallDigest &&
+        searchSource !== undefined &&
         prevSearch !== undefined &&
         (prevSearch.status === "found" ||
           prevSearch.status === "not_found" ||
           prevSearch.status === "not_needed");
-      if (canCarry && prevSearch !== undefined && previous !== undefined) {
+      if (canCarry && prevSearch !== undefined && searchSource !== undefined) {
         const carried = await carrySearch(
-          previous,
+          { runId: searchSource.runId, receipt: searchSource.receipt },
           prevSearch,
           prepared,
           connectors,
@@ -1033,7 +1048,6 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
       }),
       sha12: sha12(replyFile.sha256),
     };
-    const prevReply = previous?.receipt.clientReply;
     const conditionalReleases = schedule.schedule.releases
       .filter((r) => r.extensionId !== undefined)
       .map((r) => ({
@@ -1050,9 +1064,10 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     let citation: ClientCitation | undefined;
     let workers: string[] | undefined;
     let replyFail: { reason: string; detail: string } | undefined;
+    const counterSource = carrySourceFor("client_counter", clientCounterDigest);
+    const prevReply = counterSource?.receipt.clientReply;
     const carryRead =
-      baselineOk &&
-      prevDigests?.client_counter === clientCounterDigest &&
+      counterSource !== undefined &&
       prevReply?.counter !== undefined &&
       prevReply.citation !== undefined;
     if (carryRead && prevReply !== undefined && prevReply.counter !== undefined) {
@@ -1149,16 +1164,18 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
           systemPromptSuffix: CLIENT_REPLY_PROMPT_SUFFIX,
         });
         let response: CounterofferReceipt;
-        const prevResponse = prevReply?.response;
+        const replySource = carrySourceFor(
+          "client_reply_search",
+          clientReplySearchDigest,
+        );
+        const prevResponse = replySource?.receipt.clientReply?.response;
         const canCarry =
-          baselineOk &&
-          prevDigests !== undefined &&
-          prevDigests.client_reply_search === clientReplySearchDigest &&
+          replySource !== undefined &&
           prevResponse !== undefined &&
           (prevResponse.status === "found" || prevResponse.status === "not_found");
-        if (canCarry && prevResponse !== undefined && previous !== undefined) {
+        if (canCarry && prevResponse !== undefined && replySource !== undefined) {
           const carried = await carrySearch(
-            previous,
+            { runId: replySource.runId, receipt: replySource.receipt },
             prevResponse,
             prepared,
             connectors,

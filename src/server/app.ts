@@ -26,6 +26,7 @@ import {
   newRunId,
   recordExport,
   selectBaseline,
+  selectCarrySources,
   supersedeOthers,
 } from "../store/db.ts";
 import { pageShell, renderRun, renderRunList, renderStaleChange } from "./pages.ts";
@@ -158,6 +159,7 @@ function makeFinisher(
 export type StartRunArgs = {
   trigger: "manual" | "watcher";
   previous?: { runId: string; receipt: RunReceipt; sourceTuple: SourceTuple };
+  carrySources?: { runId: string; receipt: RunReceipt }[];
   // Stored on the row immediately (the watcher already confirmed it); the
   // pipeline writes the same value again on success.
   sourceTuple?: SourceTuple;
@@ -177,6 +179,7 @@ function kickRun(ctx: AppContext, runId: string, args: StartRunArgs): void {
       trigger: args.trigger,
       ...(deps.decisionModel !== undefined ? { decisionModel: deps.decisionModel } : {}),
       ...(args.previous !== undefined ? { previous: args.previous } : {}),
+      ...(args.carrySources !== undefined ? { carrySources: args.carrySources } : {}),
     });
     const draft = renderDraft(receipt);
     finish(receipt.status === "reviewable" ? "reviewable" : "needs_review",
@@ -381,6 +384,7 @@ function routeRequest(ctx: AppContext, req: IncomingMessage, res: ServerResponse
     const runId = startRun(ctx, {
       trigger: "manual",
       ...(previous !== undefined ? { previous } : {}),
+      carrySources: selectCarrySources(db),
     });
     return redirect(res, `/runs/${runId}`);
   }

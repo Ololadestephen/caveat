@@ -300,6 +300,31 @@ export function selectBaseline(
   return pick(withDigests ?? candidates[0]);
 }
 
+// Every run whose stored receipt passed every gate and carries call digests,
+// newest first — the pool each typed call may carry its answer from. A call
+// carries from the first source whose digest for that call matches; each
+// digest covers its exact inputs, so sources may differ per call. Needs-review
+// receipts are never sources: a blocked answer is always re-asked.
+export function selectCarrySources(
+  db: DatabaseSync,
+  cap = 20,
+): { runId: string; receipt: RunReceipt }[] {
+  const sources: { runId: string; receipt: RunReceipt }[] = [];
+  for (const row of listRuns(db)) {
+    if (row.status === "failed" || row.status === "running") continue;
+    const receipt = parseReceiptJson(row.receipt_json);
+    if (
+      receipt !== undefined &&
+      receipt.status === "reviewable" &&
+      receipt.typedCallDigests !== undefined
+    ) {
+      sources.push({ runId: row.id, receipt });
+    }
+    if (sources.length >= cap) break;
+  }
+  return sources;
+}
+
 export function finishRun(
   db: DatabaseSync,
   id: string,

@@ -14,6 +14,7 @@ import {
   newRowId,
   recordWatchEvent,
   selectBaseline,
+  selectCarrySources,
 } from "../store/db.ts";
 
 export type WatcherResult =
@@ -43,6 +44,7 @@ export type WatcherDeps = {
   startRun: (args: {
     trigger: "watcher";
     previous?: PreviousRun;
+    carrySources?: { runId: string; receipt: RunReceipt }[];
     // The confirmed tuple the watcher already fetched — stored on the run row
     // immediately so a failed watcher run is not retried.
     sourceTuple?: SourceTuple;
@@ -219,11 +221,13 @@ export async function watchTick(deps: WatcherDeps, state: WatcherState): Promise
     // Baseline for incremental work: the most recent run whose stored receipt
     // passed every gate and carries digests; see selectBaseline.
     const previous = selectBaseline(deps.db);
+    const carrySources = selectCarrySources(deps.db);
 
     const runId = deps.startRun({
       trigger: "watcher",
       sourceTuple: confirmed,
       ...(previous !== undefined ? { previous } : {}),
+      carrySources,
       onFinish: (status) => {
         if (status === "failed") {
           recordEvent(

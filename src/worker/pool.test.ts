@@ -25,11 +25,19 @@ function batchBody(results: unknown = RESULTS): Response {
   );
 }
 
-function pool(fetchImpl: typeof fetch, timeoutMs = 60_000): SpritesHttpPool {
+function pool(
+  fetchImpl: typeof fetch,
+  timeoutMs = 60_000,
+  sleeps?: number[],
+): SpritesHttpPool {
   return new SpritesHttpPool({
     gateways: { "caveat-wa": "https://gw/a", "caveat-wb": "https://gw/b/" },
     fetch: fetchImpl,
     timeoutMs,
+    sleep: (ms) => {
+      sleeps?.push(ms);
+      return Promise.resolve();
+    },
   });
 }
 
@@ -67,14 +75,50 @@ describe("SpritesHttpPool", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it("throws WorkerUnavailableError after two failures", async () => {
+  it("retries a cold-starting worker with backoff until it answers", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response("Bad Gateway", { status: 502 }))
+      .mockResolvedValueOnce(new Response("Bad Gateway", { status: 502 }))
+      .mockResolvedValueOnce(new Response("Unavailable", { status: 503 }))
+      .mockResolvedValue(batchBody());
+    const sleeps: number[] = [];
+    const p = pool(fetchImpl, 60_000, sleeps);
+    const out = await p.runBatch("caveat-wa", JOBS);
+    expect(out).toEqual(RESULTS);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(sleeps).toEqual([1_000, 2_000, 4_000]);
+  });
+
+  it("treats request timeouts as cold starts (waking sprite hangs the request)", async () => {
+    const timeout = new DOMException(
+      "The operation was aborted due to timeout",
+      "TimeoutError",
+    );
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(timeout)
+      .mockResolvedValue(batchBody());
+    const sleeps: number[] = [];
+    const p = pool(fetchImpl, 60_000, sleeps);
+    const out = await p.runBatch("caveat-wa", JOBS);
+    expect(out).toEqual(RESULTS);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([1_000]);
+  });
+
+  it("treats connection errors as cold starts and gives up after ~30s", async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockRejectedValue(new Error("conn refused"));
-    const p = pool(fetchImpl);
-    await expect(p.runBatch("caveat-wa", JOBS)).rejects.toThrow(WorkerUnavailableError);
-    await expect(p.runBatch("caveat-wa", JOBS)).rejects.toThrow(/failed twice/);
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    const sleeps: number[] = [];
+    const p = pool(fetchImpl, 60_000, sleeps);
+    await expect(p.runBatch("caveat-wa", JOBS)).rejects.toThrow(
+      WorkerUnavailableError,
+    );
+    // initial attempt + 5 backoff retries
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+    expect(sleeps).toEqual([1_000, 2_000, 4_000, 8_000, 15_000]);
   });
 
   it("retries a non-2xx response once, then fails", async () => {

@@ -452,6 +452,11 @@ describe("optional source files", () => {
     expect(state.lastResult).toBe("change_found");
     expect(started).toHaveLength(1);
     expect(started[0]?.args.previous?.runId).toBe("run-reviewable");
+    // The carry pool holds every reviewable run with digests, newest first —
+    // the blocked run is never a source.
+    expect(
+      started[0]?.args.carrySources?.map((s) => s.runId),
+    ).toEqual(["run-reviewable"]);
     db.close();
   });
 });

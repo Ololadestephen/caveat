@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runPipeline } from "./run-pipeline.ts";
+import type { RunReceipt } from "../review/receipt.ts";
 import { InProcessPool } from "../worker/pool.ts";
 import type { WorkerJob, WorkerJobResult } from "../worker/pool.ts";
 
@@ -638,6 +639,107 @@ describe("incremental reruns", () => {
     expect(r.typedCallDigests).toEqual(first.receipt.typedCallDigests);
   });
 
+  it("carries each call from an older source when the newest reviewable run has a different digest", async () => {
+    const first = await firstRun();
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ versionId: "v2", chatCounts });
+    const pool = new InProcessPool(["wa-test", "wb-test"]);
+    const otherDigests = JSON.parse(
+      JSON.stringify(first.receipt),
+    ) as RunReceipt;
+    otherDigests.typedCallDigests = {
+      release_timing: "other",
+      escrow_schedule: "other",
+      counteroffer_search: "other",
+    };
+    const second = await runPipeline({
+      ...config,
+      runId: "run-2",
+      reviewsDir: writeReviewsDir(),
+      connections: CONNECTIONS,
+      pdfText: cannedPdfLines,
+      assertExpected: false,
+      workerPool: pool,
+      trigger: "watcher",
+      previous: {
+        runId: "run-1",
+        receipt: first.receipt,
+        sourceTuple: first.sourceTuple,
+      },
+      carrySources: [
+        { runId: "run-other", receipt: otherDigests },
+        { runId: "run-1", receipt: first.receipt },
+      ],
+    });
+    const r = second.receipt;
+
+    expect(r.status).toBe("reviewable");
+    expect(r.incremental?.carriedForward).toEqual([
+      "release_timing",
+      "escrow_schedule",
+      "counteroffer_search",
+    ]);
+    // Every call skipped the newest source's non-matching digest and carried
+    // from run-1 instead.
+    expect(
+      r.releaseTiming?.outcome.status === "decided"
+        ? r.releaseTiming.outcome.carriedFrom
+        : undefined,
+    ).toBe("run-1");
+    expect(
+      r.schedule?.outcome.status === "extracted"
+        ? r.schedule.outcome.carriedFrom
+        : undefined,
+    ).toBe("run-1");
+    expect(r.counteroffer?.carriedFrom).toBe("run-1");
+    expect(r.counteroffer?.reverifiedOn).toBe("wa-test");
+    // Zero model calls: both typed calls carried too.
+    expect(Object.values(chatCounts).reduce((a, b) => a + b, 0)).toBe(0);
+  });
+
+  it("never carries from a needs_review source", async () => {
+    const first = await firstRun();
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ versionId: "v2", chatCounts });
+    const pool = new InProcessPool(["wa-test", "wb-test"]);
+    const blocked = JSON.parse(JSON.stringify(first.receipt)) as RunReceipt;
+    blocked.status = "needs_review";
+    const second = await runPipeline({
+      ...config,
+      runId: "run-2",
+      reviewsDir: writeReviewsDir(),
+      connections: CONNECTIONS,
+      pdfText: cannedPdfLines,
+      assertExpected: false,
+      workerPool: pool,
+      trigger: "watcher",
+      previous: {
+        runId: "run-1",
+        receipt: first.receipt,
+        sourceTuple: first.sourceTuple,
+      },
+      carrySources: [{ runId: "run-blocked", receipt: blocked }],
+    });
+    const r = second.receipt;
+
+    expect(r.status).toBe("reviewable");
+    expect(r.incremental?.carriedForward).toEqual([]);
+    expect(
+      r.releaseTiming?.outcome.status === "decided"
+        ? r.releaseTiming.outcome.carriedFrom
+        : undefined,
+    ).toBeUndefined();
+    expect(
+      r.schedule?.outcome.status === "extracted"
+        ? r.schedule.outcome.carriedFrom
+        : undefined,
+    ).toBeUndefined();
+    expect(r.counteroffer?.carriedFrom).toBeUndefined();
+    // release_timing + escrow_schedule + the search round all ran fresh.
+    expect(chatCounts.release_timing_decision).toBe(1);
+    expect(chatCounts.schedule_extraction).toBe(1);
+  });
+
   it("re-asks the model for release_timing and escrow_schedule when §3 changed", async () => {
     const first = await firstRun();
     const chatCounts: Record<string, number> = {};
@@ -720,7 +822,7 @@ describe("incremental reruns", () => {
   it("runs full_no_baseline when the previous receipt lacks digests", async () => {
     const first = await firstRun();
     const bare = structuredClone(first.receipt);
-    delete bare.sectionDigests;
+    delete bare.typedCallDigests;
     const chatCounts: Record<string, number> = {};
     stubFetch({ versionId: "v2", chatCounts });
     const pool = new InProcessPool(["wa-test", "wb-test"]);

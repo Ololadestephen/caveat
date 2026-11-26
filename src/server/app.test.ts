@@ -47,7 +47,10 @@ type Rig = {
   origin: string;
   recheckState: { outcome: RecheckOutcome | Error };
   pipelineOutcome: { receipt: (runId: string) => RunReceipt; fail?: string };
-  pipelineConfigs: { previous?: { runId: string } }[];
+  pipelineConfigs: {
+    previous?: { runId: string };
+    carrySources?: { runId: string }[];
+  }[];
 };
 
 const running: Rig[] = [];
@@ -461,5 +464,6 @@ describe("manual run baseline", () => {
     expect(runId).toBeTruthy();
     const config = r.pipelineConfigs.find((c) => (c as { runId?: string }).runId === runId);
     expect((config?.previous as { runId?: string } | undefined)?.runId).toBe("run-good");
+    expect(config?.carrySources?.map((s) => s.runId)).toEqual(["run-good"]);
   });
 });
