@@ -25,6 +25,7 @@ import {
   markStale,
   newRunId,
   recordExport,
+  selectBaseline,
   supersedeOthers,
 } from "../store/db.ts";
 import { pageShell, renderRun, renderRunList, renderStaleChange } from "./pages.ts";
@@ -376,7 +377,11 @@ function routeRequest(ctx: AppContext, req: IncomingMessage, res: ServerResponse
         ),
       );
     }
-    const runId = startRun(ctx, { trigger: "manual" });
+    const previous = selectBaseline(db);
+    const runId = startRun(ctx, {
+      trigger: "manual",
+      ...(previous !== undefined ? { previous } : {}),
+    });
     return redirect(res, `/runs/${runId}`);
   }
   const runMatch = /^\/runs\/([^/]+)$/.exec(path);

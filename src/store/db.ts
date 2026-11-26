@@ -3,6 +3,10 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { randomBytes } from "node:crypto";
 
+import type { SourceTuple } from "../evidence/recheck.ts";
+import type { RunReceipt } from "../review/receipt.ts";
+import { isRecord } from "../shape.ts";
+
 export type RunStatus =
   | "running"
   | "reviewable"
@@ -230,6 +234,70 @@ export function listRuns(db: DatabaseSync): RunRow[] {
   return db
     .prepare("SELECT * FROM runs ORDER BY created_at DESC, id DESC")
     .all() as unknown as RunRow[];
+}
+
+function parseTupleJson(json: string): SourceTuple | undefined {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return Array.isArray(parsed) ? (parsed as SourceTuple) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseReceiptJson(json: string): RunReceipt | undefined {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return isRecord(parsed) && typeof parsed.receiptVersion === "string"
+      ? (parsed as RunReceipt)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// The baseline for the next run's incremental work. A run whose stored receipt
+// passed every gate (status "reviewable" — approved and stale runs count, the
+// DB status is not the receipt status) and carries both digest sets is the
+// safest baseline: its stored answers were never blocked, and each call
+// digest covers its exact inputs, so carrying is safe even across newer
+// blocked runs. Prefer it over a newer needs_review run — a blocked answer is
+// always re-asked, never carried. Falls back to the newest run with digests,
+// then the newest non-failed run at all.
+export function selectBaseline(
+  db: DatabaseSync,
+): { runId: string; receipt: RunReceipt; sourceTuple: SourceTuple } | undefined {
+  const candidates = listRuns(db).filter(
+    (r) => r.status !== "failed" && r.status !== "running",
+  );
+  const pick = (
+    row: RunRow | undefined,
+  ): { runId: string; receipt: RunReceipt; sourceTuple: SourceTuple } | undefined =>
+    row === undefined
+      ? undefined
+      : {
+          runId: row.id,
+          receipt: parseReceiptJson(row.receipt_json) ?? ({} as RunReceipt),
+          sourceTuple: parseTupleJson(row.source_tuple_json) ?? [],
+        };
+
+  const reviewable = candidates.find((r) => {
+    const receipt = parseReceiptJson(r.receipt_json);
+    return (
+      receipt?.status === "reviewable" &&
+      receipt.sectionDigests !== undefined &&
+      receipt.typedCallDigests !== undefined
+    );
+  });
+  if (reviewable !== undefined) return pick(reviewable);
+  const withDigests = candidates.find((r) => {
+    const receipt = parseReceiptJson(r.receipt_json);
+    return (
+      receipt?.sectionDigests !== undefined &&
+      receipt.typedCallDigests !== undefined
+    );
+  });
+  return pick(withDigests ?? candidates[0]);
 }
 
 export function finishRun(

@@ -6,7 +6,6 @@ import type { SourceTuple } from "../evidence/recheck.ts";
 import { listConnections } from "../gateway.ts";
 import type { Connection } from "../gateway.ts";
 import type { RunReceipt } from "../review/receipt.ts";
-import { isRecord } from "../shape.ts";
 import {
   hasRunningRun,
   latestWatchEvent,
@@ -14,6 +13,7 @@ import {
   markStale,
   newRowId,
   recordWatchEvent,
+  selectBaseline,
 } from "../store/db.ts";
 
 export type WatcherResult =
@@ -64,17 +64,6 @@ function parseTuple(json: string): SourceTuple | undefined {
   try {
     const parsed: unknown = JSON.parse(json);
     return Array.isArray(parsed) ? (parsed as SourceTuple) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function parseReceipt(json: string): RunReceipt | undefined {
-  try {
-    const parsed: unknown = JSON.parse(json);
-    return isRecord(parsed) && typeof parsed.receiptVersion === "string"
-      ? (parsed as RunReceipt)
-      : undefined;
   } catch {
     return undefined;
   }
@@ -227,27 +216,9 @@ export async function watchTick(deps: WatcherDeps, state: WatcherState): Promise
     recordEvent(deps, "changed", { changes: outcome.changes });
     state.lastResult = "change_found";
 
-    // Baseline for incremental work: the most recent non-failed run whose
-    // receipt carries digests; otherwise the latest non-failed run at all.
-    const candidates = listRuns(deps.db).filter(
-      (r) => r.status !== "failed" && r.status !== "running",
-    );
-    const withDigests = candidates.find((r) => {
-      const receipt = parseReceipt(r.receipt_json);
-      return (
-        receipt?.sectionDigests !== undefined &&
-        receipt.typedCallDigests !== undefined
-      );
-    });
-    const previousRow = withDigests ?? candidates[0];
-    const previous =
-      previousRow === undefined
-        ? undefined
-        : {
-            runId: previousRow.id,
-            receipt: parseReceipt(previousRow.receipt_json) ?? ({} as RunReceipt),
-            sourceTuple: parseTuple(previousRow.source_tuple_json) ?? [],
-          };
+    // Baseline for incremental work: the most recent run whose stored receipt
+    // passed every gate and carries digests; see selectBaseline.
+    const previous = selectBaseline(deps.db);
 
     const runId = deps.startRun({
       trigger: "watcher",

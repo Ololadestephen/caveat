@@ -11,7 +11,7 @@ import { fixtureReceipt } from "../review/fixture-receipt.ts";
 import { draftHash, receiptHash } from "../review/draft.ts";
 import type { RunReceipt } from "../review/receipt.ts";
 import { canonicalJson } from "../runner/digest.ts";
-import { getRun, markStale, openDb } from "../store/db.ts";
+import { createRun, getRun, markStale, openDb } from "../store/db.ts";
 import { createApp } from "./app.ts";
 import type { AppDeps } from "./app.ts";
 
@@ -47,6 +47,7 @@ type Rig = {
   origin: string;
   recheckState: { outcome: RecheckOutcome | Error };
   pipelineOutcome: { receipt: (runId: string) => RunReceipt; fail?: string };
+  pipelineConfigs: { previous?: { runId: string } }[];
 };
 
 const running: Rig[] = [];
@@ -55,6 +56,7 @@ async function rig(overrides: Partial<AppDeps> = {}): Promise<Rig> {
   const db = openDb(":memory:");
   const recheckState: Rig["recheckState"] = { outcome: { ok: true, tuple: TUPLE, changes: [] } };
   const pipelineOutcome: Rig["pipelineOutcome"] = { receipt: fixtureReceipt };
+  const pipelineConfigs: Rig["pipelineConfigs"] = [];
   const server = createApp({
     db,
     approver: "Ololade Stephen",
@@ -74,6 +76,7 @@ async function rig(overrides: Partial<AppDeps> = {}): Promise<Rig> {
       return Promise.resolve(recheckState.outcome);
     },
     pipeline: (config) => {
+      pipelineConfigs.push(config);
       if (pipelineOutcome.fail !== undefined) {
         return Promise.reject(new Error(pipelineOutcome.fail));
       }
@@ -88,7 +91,7 @@ async function rig(overrides: Partial<AppDeps> = {}): Promise<Rig> {
   await once(server, "listening");
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("no port");
-  const r = { db, server, origin: `http://127.0.0.1:${address.port}`, recheckState, pipelineOutcome };
+  const r = { db, server, origin: `http://127.0.0.1:${address.port}`, recheckState, pipelineOutcome, pipelineConfigs };
   running.push(r);
   return r;
 }
@@ -242,7 +245,7 @@ describe("caveat app", () => {
     });
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
-    running.push({ db, server, origin: "", recheckState: { outcome: { ok: true, tuple: [], changes: [] } }, pipelineOutcome: { receipt: fixtureReceipt } });
+    running.push({ db, server, origin: "", recheckState: { outcome: { ok: true, tuple: [], changes: [] } }, pipelineOutcome: { receipt: fixtureReceipt }, pipelineConfigs: [] });
     const port = (server.address() as { port: number }).port;
     const res = await fetch(`http://127.0.0.1:${port}/runs`, {
       method: "POST",
@@ -423,5 +426,40 @@ describe("caveat app", () => {
     const run = getRun(r.db, runId)!;
     const res = await post(r, `/runs/${runId}/approve`, `receiptHash=${run.receipt_hash}&draftHash=${run.draft_hash}`);
     expect(res.status).toBe(503);
+  });
+});
+
+describe("manual run baseline", () => {
+  it("passes the newest reviewable-with-digests run as previous, skipping blocked runs", async () => {
+    const r = await rig();
+    const seed = (id: string, createdAt: string, status: string, receipt: object) => {
+      createRun(r.db, {
+        id,
+        createdAt,
+        sourceTupleJson: JSON.stringify(TUPLE),
+        receiptJson: JSON.stringify(receipt),
+        receiptHash: "",
+        draftText: "",
+        draftHash: "",
+      });
+      r.db.prepare("UPDATE runs SET status = ? WHERE id = ?").run(status, id);
+    };
+    const goodReceipt = {
+      ...fixtureReceipt("run-good"),
+      status: "reviewable",
+      sectionDigests: { "a#b": "x" },
+      typedCallDigests: { release_timing: "d" },
+    };
+    seed("run-good", "2026-11-25T01:00:00.000Z", "approved", goodReceipt);
+    seed("run-blocked", "2026-11-25T02:00:00.000Z", "needs_review", {
+      ...goodReceipt,
+      runId: "run-blocked",
+      status: "needs_review",
+    });
+
+    const runId = await startRun(r);
+    expect(runId).toBeTruthy();
+    const config = r.pipelineConfigs.find((c) => (c as { runId?: string }).runId === runId);
+    expect((config?.previous as { runId?: string } | undefined)?.runId).toBe("run-good");
   });
 });

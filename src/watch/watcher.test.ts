@@ -420,4 +420,38 @@ describe("optional source files", () => {
     expect(getRun(db, "run-latest")?.status).toBe("stale");
     db.close();
   });
+  it("skips a newer needs_review run and picks the older reviewable baseline", async () => {
+    const db = openDb(":memory:");
+    const tuple = makeTuple("v1");
+    seedRun(db, {
+      id: "run-reviewable",
+      createdAt: "2026-11-25T01:00:00.000Z",
+      status: "reviewable",
+      sourceTuple: tuple,
+      receipt: RECEIPT_WITH_DIGESTS,
+    });
+    seedRun(db, {
+      id: "run-blocked",
+      createdAt: "2026-11-25T02:00:00.000Z",
+      status: "needs_review",
+      sourceTuple: tuple,
+      // Receipt with digests but a blocked status: it must not be the baseline.
+      receipt: { ...RECEIPT_WITH_DIGESTS, status: "needs_review" },
+    });
+    const confirmed = makeTuple("v2");
+    const { deps, state, started } = makeDeps(db, {
+      listing: entriesFor(confirmed),
+      recheck: () =>
+        Promise.resolve({
+          ok: true,
+          tuple: confirmed,
+          changes: diffSourceTuple(tuple, confirmed),
+        }),
+    });
+    await watchTick(deps, state);
+    expect(state.lastResult).toBe("change_found");
+    expect(started).toHaveLength(1);
+    expect(started[0]?.args.previous?.runId).toBe("run-reviewable");
+    db.close();
+  });
 });
