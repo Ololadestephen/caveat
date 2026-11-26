@@ -15,8 +15,10 @@ import { versionTag, sha12 } from "../evidence/recheck.ts";
 import type { SourceTuple } from "../evidence/recheck.ts";
 import { DECISION_SYSTEM_PROMPT } from "../interpret/prompt.ts";
 import {
+  buildCounterCrosscheckRequest,
   buildGateRequest,
   buildReleaseTimingDigestInput,
+  buildScheduleCrosscheckRequests,
   JEV_MODEL,
   JevDecisionProvider,
 } from "../interpret/jev.ts";
@@ -28,7 +30,13 @@ import {
 } from "../interpret/schedule.ts";
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import { RELEASE_TIMING } from "../interpret/types.ts";
-import type { DecisionOutcome, Excerpt, JevGate, Question } from "../interpret/types.ts";
+import type {
+  DecisionOutcome,
+  Excerpt,
+  JevCrosscheck,
+  JevGate,
+  Question,
+} from "../interpret/types.ts";
 import type { DecisionProvider } from "../interpret/provider.ts";
 import { parseCashFile } from "../plan/cash-file.ts";
 import {
@@ -42,7 +50,7 @@ import {
   CLIENT_COUNTER_SCHEMA,
   OpenRouterClientCounterExtractor,
 } from "../interpret/client-counter.ts";
-import type { ClientCitation } from "../interpret/client-counter.ts";
+import type { ClientCitation, ClientCounterTexts } from "../interpret/client-counter.ts";
 import { RECEIPT_VERSION } from "../review/receipt.ts";
 import type { ClientReplyReceipt, IncrementalInfo, RunReceipt } from "../review/receipt.ts";
 import {
@@ -199,8 +207,10 @@ type CarryKey =
   | "release_timing"
   | "escrow_schedule"
   | "counteroffer_search"
+  | "schedule_crosscheck"
   | "client_letter_gate"
   | "client_counter"
+  | "client_counter_crosscheck"
   | "client_reply_search";
 
 // Finds the first carry source (newest first) whose stored digest for this
@@ -969,7 +979,9 @@ function buildCarryContext(config: PipelineConfig): {
 }
 
 // Ask (or carry) the two typed calls over the contract excerpts: the
-// release-timing decision and the escrow-schedule extraction.
+// release-timing decision and the escrow-schedule extraction, plus Jev's
+// per-release cross-check of the extracted schedule when a TypeSafe
+// connection exists.
 async function runTypedCalls(args: {
   decisionCallDigest: string;
   scheduleCallDigest: string;
@@ -981,8 +993,14 @@ async function runTypedCalls(args: {
   carrySourceFor: CarrySourceLookup;
   reran: string[];
   carriedForward: string[];
+  blockedReasons: { reason: string; detail: string }[];
   timer: StageTimer;
-}): Promise<{ decision: DecisionOutcome; schedule: ScheduleOutcome }> {
+}): Promise<{
+  decision: DecisionOutcome;
+  schedule: ScheduleOutcome;
+  scheduleCrosscheck: JevCrosscheck[] | undefined;
+  scheduleCrosscheckDigest: string;
+}> {
   const {
     decisionCallDigest,
     scheduleCallDigest,
@@ -994,6 +1012,7 @@ async function runTypedCalls(args: {
     carrySourceFor,
     reran,
     carriedForward,
+    blockedReasons,
     timer,
   } = args;
   // --- Typed decision -------------------------------------------------------------
@@ -1039,7 +1058,47 @@ async function runTypedCalls(args: {
     reran.push("escrow_schedule");
   }
   timer.record("schedule");
-  return { decision, schedule };
+
+  // --- Jev schedule cross-check --------------------------------------------------
+  // Jev verifies the extraction's conditional label on every release against
+  // that release's own quote. Runs whenever the schedule is usable — carried
+  // or fresh — and carries by its own digest like the other typed calls.
+  let scheduleCrosscheck: JevCrosscheck[] | undefined;
+  let scheduleCrosscheckDigest = "none";
+  if (typesafeConn !== undefined && schedule.status === "extracted") {
+    timer.begin();
+    const crosscheckDigest = digestValue({
+      provider: "typesafe",
+      requests: buildScheduleCrosscheckRequests(schedule.schedule.releases, JEV_MODEL),
+    });
+    scheduleCrosscheckDigest = crosscheckDigest;
+    const crosscheckSource = carrySourceFor("schedule_crosscheck", crosscheckDigest);
+    const prevCrosscheck = crosscheckSource?.receipt.schedule?.crosscheck;
+    if (prevCrosscheck !== undefined && prevCrosscheck.length > 0) {
+      scheduleCrosscheck = prevCrosscheck;
+      carriedForward.push("schedule_crosscheck");
+    } else {
+      const jev = new JevDecisionProvider({
+        gatewayBaseUrl: typesafeConn.gatewayBaseUrl,
+      });
+      const outcome = await jev.crosscheckSchedule(schedule.schedule.releases);
+      reran.push("schedule_crosscheck");
+      if (outcome.status === "pass") {
+        scheduleCrosscheck = outcome.checks;
+      } else if (outcome.status === "failed") {
+        blockedReasons.push({ reason: outcome.reason, detail: outcome.detail });
+      } else {
+        scheduleCrosscheck = outcome.checks;
+        blockedReasons.push({
+          reason:
+            outcome.status === "mismatch" ? "jev_crosscheck_mismatch" : "low_confidence",
+          detail: outcome.detail,
+        });
+      }
+    }
+    timer.record("schedule_crosscheck");
+  }
+  return { decision, schedule, scheduleCrosscheck, scheduleCrosscheckDigest };
 }
 
 // Flags, human-review artifacts, gate evaluation, the owner cash file, the
@@ -1325,8 +1384,10 @@ function assembleReceipt(args: {
     decisionCallDigest: string;
     scheduleCallDigest: string;
     searchCallDigest: string;
+    scheduleCrosscheckDigest: string;
     clientGateDigest: string;
     clientCounterDigest: string;
+    clientCounterCrosscheckDigest: string;
     clientReplySearchDigest: string;
   };
   blockedReasons: { reason: string; detail: string }[];
@@ -1337,6 +1398,7 @@ function assembleReceipt(args: {
   effectiveAction: string | null;
   overrides: SourcedOverride[];
   schedule: ScheduleOutcome;
+  scheduleCrosscheck: JevCrosscheck[] | undefined;
   decisionExcerpts: Excerpt[];
   humanReview: RunReceipt["humanReview"];
   flags: ReturnType<typeof detectFlags>;
@@ -1366,6 +1428,7 @@ function assembleReceipt(args: {
     effectiveAction,
     overrides,
     schedule,
+    scheduleCrosscheck,
     decisionExcerpts,
     humanReview,
     flags,
@@ -1380,8 +1443,10 @@ function assembleReceipt(args: {
     decisionCallDigest,
     scheduleCallDigest,
     searchCallDigest,
+    scheduleCrosscheckDigest,
     clientGateDigest,
     clientCounterDigest,
+    clientCounterCrosscheckDigest,
     clientReplySearchDigest,
   } = digests;
   const incremental: IncrementalInfo | undefined =
@@ -1447,8 +1512,14 @@ function assembleReceipt(args: {
       ...(clientGateDigest !== "none"
         ? { client_letter_gate: clientGateDigest }
         : {}),
+      ...(scheduleCrosscheckDigest !== "none"
+        ? { schedule_crosscheck: scheduleCrosscheckDigest }
+        : {}),
       ...(clientCounterDigest !== "none"
         ? { client_counter: clientCounterDigest }
+        : {}),
+      ...(clientCounterCrosscheckDigest !== "none"
+        ? { client_counter_crosscheck: clientCounterCrosscheckDigest }
         : {}),
       ...(clientReplySearchDigest !== "none"
         ? { client_reply_search: clientReplySearchDigest }
@@ -1457,7 +1528,11 @@ function assembleReceipt(args: {
     releaseTiming: { outcome: decision, question },
     effectiveAction,
     overrides,
-    schedule: { outcome: schedule, excerpts: decisionExcerpts },
+    schedule: {
+      outcome: schedule,
+      excerpts: decisionExcerpts,
+      ...(scheduleCrosscheck !== undefined ? { crosscheck: scheduleCrosscheck } : {}),
+    },
     humanReview,
     flags,
     readings,
@@ -1492,6 +1567,7 @@ async function runReplyStage(args: {
 }): Promise<{
   clientReply: ClientReplyReceipt | undefined;
   clientReplySearchDigest: string;
+  clientCounterCrosscheckDigest: string;
 }> {
   const {
     replyFile,
@@ -1517,12 +1593,17 @@ async function runReplyStage(args: {
     schedule.status !== "extracted" ||
     blockedReasons.length !== 0
   ) {
-    return { clientReply: undefined, clientReplySearchDigest: "none" };
+    return {
+      clientReply: undefined,
+      clientReplySearchDigest: "none",
+      clientCounterCrosscheckDigest: "none",
+    };
   }
 
   timer.begin();
   let clientReply: ClientReplyReceipt | undefined;
   let clientReplySearchDigest = "none";
+  let clientCounterCrosscheckDigest = "none";
 
   const replyFileMeta = {
     fileName: replyFile.fileName,
@@ -1545,6 +1626,8 @@ async function runReplyStage(args: {
   // deterministic worker test always re-runs (it covers base + readings,
   // which the read digest does not).
   let counterRecord: SearchCandidateRecord | undefined;
+  let counterTexts: ClientCounterTexts | undefined;
+  let counterCrosscheck: JevCrosscheck | undefined;
   let citation: ClientCitation | undefined;
   let workers: string[] | undefined;
   let replyFail: { reason: string; detail: string } | undefined;
@@ -1590,11 +1673,15 @@ async function runReplyStage(args: {
       ? carrySourceFor("client_counter", clientCounterDigest)
       : undefined;
   const prevReply = counterSource?.receipt.clientReply;
+  // With a TypeSafe connection the cross-check needs the extraction's
+  // verbatim texts; a carried counter from a receipt that lacks them is
+  // re-extracted so the cross-check can restate it exactly.
   const carryRead =
     replyFail === undefined &&
     counterSource !== undefined &&
     prevReply?.counter !== undefined &&
-    prevReply.citation !== undefined;
+    prevReply.citation !== undefined &&
+    (typesafeConn === undefined || prevReply.counterTexts !== undefined);
   if (carryRead && prevReply !== undefined && prevReply.counter !== undefined) {
     const carried = prevReply.counter;
     counterRecord = {
@@ -1605,6 +1692,7 @@ async function runReplyStage(args: {
       status: "tested",
     };
     citation = prevReply.citation;
+    counterTexts = typesafeConn !== undefined ? prevReply.counterTexts : undefined;
     carriedForward.push("client_counter");
   } else if (replyFail === undefined) {
     const extractor = new OpenRouterClientCounterExtractor({
@@ -1619,6 +1707,7 @@ async function runReplyStage(args: {
       replyFail = { reason: read.reason, detail: read.detail };
     } else {
       citation = read.citation;
+      counterTexts = typesafeConn !== undefined ? read.texts : undefined;
       counterRecord = {
         id: "client",
         lever: read.candidate.lever,
@@ -1633,6 +1722,67 @@ async function runReplyStage(args: {
       };
     }
     reran.push("client_counter");
+  }
+
+  // Jev counter cross-check: Jev must agree that the cited sentence proposes
+  // the extracted change before the runner spends a worker round on it.
+  if (
+    typesafeConn !== undefined &&
+    replyFail === undefined &&
+    counterRecord !== undefined &&
+    citation !== undefined &&
+    counterTexts !== undefined
+  ) {
+    const crosscheckRequest = buildCounterCrosscheckRequest(
+      counterRecord.lever,
+      counterTexts,
+      citation.quote,
+      JEV_MODEL,
+    );
+    if (crosscheckRequest === undefined) {
+      replyFail = {
+        reason: "schema_mismatch",
+        detail: "the extracted counter texts cannot build the cross-check instruction",
+      };
+    } else {
+      clientCounterCrosscheckDigest = digestValue({
+        provider: "typesafe",
+        request: crosscheckRequest,
+      });
+      const crosscheckSource = carrySourceFor(
+        "client_counter_crosscheck",
+        clientCounterCrosscheckDigest,
+      );
+      const prevCheck = crosscheckSource?.receipt.clientReply?.counterCrosscheck;
+      if (prevCheck !== undefined) {
+        counterCrosscheck = prevCheck;
+        carriedForward.push("client_counter_crosscheck");
+      } else {
+        const jev = new JevDecisionProvider({
+          gatewayBaseUrl: typesafeConn.gatewayBaseUrl,
+        });
+        const outcome = await jev.crosscheckCounter({
+          lever: counterRecord.lever,
+          texts: counterTexts,
+          quote: citation.quote,
+        });
+        reran.push("client_counter_crosscheck");
+        if (outcome.status === "pass") {
+          counterCrosscheck = outcome.checks[0];
+        } else if (outcome.status === "failed") {
+          replyFail = { reason: outcome.reason, detail: outcome.detail };
+        } else {
+          counterCrosscheck = outcome.checks[0];
+          replyFail = {
+            reason:
+              outcome.status === "mismatch"
+                ? "jev_crosscheck_mismatch"
+                : "low_confidence",
+            detail: outcome.detail,
+          };
+        }
+      }
+    }
   }
 
   if (replyFail === undefined && counterRecord !== undefined) {
@@ -1666,6 +1816,8 @@ async function runReplyStage(args: {
       detail: replyFail.detail,
       ...(gate !== undefined ? { gate } : {}),
       ...(citation !== undefined ? { citation } : {}),
+      ...(counterTexts !== undefined ? { counterTexts } : {}),
+      ...(counterCrosscheck !== undefined ? { counterCrosscheck } : {}),
       ...(counterRecord !== undefined ? { counter: counterRecord } : {}),
       ...(workers !== undefined ? { workers } : {}),
     };
@@ -1674,9 +1826,11 @@ async function runReplyStage(args: {
     const counterFields = {
       ...replyFileMeta,
       citation,
+      ...(counterTexts !== undefined ? { counterTexts } : {}),
       counter: counterRecord,
       ...(workers !== undefined ? { workers } : {}),
       ...(gate !== undefined ? { gate } : {}),
+      ...(counterCrosscheck !== undefined ? { counterCrosscheck } : {}),
     };
     if (counterRecord.passesAll === true) {
       clientReply = { status: "safe", ...counterFields };
@@ -1763,7 +1917,7 @@ async function runReplyStage(args: {
   }
 
   timer.record("client_reply");
-  return { clientReply, clientReplySearchDigest };
+  return { clientReply, clientReplySearchDigest, clientCounterCrosscheckDigest };
 }
 
 // The evidence->decision->runner pipeline. The typed questions cover the
@@ -1803,19 +1957,21 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   const reran: string[] = [];
   const carriedForward: string[] = [];
 
-  const { decision, schedule } = await runTypedCalls({
-    decisionCallDigest,
-    scheduleCallDigest,
-    question,
-    decisionExcerpts,
-    openrouterConn,
-    typesafeConn,
-    model,
-    carrySourceFor,
-    reran,
-    carriedForward,
-    timer,
-  });
+  const { decision, schedule, scheduleCrosscheck, scheduleCrosscheckDigest } =
+    await runTypedCalls({
+      decisionCallDigest,
+      scheduleCallDigest,
+      question,
+      decisionExcerpts,
+      openrouterConn,
+      typesafeConn,
+      model,
+      carrySourceFor,
+      reran,
+      carriedForward,
+      blockedReasons,
+      timer,
+    });
 
   const {
     flags,
@@ -1869,6 +2025,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   });
   const clientReply = replyStage.clientReply;
   const clientReplySearchDigest = replyStage.clientReplySearchDigest;
+  const clientCounterCrosscheckDigest = replyStage.clientCounterCrosscheckDigest;
   timer.finish();
 
   const receipt = assembleReceipt({
@@ -1885,8 +2042,10 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
       decisionCallDigest,
       scheduleCallDigest,
       searchCallDigest,
+      scheduleCrosscheckDigest,
       clientGateDigest,
       clientCounterDigest,
+      clientCounterCrosscheckDigest,
       clientReplySearchDigest,
     },
     blockedReasons,
@@ -1897,6 +2056,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     effectiveAction,
     overrides,
     schedule,
+    scheduleCrosscheck,
     decisionExcerpts,
     humanReview,
     flags,

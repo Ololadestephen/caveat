@@ -7,6 +7,7 @@ import {
 } from "./jev.ts";
 import { digestValue } from "../runner/digest.ts";
 import { RELEASE_TIMING } from "./types.ts";
+import type { ValidatedRelease } from "./schedule.ts";
 import type { Excerpt, Question } from "./types.ts";
 
 const EXCERPTS: Excerpt[] = [
@@ -367,5 +368,220 @@ describe("JevDecisionProvider.gateLetter", () => {
     const out = await provider(fetchImpl).gateLetter(EXCERPTS);
     expect(out.status).toBe("failed");
     if (out.status === "failed") expect(out.reason).toBe("http_error");
+  });
+});
+
+describe("JevDecisionProvider cross-checks", () => {
+  const release = (
+    id: string,
+    conditional: boolean,
+    quote: string,
+  ): ValidatedRelease => ({
+    id,
+    conditional,
+    extensionId: conditional ? "ext-2027-01-02" : undefined,
+    amountText: "$75,000",
+    amountCents: 7500000,
+    dateText: "January 2, 2027",
+    date: "2027-01-02",
+    conditionText: conditional ? "if this Amendment is still in effect" : null,
+    excerptId: "03-second-amendment.pdf#§3",
+    quote,
+  });
+
+  // Routes each systemone request by its question names; the nouls map keys
+  // by question name and falls back to `fallback`.
+  function noulFetch(nouls: Record<string, number>, fallback = 0.9) {
+    return vi.fn<typeof fetch>().mockImplementation((_url, init) => {
+      const body = JSON.parse((init as { body: string }).body) as {
+        questions: Record<string, unknown>;
+      };
+      const answers = Object.fromEntries(
+        Object.keys(body.questions).map((name) => [
+          name,
+          { type: "noul", noul: nouls[name] ?? fallback },
+        ]),
+      );
+      return Promise.resolve(jevResponse(answers));
+    });
+  }
+
+  describe("crosscheckSchedule", () => {
+    it("pass: each release lands in its expected band, with verbatim instructions", async () => {
+      const releases = [
+        release("release-1", false, "unconditional quote"),
+        release("release-ext-1", true, "conditional quote"),
+      ];
+      const fetchImpl = noulFetch({
+        "release_release-1": 0.03,
+        "release_release-ext-1": 0.97,
+      });
+      const out = await provider(fetchImpl).crosscheckSchedule(releases);
+      expect(out.status).toBe("pass");
+      if (out.status !== "pass") return;
+      expect(out.checks.map((c) => c.question)).toEqual([
+        "release_release-1",
+        "release_release-ext-1",
+      ]);
+      // Different quotes -> one request per release.
+      const reqs = bodies(fetchImpl);
+      expect(reqs).toHaveLength(2);
+      expect(reqs[0]?.state).toEqual({ quote: "unconditional quote" });
+      expect(reqs[0]?.questions["release_release-1"]?.instructions).toBe(
+        "The quoted clause makes the payment of $75,000 conditional on an extension or another condition.",
+      );
+      expect(reqs[1]?.state).toEqual({ quote: "conditional quote" });
+    });
+
+    it("releases sharing one quote go in a single request", async () => {
+      const releases = [
+        release("release-1", false, "shared quote"),
+        release("release-2", false, "shared quote"),
+      ];
+      const fetchImpl = noulFetch({}, 0.03);
+      const out = await provider(fetchImpl).crosscheckSchedule(releases);
+      expect(out.status).toBe("pass");
+      const reqs = bodies(fetchImpl);
+      expect(reqs).toHaveLength(1);
+      expect(Object.keys(reqs[0]?.questions ?? {})).toEqual([
+        "release_release-1",
+        "release_release-2",
+      ]);
+    });
+
+    it("mismatch: a clear opposite answer names the release", async () => {
+      const releases = [release("release-1", false, "unconditional quote")];
+      const fetchImpl = noulFetch({ "release_release-1": 0.95 });
+      const out = await provider(fetchImpl).crosscheckSchedule(releases);
+      expect(out.status).toBe("mismatch");
+      if (out.status !== "mismatch") return;
+      expect(out.detail).toContain("release-1");
+      expect(out.checks[0]?.noul).toBe(0.95);
+    });
+
+    it("uncertain: the middle band is undecided, not a mismatch", async () => {
+      const releases = [release("release-ext-1", true, "conditional quote")];
+      const fetchImpl = noulFetch({ "release_release-ext-1": 0.5 });
+      const out = await provider(fetchImpl).crosscheckSchedule(releases);
+      expect(out.status).toBe("uncertain");
+      if (out.status !== "uncertain") return;
+      expect(out.detail).toContain("release-ext-1");
+      expect(out.checks).toHaveLength(1);
+    });
+
+    it("failed: a missing noul answer is a schema mismatch", async () => {
+      const releases = [release("release-1", false, "unconditional quote")];
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(jevResponse({ "release_release-1": { type: "noul" } }));
+      const out = await provider(fetchImpl).crosscheckSchedule(releases);
+      expect(out.status).toBe("failed");
+      if (out.status !== "failed") return;
+      expect(out.reason).toBe("schema_mismatch");
+    });
+  });
+
+  describe("crosscheckCounter", () => {
+    const quote = "We propose that $6,000 of the January 2, 2027 release be paid in two monthly parts, the first on November 2, 2026.";
+    const texts = {
+      amount_text: "$6,000",
+      date_text: "November 2, 2026",
+      split_count_text: "two",
+    };
+
+    it("pass: noul >= 0.8 with the lever's verbatim instruction", async () => {
+      const fetchImpl = noulFetch({ counter_proposal: 0.97 });
+      const out = await provider(fetchImpl).crosscheckCounter({
+        lever: "milestone_split",
+        texts,
+        quote,
+      });
+      expect(out.status).toBe("pass");
+      const req = lastBody(fetchImpl);
+      expect(req.state).toEqual({ quote });
+      expect(req.questions.counter_proposal?.instructions).toBe(
+        "The sentence proposes paying $6,000 in two monthly parts, the first on November 2, 2026.",
+      );
+    });
+
+    it("mismatch: noul <= 0.2", async () => {
+      const fetchImpl = noulFetch({ counter_proposal: 0.1 });
+      const out = await provider(fetchImpl).crosscheckCounter({
+        lever: "earlier_release",
+        texts: { amount_text: "$6,000", date_text: "November 2, 2026" },
+        quote,
+      });
+      expect(out.status).toBe("mismatch");
+      if (out.status !== "mismatch") return;
+      expect(out.checks[0]?.noul).toBe(0.1);
+    });
+
+    it("uncertain: between the bands", async () => {
+      const fetchImpl = noulFetch({ counter_proposal: 0.5 });
+      const out = await provider(fetchImpl).crosscheckCounter({
+        lever: "upfront_deposit",
+        texts: { amount_text: "$6,000", date_text: "October 1, 2026" },
+        quote,
+      });
+      expect(out.status).toBe("uncertain");
+    });
+
+    it("each lever builds its own instruction", async () => {
+      const cases: [Parameters<JevDecisionProvider["crosscheckCounter"]>[0], string][] = [
+        [
+          {
+            lever: "upfront_deposit",
+            texts: { amount_text: "$3,000", date_text: "October 1, 2026" },
+            quote,
+          },
+          "The sentence proposes paying $3,000 to the consultant as an upfront deposit on October 1, 2026.",
+        ],
+        [
+          {
+            lever: "earlier_release",
+            texts: { amount_text: "$5,000", date_text: "December 1, 2026" },
+            quote,
+          },
+          "The sentence proposes releasing $5,000 from escrow early, on December 1, 2026.",
+        ],
+        [
+          {
+            lever: "milestone_split",
+            texts: {
+              amount_text: "$6,000",
+              split_count_text: "three",
+              date_text: "November 2, 2026",
+            },
+            quote,
+          },
+          "The sentence proposes paying $6,000 in three monthly parts, the first on November 2, 2026.",
+        ],
+        [
+          {
+            lever: "shorter_payment_terms",
+            texts: { net_days_text: "30 days" },
+            quote,
+          },
+          "The sentence proposes paying each month's fees 30 days after the month ends.",
+        ],
+      ];
+      for (const [args, expected] of cases) {
+        const fetchImpl = noulFetch({}, 0.97);
+        const out = await provider(fetchImpl).crosscheckCounter(args);
+        expect(out.status).toBe("pass");
+        expect(lastBody(fetchImpl).questions.counter_proposal?.instructions).toBe(expected);
+      }
+    });
+
+    it("missing texts fail without a call", async () => {
+      const fetchImpl = noulFetch({});
+      const out = await provider(fetchImpl).crosscheckCounter({
+        lever: "milestone_split",
+        texts: { amount_text: "$6,000" },
+        quote,
+      });
+      expect(out.status).toBe("failed");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
   });
 });

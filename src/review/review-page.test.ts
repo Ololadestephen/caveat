@@ -913,6 +913,70 @@ describe("renderReviewPage — Jev", () => {
     expect(html).toContain("95.0%");
   });
 
+  it("schedule cross-check: one clause per release with its band", () => {
+    const receipt = JSON.parse(
+      JSON.stringify(fixtureReceipt("run-page-jev")),
+    ) as RunReceipt;
+    const sched = receipt.schedule?.outcome;
+    if (sched?.status === "extracted") {
+      sched.schedule.releases = [
+        ...sched.schedule.releases,
+        {
+          id: "release-ext-1",
+          conditional: true,
+          extensionId: "ext-2027-01-02",
+          amountText: "$25,000",
+          amountCents: 2500000,
+          dateText: "January 2, 2027",
+          date: "2027-01-02",
+          conditionText: "if extended",
+          excerptId: "x",
+          quote: "q2",
+        },
+      ];
+    }
+    if (receipt.schedule !== null) {
+      receipt.schedule.crosscheck = [
+        { question: "release_release-1", noul: 0.03, model: "jev-1.14.0" },
+        { question: "release_release-ext-1", noul: 0.97, model: "jev-1.14.0" },
+      ];
+    }
+    const html = renderReviewPage(receipt);
+    expect(html).toContain("Jev cross-check: release-1 unconditional: p(conditional) = 0.03 ✓");
+    expect(html).toContain("release-ext-1 conditional: p(conditional) = 0.97 ✓");
+  });
+
+  it("schedule cross-check: a failing band is marked", () => {
+    const receipt = JSON.parse(
+      JSON.stringify(fixtureReceipt("run-page-jev")),
+    ) as RunReceipt;
+    if (receipt.schedule !== null) {
+      receipt.schedule.crosscheck = [
+        { question: "release_release-1", noul: 0.95, model: "jev-1.14.0" },
+      ];
+    }
+    const html = renderReviewPage(receipt);
+    expect(html).toContain("release-1 unconditional: p(conditional) = 0.95 ✗");
+  });
+
+  it("client reply: the counter cross-check line shows the noul", () => {
+    const receipt = JSON.parse(
+      JSON.stringify(fixtureReceipt("run-page-jev-gate")),
+    ) as RunReceipt;
+    receipt.clientReply = {
+      status: "safe",
+      fileName: "04-client-reply.pdf",
+      versionTag: "abc123def456",
+      sha12: "000aaa111bbb",
+      gate: { noul: 0.97, model: "jev-1.14.0" },
+      counterCrosscheck: { question: "counter_proposal", noul: 0.93, model: "jev-1.14.0" },
+    };
+    const html = renderReviewPage(receipt);
+    expect(html).toContain(
+      "Jev cross-check: the letter proposes the extracted change, p = 0.93",
+    );
+  });
+
   it("client reply: the gate line shows the noul", () => {
     const receipt = JSON.parse(
       JSON.stringify(fixtureReceipt("run-page-jev-gate")),

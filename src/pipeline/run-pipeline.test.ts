@@ -232,6 +232,8 @@ function stubFetch(
     typesafe?: {
       decisionAnswers?: Record<string, unknown>;
       gateNoul?: number;
+      scheduleNouls?: Record<string, number>;
+      counterNoul?: number;
       calls?: string[];
     };
   } = {},
@@ -257,7 +259,12 @@ function stubFetch(
             ? "release_timing_source"
             : questions !== undefined && "single_payment_change" in questions
               ? "client_letter_gate"
-              : "other";
+              : questions !== undefined && "counter_proposal" in questions
+                ? "client_counter_crosscheck"
+                : questions !== undefined &&
+                    Object.keys(questions).some((k) => k.startsWith("release_"))
+                  ? "schedule_crosscheck"
+                  : "other";
       opts.typesafe?.calls?.push(kind);
       const decisionAnswers =
         opts.typesafe?.decisionAnswers ?? JEV_DECIDED_ANSWERS;
@@ -269,7 +276,28 @@ function stubFetch(
                 noul: opts.typesafe?.gateNoul ?? 0.95,
               },
             }
-          : { [kind]: decisionAnswers[kind as keyof typeof decisionAnswers] };
+          : kind === "client_counter_crosscheck"
+            ? {
+                counter_proposal: {
+                  type: "noul",
+                  noul: opts.typesafe?.counterNoul ?? 0.97,
+                },
+              }
+            : kind === "schedule_crosscheck"
+              ? Object.fromEntries(
+                  Object.keys(questions ?? {}).map((name) => [
+                    name,
+                    {
+                      type: "noul",
+                      // Conditional releases carry "-ext-" ids; unconditional
+                      // ones expect p(conditional) below the band.
+                      noul:
+                        opts.typesafe?.scheduleNouls?.[name] ??
+                        (name.includes("-ext-") ? 0.97 : 0.03),
+                    },
+                  ]),
+                )
+              : { [kind]: decisionAnswers[kind as keyof typeof decisionAnswers] };
       return Promise.resolve(
         jsonResponse({
           model: "jev-1.14.0",
@@ -1052,6 +1080,15 @@ describe("client reply", () => {
     expect(r.sectionDigests?.["04-client-reply.pdf#§2"]).toBeTruthy();
     expect(result.sections.every((s) => s.fileName !== "04-client-reply.pdf")).toBe(true);
     expect(result.sourceTuple).toHaveLength(4);
+
+    // Without a TypeSafe connection nothing Jev-related is recorded — the
+    // receipt stays byte-identical to a pre-cross-check run.
+    expect(reply?.counterTexts).toBeUndefined();
+    expect(reply?.counterCrosscheck).toBeUndefined();
+    expect(reply?.gate).toBeUndefined();
+    expect(r.schedule?.crosscheck).toBeUndefined();
+    expect(r.typedCallDigests?.schedule_crosscheck).toBeUndefined();
+    expect(r.typedCallDigests?.client_counter_crosscheck).toBeUndefined();
   });
 
   it("countered: a failing counter seeds a follow-up search it can bound but never win", async () => {
@@ -1223,7 +1260,9 @@ describe("Jev provider", () => {
     expect(calls).toEqual([
       "release_timing",
       "release_timing_source",
+      "schedule_crosscheck",
       "client_letter_gate",
+      "client_counter_crosscheck",
     ]);
     // The gate passed and was recorded; extraction stayed on OpenRouter.
     expect(r.clientReply?.status).toBe("safe");
@@ -1255,6 +1294,7 @@ describe("Jev provider", () => {
     expect(calls).toEqual([
       "release_timing",
       "release_timing_source",
+      "schedule_crosscheck",
       "client_letter_gate",
     ]);
     expect(chatCounts.client_counter).toBeUndefined();
@@ -1300,13 +1340,95 @@ describe("Jev provider", () => {
     expect(r.incremental?.carriedForward).toEqual([
       "release_timing",
       "escrow_schedule",
+      "schedule_crosscheck",
       "counteroffer_search",
       "client_letter_gate",
       "client_counter",
+      "client_counter_crosscheck",
     ]);
-    // Not a single Jev call — the gate carried too.
+    // Not a single Jev call — the gate and both cross-checks carried too.
     expect(calls).toEqual([]);
     expect(r.clientReply?.gate?.noul).toBe(0.95);
+  });
+
+  it("a schedule cross-check mismatch blocks the run and names the release", async () => {
+    const calls: string[] = [];
+    stubFetch({
+      replyKind: "pass",
+      typesafe: { calls, scheduleNouls: { "release_release-1": 0.95 } },
+    });
+    const r = (await runPipeline(runOpts({ workerPool: POOL() }))).receipt;
+
+    expect(r.status).toBe("needs_review");
+    const blocked = r.blockedReasons.find(
+      (b) => b.reason === "jev_crosscheck_mismatch",
+    );
+    expect(blocked).toBeDefined();
+    expect(blocked?.detail).toContain("release-1");
+    // The failing check is still recorded on the receipt.
+    expect(r.schedule?.crosscheck?.[0]?.question).toBe("release_release-1");
+    expect(r.schedule?.crosscheck?.[0]?.noul).toBe(0.95);
+    expect(calls).toContain("schedule_crosscheck");
+    // A blocked run never reaches the reply stage.
+    expect(r.clientReply).toBeUndefined();
+    expect(r.typedCallDigests?.schedule_crosscheck).toBeTruthy();
+  });
+
+  it("a schedule cross-check in the middle band is low_confidence", async () => {
+    stubFetch({
+      replyKind: "pass",
+      typesafe: { scheduleNouls: { "release_release-1": 0.5 } },
+    });
+    const r = (await runPipeline(runOpts({ workerPool: POOL() }))).receipt;
+    expect(r.status).toBe("needs_review");
+    expect(r.blockedReasons.map((b) => b.reason)).toContain("low_confidence");
+  });
+
+  it("a counter cross-check mismatch stops before the worker test", async () => {
+    const calls: string[] = [];
+    stubFetch({
+      replyKind: "pass",
+      typesafe: { calls, counterNoul: 0.1 },
+    });
+    const pool = POOL();
+    const r = (await runPipeline(runOpts({ workerPool: pool }))).receipt;
+
+    expect(r.status).toBe("needs_review");
+    const reply = r.clientReply;
+    expect(reply?.status).toBe("needs_review");
+    expect(reply?.reason).toBe("jev_crosscheck_mismatch");
+    expect(reply?.counterCrosscheck?.noul).toBe(0.1);
+    // The extraction ran but the runner never tested the counter: no
+    // worker batch carried a client@ job.
+    expect(reply?.counter).toBeDefined();
+    expect(reply?.counter?.status).toBe("tested");
+    expect(reply?.counter?.perScenario).toBeUndefined();
+    expect(reply?.workers).toBeUndefined();
+    const clientJobs = pool.calls.flatMap((c) =>
+      c.jobs.filter((j) => String(j.jobId).startsWith("client@")),
+    );
+    expect(clientJobs).toHaveLength(0);
+    expect(calls).toContain("client_counter_crosscheck");
+    expect(r.typedCallDigests?.client_counter_crosscheck).toBeTruthy();
+  });
+
+  it("passing cross-checks are recorded on the receipt", async () => {
+    const calls: string[] = [];
+    stubFetch({ replyKind: "pass", typesafe: { calls } });
+    const r = (await runPipeline(runOpts({ workerPool: POOL() }))).receipt;
+
+    expect(r.status).toBe("reviewable");
+    expect(r.schedule?.crosscheck?.[0]?.question).toBe("release_release-1");
+    expect(r.schedule?.crosscheck?.[0]?.noul).toBe(0.03);
+    expect(r.clientReply?.counterCrosscheck?.question).toBe("counter_proposal");
+    expect(r.clientReply?.counterCrosscheck?.noul).toBe(0.97);
+    expect(calls).toEqual([
+      "release_timing",
+      "release_timing_source",
+      "schedule_crosscheck",
+      "client_letter_gate",
+      "client_counter_crosscheck",
+    ]);
   });
 
   it("never carries a Jev decision as an OpenRouter one", async () => {

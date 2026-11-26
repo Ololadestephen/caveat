@@ -54,10 +54,20 @@ export const CLIENT_COUNTER_USER_PROMPT = `Read the client's reply letter and ex
 
 export type ClientCitation = { excerptId: string; quote: string; page: number | undefined };
 
+// The model's verbatim text fields for the lever it chose — kept on the
+// receipt so a Jev cross-check can state the proposal exactly as extracted.
+export type ClientCounterTexts = {
+  amount_text?: string;
+  date_text?: string;
+  split_count_text?: string;
+  net_days_text?: string;
+};
+
 export type ClientCounterOutcome =
   | {
       status: "extracted";
       candidate: ProposedCandidate;
+      texts: ClientCounterTexts;
       citation: ClientCitation;
       provider: string;
       model: string;
@@ -77,7 +87,12 @@ export type ClientCounterOutcome =
     };
 
 type Invalid = { ok: false; reason: string; detail: string };
-type Valid = { ok: true; candidate: ProposedCandidate; citation: ClientCitation };
+type Valid = {
+  ok: true;
+  candidate: ProposedCandidate;
+  texts: ClientCounterTexts;
+  citation: ClientCitation;
+};
 
 function invalid(reason: string, detail: string): Invalid {
   return { ok: false, reason, detail };
@@ -166,7 +181,7 @@ export function validateClientCounter(
 
   const parsed_ = parseCounterFields(raw, lever, spec);
   if ("reason" in parsed_) return parsed_;
-  const { candidate } = parsed_;
+  const { candidate, texts } = parsed_;
 
   const confidenceError = checkConfidence(raw, threshold);
   if (confidenceError !== undefined) return confidenceError;
@@ -174,6 +189,7 @@ export function validateClientCounter(
   return {
     ok: true,
     candidate,
+    texts,
     citation: { excerptId: raw.excerpt_id as string, quote: raw.quote as string, page: excerpt.page },
   };
 }
@@ -252,12 +268,14 @@ function checkFieldSpec(
   return undefined;
 }
 
-// The field formats: each allowed text field parses to its typed value.
+// The field formats: each allowed text field parses to its typed value. The
+// raw strings are returned alongside — they are what the Jev cross-check
+// restates verbatim.
 function parseCounterFields(
   raw: RawCounter,
   lever: Lever,
   spec: (typeof TEXT_FIELD_SPECS)[Lever],
-): Invalid | { candidate: ProposedCandidate } {
+): Invalid | { candidate: ProposedCandidate; texts: ClientCounterTexts } {
   const candidate: ProposedCandidate = {
     lever,
     amount_cents: null,
@@ -266,6 +284,7 @@ function parseCounterFields(
     net_days: null,
     rationale: "client counter",
   };
+  const texts: ClientCounterTexts = {};
   if (spec.allowed.includes("amount_text")) {
     const cents = parseAmountCents(raw.amount_text as string);
     if (cents === undefined) {
@@ -275,6 +294,7 @@ function parseCounterFields(
       );
     }
     candidate.amount_cents = cents;
+    texts.amount_text = raw.amount_text as string;
   }
   if (spec.allowed.includes("date_text")) {
     const parsedDate = parseMonthDayYear(raw.date_text as string);
@@ -285,6 +305,7 @@ function parseCounterFields(
       );
     }
     candidate.date = parsedDate.iso;
+    texts.date_text = raw.date_text as string;
   }
   if (spec.allowed.includes("split_count_text")) {
     const count = parseSplitCount(raw.split_count_text as string);
@@ -295,6 +316,7 @@ function parseCounterFields(
       );
     }
     candidate.split_count = count;
+    texts.split_count_text = raw.split_count_text as string;
   }
   if (spec.allowed.includes("net_days_text")) {
     const days = parseNetDays(raw.net_days_text as string);
@@ -305,8 +327,9 @@ function parseCounterFields(
       );
     }
     candidate.net_days = days;
+    texts.net_days_text = raw.net_days_text as string;
   }
-  return { candidate };
+  return { candidate, texts };
 }
 
 // The confidence gate: a number in [0,1] at or above the threshold.
@@ -382,6 +405,7 @@ export class OpenRouterClientCounterExtractor {
     return {
       status: "extracted",
       candidate: validation.candidate,
+      texts: validation.texts,
       citation: validation.citation,
       provider: this.name,
       model: this.model,

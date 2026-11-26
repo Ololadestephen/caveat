@@ -1,10 +1,14 @@
 import { isRecord } from "../shape.ts";
 import type { DecisionProvider } from "./provider.ts";
 import { RELEASE_TIMING } from "./types.ts";
+import type { ValidatedRelease } from "./schedule.ts";
+import type { ClientCounterTexts } from "./client-counter.ts";
+import type { Lever } from "../search/levers.ts";
 import type {
   DecisionOutcome,
   Excerpt,
   JevChoiceResult,
+  JevCrosscheck,
   JevGate,
   JevInfo,
   JevQuestionResult,
@@ -13,7 +17,14 @@ import type {
   Question,
 } from "./types.ts";
 
-export type { JevChoiceResult, JevGate, JevInfo, JevQuestionResult, JevUsage } from "./types.ts";
+export type {
+  JevChoiceResult,
+  JevCrosscheck,
+  JevGate,
+  JevInfo,
+  JevQuestionResult,
+  JevUsage,
+} from "./types.ts";
 
 // TypeSafe's Jev via the TypeSafeAI Sprites Connector. Jev is a decision
 // model, not chat: one POST /v1/systemone with {model, state, questions}; each
@@ -47,6 +58,51 @@ const SOURCE_INSTRUCTIONS_BY_ACTION: Record<string, string> = {
 const GATE_INSTRUCTIONS =
   "The letter proposes exactly one change to the payment terms.";
 export const JEV_GATE_QUESTION = "single_payment_change";
+
+// The schedule cross-check restates each extracted release's conditionality
+// as a noul claim over its own quote; Jev must agree with the extraction's
+// conditional/unconditional label.
+function scheduleCrosscheckInstructions(amountText: string): string {
+  return `The quoted clause makes the payment of ${amountText} conditional on an extension or another condition.`;
+}
+
+export const COUNTER_CROSSCHECK_QUESTION = "counter_proposal";
+
+// The counter cross-check restates the extracted proposal in the lever's own
+// shape, using the model's verbatim text fields, over the citation quote.
+function counterCrosscheckInstructions(
+  lever: Lever,
+  texts: ClientCounterTexts,
+): string | undefined {
+  switch (lever) {
+    case "upfront_deposit":
+      return texts.amount_text !== undefined && texts.date_text !== undefined
+        ? `The sentence proposes paying ${texts.amount_text} to the consultant as an upfront deposit on ${texts.date_text}.`
+        : undefined;
+    case "earlier_release":
+      return texts.amount_text !== undefined && texts.date_text !== undefined
+        ? `The sentence proposes releasing ${texts.amount_text} from escrow early, on ${texts.date_text}.`
+        : undefined;
+    case "milestone_split":
+      return texts.amount_text !== undefined &&
+        texts.split_count_text !== undefined &&
+        texts.date_text !== undefined
+        ? `The sentence proposes paying ${texts.amount_text} in ${texts.split_count_text} monthly parts, the first on ${texts.date_text}.`
+        : undefined;
+    case "shorter_payment_terms":
+      return texts.net_days_text !== undefined
+        ? `The sentence proposes paying each month's fees ${texts.net_days_text} after the month ends.`
+        : undefined;
+  }
+}
+
+export type CrosscheckOutcome =
+  | { status: "pass"; checks: JevCrosscheck[] }
+  // Jev clearly disagreed with the extraction (noul in the opposite band).
+  | { status: "mismatch"; checks: JevCrosscheck[]; detail: string }
+  // Between the bands — route to human review as low_confidence.
+  | { status: "uncertain"; checks: JevCrosscheck[]; detail: string }
+  | { status: "failed"; reason: NeedsReviewReason; detail: string };
 
 export type LetterGateOutcome =
   | { status: "pass"; gate: JevGate }
@@ -167,6 +223,51 @@ export function buildGateRequest(
   };
 }
 
+// The schedule cross-check requests: one noul question per release. A request
+// carries a single state, so releases citing the same quote share a request
+// and releases citing different quotes each get their own.
+export function buildScheduleCrosscheckRequests(
+  releases: ValidatedRelease[],
+  model: string,
+): { model: string; state: unknown; questions: Record<string, unknown> }[] {
+  const byQuote = new Map<string, ValidatedRelease[]>();
+  for (const r of releases) {
+    const group = byQuote.get(r.quote);
+    if (group === undefined) byQuote.set(r.quote, [r]);
+    else group.push(r);
+  }
+  return [...byQuote.entries()].map(([quote, group]) => ({
+    model,
+    state: { quote },
+    questions: Object.fromEntries(
+      group.map((r) => [
+        `release_${r.id}`,
+        { type: "noul", instructions: scheduleCrosscheckInstructions(r.amountText) },
+      ]),
+    ),
+  }));
+}
+
+// The counter cross-check request: one noul question over the citation quote,
+// restating the proposal in the lever's own shape. Undefined when the stored
+// texts cannot build the instruction — the caller treats that as a failure.
+export function buildCounterCrosscheckRequest(
+  lever: Lever,
+  texts: ClientCounterTexts,
+  quote: string,
+  model: string,
+): { model: string; state: unknown; questions: Record<string, unknown> } | undefined {
+  const instructions = counterCrosscheckInstructions(lever, texts);
+  if (instructions === undefined) return undefined;
+  return {
+    model,
+    state: { quote },
+    questions: {
+      [COUNTER_CROSSCHECK_QUESTION]: { type: "noul", instructions },
+    },
+  };
+}
+
 type PostResult =
   | {
       ok: true;
@@ -176,6 +277,16 @@ type PostResult =
       latencyMs: number;
     }
   | { ok: false; reason: NeedsReviewReason; detail: string };
+
+function parseNoul(raw: unknown): number | undefined {
+  return isRecord(raw) &&
+    raw.type === "noul" &&
+    typeof raw.noul === "number" &&
+    raw.noul >= 0 &&
+    raw.noul <= 1
+    ? raw.noul
+    : undefined;
+}
 
 function parseChoice(
   raw: unknown,
@@ -399,14 +510,8 @@ export class JevDecisionProvider implements DecisionProvider {
         model: res.model,
       };
     }
-    const raw = res.answers[JEV_GATE_QUESTION];
-    if (
-      !isRecord(raw) ||
-      raw.type !== "noul" ||
-      typeof raw.noul !== "number" ||
-      raw.noul < 0 ||
-      raw.noul > 1
-    ) {
+    const noul = parseNoul(res.answers[JEV_GATE_QUESTION]);
+    if (noul === undefined) {
       return {
         status: "failed",
         reason: "schema_mismatch",
@@ -414,12 +519,128 @@ export class JevDecisionProvider implements DecisionProvider {
       };
     }
     const gate: JevGate = {
-      noul: raw.noul,
+      noul,
       model: res.model,
       ...(res.usage !== undefined ? { usage: res.usage } : {}),
     };
     if (gate.noul <= 0.2) return { status: "not_single", gate };
     if (gate.noul >= this.threshold) return { status: "pass", gate };
     return { status: "uncertain", gate };
+  }
+
+  // The schedule cross-check: one noul per release over its own quote,
+  // batched per distinct quote. Jev must land in the band the extraction's
+  // conditional label implies; a clear opposite answer is a mismatch, the
+  // middle band is undecided. The first disagreement stops the check.
+  async crosscheckSchedule(
+    releases: ValidatedRelease[],
+    options?: { signal?: AbortSignal },
+  ): Promise<CrosscheckOutcome> {
+    const releaseFor = new Map(releases.map((r) => [`release_${r.id}`, r]));
+    const checks: JevCrosscheck[] = [];
+    for (const request of buildScheduleCrosscheckRequests(releases, this.model)) {
+      const res = await this.post(request, options);
+      if (!res.ok) return { status: "failed", reason: res.reason, detail: res.detail };
+      if (res.model !== this.model) {
+        return {
+          status: "failed",
+          reason: "model_mismatch",
+          detail: `systemone answered with model ${res.model}, expected ${this.model}`,
+        };
+      }
+      for (const name of Object.keys(request.questions)) {
+        const release = releaseFor.get(name);
+        const noul = parseNoul(res.answers[name]);
+        if (release === undefined || noul === undefined) {
+          return {
+            status: "failed",
+            reason: "schema_mismatch",
+            detail: `systemone answers.${name} missing or not a noul answer`,
+          };
+        }
+        checks.push({
+          question: name,
+          noul,
+          model: res.model,
+          ...(res.usage !== undefined ? { usage: res.usage } : {}),
+        });
+        const label = release.conditional ? "conditional" : "unconditional";
+        const opposite = release.conditional ? noul <= 0.2 : noul >= this.threshold;
+        const passing = release.conditional ? noul >= this.threshold : noul <= 0.2;
+        if (opposite) {
+          return {
+            status: "mismatch",
+            checks,
+            detail: `Jev disagreed on ${release.id}: the extraction marked it ${label} but p(conditional) = ${noul.toFixed(2)}`,
+          };
+        }
+        if (!passing) {
+          return {
+            status: "uncertain",
+            checks,
+            detail: `Jev could not confirm ${release.id} as ${label} (p(conditional) = ${noul.toFixed(2)})`,
+          };
+        }
+      }
+    }
+    return { status: "pass", checks };
+  }
+
+  // The counter cross-check: one noul over the citation quote restating the
+  // extracted proposal. The sentence should match, so the bands mirror the
+  // gate's: clear at the threshold passes, a clear no is a mismatch.
+  async crosscheckCounter(
+    args: { lever: Lever; texts: ClientCounterTexts; quote: string },
+    options?: { signal?: AbortSignal },
+  ): Promise<CrosscheckOutcome> {
+    const request = buildCounterCrosscheckRequest(
+      args.lever,
+      args.texts,
+      args.quote,
+      this.model,
+    );
+    if (request === undefined) {
+      return {
+        status: "failed",
+        reason: "schema_mismatch",
+        detail: "the stored counter texts cannot build the cross-check instruction",
+      };
+    }
+    const res = await this.post(request, options);
+    if (!res.ok) return { status: "failed", reason: res.reason, detail: res.detail };
+    if (res.model !== this.model) {
+      return {
+        status: "failed",
+        reason: "model_mismatch",
+        detail: `systemone answered with model ${res.model}, expected ${this.model}`,
+      };
+    }
+    const noul = parseNoul(res.answers[COUNTER_CROSSCHECK_QUESTION]);
+    if (noul === undefined) {
+      return {
+        status: "failed",
+        reason: "schema_mismatch",
+        detail: `systemone answers.${COUNTER_CROSSCHECK_QUESTION} missing or not a noul answer`,
+      };
+    }
+    const check: JevCrosscheck = {
+      question: COUNTER_CROSSCHECK_QUESTION,
+      noul,
+      model: res.model,
+      ...(res.usage !== undefined ? { usage: res.usage } : {}),
+    };
+    if (noul <= 0.2) {
+      return {
+        status: "mismatch",
+        checks: [check],
+        detail: `Jev decided the sentence does not propose the extracted change (p = ${noul.toFixed(2)})`,
+      };
+    }
+    if (noul >= this.threshold) return { status: "pass", checks: [check] };
+    return {
+      status: "uncertain",
+      checks: [check],
+      detail: `Jev could not confirm the extracted change (p = ${noul.toFixed(2)})`,
+    };
   }
 }

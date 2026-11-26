@@ -220,6 +220,26 @@ function renderSchedule(receipt: RunReceipt): string {
       <span class="quote">&ldquo;${escapeHtml(r.quote)}&rdquo;</span> — ${sectionName(excerpts, r.excerptId)}</li>`;
     })
     .join("\n");
+  const crosscheck = receipt.schedule?.crosscheck;
+  const crosscheckLine =
+    crosscheck === undefined || crosscheck.length === 0
+      ? ""
+      : `  <p class="caption">Jev cross-check: ${crosscheck
+          .map((check) => {
+            const release = s.releases.find((r) => `release_${r.id}` === check.question);
+            const label =
+              release === undefined
+                ? check.question
+                : `${release.id} ${release.conditional ? "conditional" : "unconditional"}`;
+            const ok =
+              release === undefined
+                ? true
+                : release.conditional
+                  ? check.noul >= 0.8
+                  : check.noul <= 0.2;
+            return `${escapeHtml(label)}: p(conditional) = ${check.noul.toFixed(2)} ${ok ? "✓" : "✗"}`;
+          })
+          .join(" · ")}</p>`;
   return `<section class="schedule">
   <h2>Extracted escrow schedule</h2>
   <p>Monthly amount: <strong>${escapeHtml(s.monthlyAmountText)}</strong> —
@@ -229,7 +249,7 @@ function renderSchedule(receipt: RunReceipt): string {
   <p>Releases out of escrow:</p>
   <ul>
 ${releaseItems}
-  </ul>
+  </ul>${crosscheckLine === "" ? "" : `\n${crosscheckLine}`}
 </section>`;
 }
 
@@ -749,6 +769,10 @@ function renderClientReply(receipt: RunReceipt): string {
     reply.gate === undefined
       ? ""
       : `  <p class="caption">Jev: exactly one payment change, p = ${reply.gate.noul.toFixed(2)}</p>`;
+  const crosscheckHtml =
+    reply.counterCrosscheck === undefined
+      ? ""
+      : `  <p class="caption">Jev cross-check: the letter proposes the extracted change, p = ${reply.counterCrosscheck.noul.toFixed(2)}</p>`;
   const quoteHtml =
     reply.citation === undefined
       ? ""
@@ -780,6 +804,7 @@ ${testedCaption}`;
   <h2>Client reply</h2>
 ${head}
 ${gateHtml}
+${crosscheckHtml}
 ${quoteHtml}
 ${termHtml}
 ${resultsHtml}

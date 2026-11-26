@@ -99,6 +99,15 @@ export type JevInfo = {
 // The Jev letter gate's recorded answer on clientReply.
 export type JevGate = { noul: number; model: string; usage?: JevUsage };
 
+// One Jev cross-check answer: the question name and the noul probability Jev
+// gave the restated claim, plus the answering model and request usage.
+export type JevCrosscheck = {
+  question: string;
+  noul: number;
+  model: string;
+  usage?: JevUsage;
+};
+
 export type DecisionOutcome =
   | {
       status: "decided";

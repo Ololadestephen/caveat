@@ -9,3 +9,6 @@ caveat-build.md
 .desloppify/
 coverage/
 notes/
+
+# Desloppify report artifact
+scorecard.png

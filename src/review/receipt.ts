@@ -1,6 +1,13 @@
 import type { EvidenceFlag } from "../evidence/flags.ts";
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
-import type { DecisionOutcome, Excerpt, JevGate, Question } from "../interpret/types.ts";
+import type { ClientCounterTexts } from "../interpret/client-counter.ts";
+import type {
+  DecisionOutcome,
+  Excerpt,
+  JevCrosscheck,
+  JevGate,
+  Question,
+} from "../interpret/types.ts";
 import type { PolicyAdjustment, TwinveeAssumptions } from "../plan/twinvee.ts";
 import type { ScenarioResult } from "../runner/types.ts";
 import type { CounterofferReceipt, SearchCandidateRecord } from "../search/loop.ts";
@@ -40,11 +47,16 @@ export type ClientReplyReceipt = {
   reason?: string;
   detail?: string;
   citation?: { excerptId: string; quote: string; page: number | undefined };
+  // The model's verbatim text fields for the extracted proposal — what the
+  // Jev cross-check restates. Absent on receipts predating the cross-check.
+  counterTexts?: ClientCounterTexts;
   // The client's proposed change as a tested search record (id "client").
   counter?: SearchCandidateRecord;
   workers?: string[];
   // The Jev letter-gate answer, when a TypeSafe connection ran the gate.
   gate?: JevGate;
+  // Jev's answer to the extracted-proposal restatement, when it ran.
+  counterCrosscheck?: JevCrosscheck;
   // The follow-up search, present on countered/no_fix/needs_review(search).
   response?: CounterofferReceipt;
 };
@@ -96,8 +108,10 @@ export type RunReceipt = {
     release_timing: string;
     escrow_schedule: string;
     counteroffer_search: string;
+    schedule_crosscheck?: string;
     client_letter_gate?: string;
     client_counter?: string;
+    client_counter_crosscheck?: string;
     client_reply_search?: string;
   };
   releaseTiming: { outcome: DecisionOutcome; question: Question } | null;
@@ -105,7 +119,13 @@ export type RunReceipt = {
   // override answer when the model's outcome needed review.
   effectiveAction: string | null;
   overrides: SourcedOverride[];
-  schedule: { outcome: ScheduleOutcome; excerpts: Excerpt[] } | null;
+  schedule: {
+    outcome: ScheduleOutcome;
+    excerpts: Excerpt[];
+    // Jev's per-release conditionality cross-check, when a TypeSafe
+    // connection ran it — one entry per asked release.
+    crosscheck?: JevCrosscheck[];
+  } | null;
   humanReview: HumanReviewReceipt;
   flags: EvidenceFlag[];
   readings: ReceiptReading[];
