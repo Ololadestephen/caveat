@@ -10,7 +10,7 @@ import type { Connection } from "../gateway.ts";
 import { dispatchPipeline } from "../pipeline/dispatch.ts";
 import type { PipelineConfig } from "../pipeline/run-pipeline.ts";
 import { escapeHtml } from "../review/decision-card.ts";
-import { draftHash, receiptHash, renderDraft } from "../review/draft.ts";
+import { draftHash, receiptHash, renderDraftFor } from "../review/draft.ts";
 import type { RunReceipt } from "../review/receipt.ts";
 import { REVIEW_PAGE_CSS } from "../review/review-page.ts";
 import { canonicalJson } from "../runner/digest.ts";
@@ -186,7 +186,7 @@ function kickRun(ctx: AppContext, runId: string, args: StartRunArgs): void {
       ...(args.previous !== undefined ? { previous: args.previous } : {}),
       ...(args.carrySources !== undefined ? { carrySources: args.carrySources } : {}),
     });
-    const draft = renderDraft(receipt);
+    const draft = renderDraftFor(receipt, args.contract);
     finish(receipt.status === "reviewable" ? "reviewable" : "needs_review",
       receipt.status === "needs_review"
         ? receipt.blockedReasons.map((r) => r.reason).join("; ") || "needs_review"

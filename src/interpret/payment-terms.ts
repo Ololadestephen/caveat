@@ -18,6 +18,13 @@ export const TERM_KINDS = [
 ] as const;
 export type TermKind = (typeof TERM_KINDS)[number];
 
+export const TERM_KIND_LABELS: Record<TermKind, string> = {
+  fixed_date_payment: "fixed-date payment",
+  deposit: "deposit",
+  payment_terms: "payment terms",
+  escrow_release: "escrow release",
+};
+
 const TERM_FIELDS = [
   "kind",
   "amount_text",

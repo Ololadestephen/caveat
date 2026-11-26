@@ -3,6 +3,7 @@ import type { SourceTuple } from "../evidence/recheck.ts";
 import { escapeHtml } from "../review/decision-card.ts";
 import type { RunReceipt } from "../review/receipt.ts";
 import { renderReviewBody } from "../review/review-page.ts";
+import { renderTermsReviewBody } from "../review/terms-page.ts";
 import type { ApprovalRow, ExportRow, RunRow, WatchEventRow } from "../store/db.ts";
 
 export function pageShell(title: string, revision: string, body: string): string {
@@ -225,7 +226,9 @@ export function renderRun(
   }
   const receipt = storedReceipt(run.receipt_json);
   if (receipt !== undefined) {
-    parts.push(renderReviewBody(receipt));
+    parts.push(
+      run.contract === "twinvee" ? renderReviewBody(receipt) : renderTermsReviewBody(receipt),
+    );
   }
   return pageShell(run.id, view.revision, parts.join("\n"));
 }

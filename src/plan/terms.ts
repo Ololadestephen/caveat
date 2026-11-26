@@ -174,22 +174,22 @@ function termsRunnerInput(args: {
   rules: PaymentRule[];
   totalCents: number;
 }): Record<string, unknown> {
+  // Normalized form: the coordinator digests the validated input while the
+  // workers digest the raw one, so the raw input must already carry
+  // validateRunInput's defaults (top-level assumptions, scenario fields).
   return {
     label: args.label,
     description: args.description,
     startDate: args.assumptions.startDate,
-    demoAssumptions: {
-      note: args.assumptions.note,
-      openingCents: args.assumptions.openingCents,
-      floorCents: args.assumptions.floorCents,
-      costs: args.assumptions.costs,
-    },
+    openingCents: args.assumptions.openingCents,
+    floorCents: args.assumptions.floorCents,
+    costs: args.assumptions.costs,
     candidates: [
       { id: "as_signed", rankCents: 0, totalCents: args.totalCents, paymentRules: args.rules },
     ],
     scenarios: [
-      { id: "on_time" },
-      { id: "paid_15_days_late", paymentLagDays: 15 },
+      { id: "on_time", acceptanceDelayDays: 0, paymentLagDays: 0, extraCosts: [], extensionsGranted: [] },
+      { id: "paid_15_days_late", acceptanceDelayDays: 0, paymentLagDays: 15, extraCosts: [], extensionsGranted: [] },
     ],
     passingScenarios: ["on_time", "paid_15_days_late"],
   };
