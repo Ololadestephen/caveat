@@ -15,6 +15,10 @@ import { buildSearchBase } from "./levers.ts";
 import { runCounterofferSearch } from "./loop.ts";
 import type { SearchReading } from "./loop.ts";
 
+
+// Explicit comparator: the same UTF-16 code-unit order as .sort().
+const BY_STRING = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
 function loadJson(path: string): unknown {
   return JSON.parse(readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8"));
 }
@@ -472,13 +476,13 @@ describe("runCounterofferSearch", () => {
     const [wa, wb] = pool.calls;
     expect(wa?.worker).toBe("caveat-wa");
     expect(wb?.worker).toBe("caveat-wb");
-    expect(wa?.jobs.map((j) => j.jobId).sort()).toEqual([
+    expect(wa?.jobs.map((j) => j.jobId).sort(BY_STRING)).toEqual([
       "r1c1@retainer_continues",
       "r1c1@retainer_superseded",
       "r1c3@retainer_continues",
       "r1c3@retainer_superseded",
     ]);
-    expect(wb?.jobs.map((j) => j.jobId).sort()).toEqual([
+    expect(wb?.jobs.map((j) => j.jobId).sort(BY_STRING)).toEqual([
       "r1c2@retainer_continues",
       "r1c2@retainer_superseded",
     ]);
@@ -627,7 +631,7 @@ describe("parallel bracket-narrowing search", () => {
     expect(result.status).toBe("found");
     // Round 1's two candidates ran in parallel, one batch per worker.
     const round1Calls = pool.calls.slice(0, 2);
-    expect(round1Calls.map((c) => c.worker).sort()).toEqual(["caveat-wa", "caveat-wb"]);
+    expect(round1Calls.map((c) => c.worker).sort(BY_STRING)).toEqual(["caveat-wa", "caveat-wb"]);
     // The prompt for round 2 carried the round-1 bracket.
     const prompt2 = JSON.parse(calls[1]?.userPrompt ?? "{}") as {
       testedBrackets?: { lever: string; smallestPass: { id: string } | null; largestFail: { id: string } | null }[];

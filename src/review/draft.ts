@@ -79,6 +79,101 @@ function readingSentence(
   return `If the base retainer ${phrase}, cash stays at or above the floor; the lowest balance is ${money(scenario.lowest.balanceCents)} on ${formatDate(scenario.lowest.date)}.`;
 }
 
+// The "Your reply" block — only for a client counter that tested safe or
+// countered; a needs_review or no_fix reply blocks the run, so the draft is
+// never exportable then anyway.
+function replyLines(receipt: RunReceipt): string[] {
+  const reply = receipt.clientReply;
+  if (
+    reply === undefined ||
+    (reply.status !== "safe" && reply.status !== "countered") ||
+    reply.counter === undefined
+  ) {
+    return [];
+  }
+  const summary = reply.counter.summary ?? reply.counter.lever;
+  if (reply.status === "safe") {
+    const quotePart =
+      reply.citation !== undefined
+        ? `, quoted from your letter: "${reply.citation.quote}"`
+        : "";
+    return [
+      `Your reply (${reply.fileName}, version ${reply.versionTag}): Your proposal (${summary}${quotePart}) keeps our cash at or above the floor in every case we tested. We can accept it as written.`,
+      "",
+    ];
+  }
+  const failing = Object.values(reply.counter.perScenario ?? {})
+    .flatMap((scenarios) => Object.values(scenarios))
+    .filter((r) => !r.passes)
+    .reduce<{ date: string; balanceCents: number } | null>(
+      (acc, r) => (acc === null || r.lowest.balanceCents < acc.balanceCents ? r.lowest : acc),
+      null,
+    );
+  const underPart =
+    failing === null
+      ? "still fails at least one scenario check"
+      : `still leaves cash ${money(receipt.assumptions.floorCents - failing.balanceCents)} under our floor on ${formatDate(failing.date)}`;
+  const response = reply.response;
+  const best =
+    response !== undefined && response.best !== null
+      ? response.rounds.flatMap((r) => r.candidates).find((c) => c.id === response.best)
+      : undefined;
+  const insteadPart =
+    best === undefined
+      ? " No tested alternative passed every scenario."
+      : ` We propose instead: ${best.summary ?? best.id}.`;
+  const boundRecord =
+    response?.bound === null || response?.bound === undefined
+      ? undefined
+      : response.rounds.flatMap((r) => r.candidates).find((c) => c.id === response.bound?.candidate);
+  const boundPart =
+    boundRecord === undefined
+      ? ""
+      : ` A smaller version (${boundRecord.summary ?? boundRecord.id}) failed the same tests.`;
+  return [
+    `Your reply (${reply.fileName}, version ${reply.versionTag}): Your proposal (${summary}) ${underPart}.${insteadPart}${boundPart}`,
+    "",
+  ];
+}
+
+// The counteroffer verdict line — only when the search ran and produced a
+// verdict; every substitution is a runner-verified number or compile text.
+function counterofferLines(receipt: RunReceipt, next: () => number): string[] {
+  const search = receipt.counteroffer;
+  if (search !== undefined && search.status === "found" && search.best !== null) {
+    const best = search.rounds.flatMap((r) => r.candidates).find((c) => c.id === search.best);
+    if (best !== undefined) {
+      const bestRound = search.rounds.find((r) => r.candidates.includes(best))?.round;
+      const lowest = Object.values(best.perScenario ?? {})
+        .flatMap((scenarios) => Object.values(scenarios))
+        .reduce<{ date: string; balanceCents: number } | null>(
+          (acc, r) => (acc === null || r.lowest.balanceCents < acc.balanceCents ? r.lowest : acc),
+          null,
+        );
+      const lowestPart =
+        lowest === null ? "" : ` (lowest ${money(lowest.balanceCents)} on ${formatDate(lowest.date)})`;
+      const boundRecord =
+        search.bound === null || search.bound === undefined
+          ? undefined
+          : search.rounds.flatMap((r) => r.candidates).find((c) => c.id === search.bound?.candidate);
+      const boundPart =
+        boundRecord === undefined
+          ? ""
+          : ` A smaller version (${boundRecord.summary ?? boundRecord.id}) failed the same tests.`;
+      return [
+        `${next()}. Proposed change, tested by Caveat: ${best.summary ?? best.id}. This moves ${money(best.rankCents ?? 0)} earlier than the signed terms and adds no new money. Caveat's runner tested it against both extension cases under both retainer readings; cash stays at or above the ${money(receipt.assumptions.floorCents)} floor in all four${lowestPart}.${boundPart} It was found in round ${bestRound ?? "?"} of the search; the receipt lists every candidate tried.`,
+      ];
+    }
+    return [];
+  }
+  if (search !== undefined && search.status === "not_found") {
+    return [
+      `${next()}. No tested change within ${search.rounds.length} rounds kept cash at or above the floor in every scenario; the receipt lists every candidate tried.`,
+    ];
+  }
+  return [];
+}
+
 // Deterministic counteroffer notes from a receipt — caveat-draft/1. Never uses
 // the model's free text: every substitution comes from validated structures.
 export function renderDraft(receipt: RunReceipt): string {
@@ -100,59 +195,7 @@ export function renderDraft(receipt: RunReceipt): string {
   lines.push("Points to raise before relying on the Second Amendment:");
   lines.push("");
 
-  // Your reply — only for a client counter that tested safe or countered; a
-  // needs_review or no_fix reply blocks the run, so the draft is never
-  // exportable then anyway.
-  const reply = receipt.clientReply;
-  if (
-    reply !== undefined &&
-    (reply.status === "safe" || reply.status === "countered") &&
-    reply.counter !== undefined
-  ) {
-    const summary = reply.counter.summary ?? reply.counter.lever;
-    if (reply.status === "safe") {
-      const quotePart =
-        reply.citation !== undefined
-          ? `, quoted from your letter: "${reply.citation.quote}"`
-          : "";
-      lines.push(
-        `Your reply (${reply.fileName}, version ${reply.versionTag}): Your proposal (${summary}${quotePart}) keeps our cash at or above the floor in every case we tested. We can accept it as written.`,
-      );
-    } else {
-      const failing = Object.values(reply.counter.perScenario ?? {})
-        .flatMap((scenarios) => Object.values(scenarios))
-        .filter((r) => !r.passes)
-        .reduce<{ date: string; balanceCents: number } | null>(
-          (acc, r) => (acc === null || r.lowest.balanceCents < acc.balanceCents ? r.lowest : acc),
-          null,
-        );
-      const underPart =
-        failing === null
-          ? "still fails at least one scenario check"
-          : `still leaves cash ${money(receipt.assumptions.floorCents - failing.balanceCents)} under our floor on ${formatDate(failing.date)}`;
-      const response = reply.response;
-      const best =
-        response !== undefined && response.best !== null
-          ? response.rounds.flatMap((r) => r.candidates).find((c) => c.id === response.best)
-          : undefined;
-      const insteadPart =
-        best === undefined
-          ? " No tested alternative passed every scenario."
-          : ` We propose instead: ${best.summary ?? best.id}.`;
-      const boundRecord =
-        response?.bound === null || response?.bound === undefined
-          ? undefined
-          : response.rounds.flatMap((r) => r.candidates).find((c) => c.id === response.bound?.candidate);
-      const boundPart =
-        boundRecord === undefined
-          ? ""
-          : ` A smaller version (${boundRecord.summary ?? boundRecord.id}) failed the same tests.`;
-      lines.push(
-        `Your reply (${reply.fileName}, version ${reply.versionTag}): Your proposal (${summary}) ${underPart}.${insteadPart}${boundPart}`,
-      );
-    }
-    lines.push("");
-  }
+  lines.push(...replyLines(receipt));
 
   let n = 0;
   const next = () => {
@@ -211,36 +254,7 @@ export function renderDraft(receipt: RunReceipt): string {
 
   // 5. Counteroffer search outcome — only when the search ran and produced a
   // verdict; every substitution is a runner-verified number or compile text.
-  const search = receipt.counteroffer;
-  if (search !== undefined && search.status === "found" && search.best !== null) {
-    const best = search.rounds.flatMap((r) => r.candidates).find((c) => c.id === search.best);
-    if (best !== undefined) {
-      const bestRound = search.rounds.find((r) => r.candidates.includes(best))?.round;
-      const lowest = Object.values(best.perScenario ?? {})
-        .flatMap((scenarios) => Object.values(scenarios))
-        .reduce<{ date: string; balanceCents: number } | null>(
-          (acc, r) => (acc === null || r.lowest.balanceCents < acc.balanceCents ? r.lowest : acc),
-          null,
-        );
-      const lowestPart =
-        lowest === null ? "" : ` (lowest ${money(lowest.balanceCents)} on ${formatDate(lowest.date)})`;
-      const boundRecord =
-        search.bound === null || search.bound === undefined
-          ? undefined
-          : search.rounds.flatMap((r) => r.candidates).find((c) => c.id === search.bound?.candidate);
-      const boundPart =
-        boundRecord === undefined
-          ? ""
-          : ` A smaller version (${boundRecord.summary ?? boundRecord.id}) failed the same tests.`;
-      lines.push(
-        `${next()}. Proposed change, tested by Caveat: ${best.summary ?? best.id}. This moves ${money(best.rankCents ?? 0)} earlier than the signed terms and adds no new money. Caveat's runner tested it against both extension cases under both retainer readings; cash stays at or above the ${money(receipt.assumptions.floorCents)} floor in all four${lowestPart}.${boundPart} It was found in round ${bestRound ?? "?"} of the search; the receipt lists every candidate tried.`,
-      );
-    }
-  } else if (search !== undefined && search.status === "not_found") {
-    lines.push(
-      `${next()}. No tested change within ${search.rounds.length} rounds kept cash at or above the floor in every scenario; the receipt lists every candidate tried.`,
-    );
-  }
+  lines.push(...counterofferLines(receipt, next));
 
   lines.push("");
   const a = receipt.assumptions;

@@ -3,11 +3,16 @@ import type { ScenarioResult } from "../runner/types.ts";
 import { escapeHtml, renderDecisionCard } from "./decision-card.ts";
 import type { Excerpt } from "../interpret/types.ts";
 import type {
+  ClientReplyReceipt,
   HumanReviewReceipt,
   ReceiptReading,
   RunReceipt,
 } from "./receipt.ts";
-import type { CounterofferReceipt } from "../search/loop.ts";
+import type {
+  CounterofferReceipt,
+  SearchCandidateRecord,
+  SearchRound,
+} from "../search/loop.ts";
 
 const MONTH_NAMES = [
   "January",
@@ -448,51 +453,78 @@ function candidateResultCells(record: {
   return lines.length === 0 ? "—" : lines.join("<br>");
 }
 
-function renderCounteroffer(receipt: RunReceipt): string {
-  const search = receipt.counteroffer;
-  if (search === undefined) return "";
+// The outcome banner for one counteroffer search: found with the bound line,
+// not_needed, needs_review, or not_found.
+// Lowest balance across every tested scenario of the best candidate.
+function lowestAcrossScenarios(
+  best: SearchCandidateRecord,
+): { date: string; balanceCents: number } | null {
+  return Object.values(best.perScenario ?? {})
+    .flatMap((scenarios) => Object.values(scenarios))
+    .reduce(
+      (acc, r) => (acc === null || r.lowest.balanceCents < acc.balanceCents ? r.lowest : acc),
+      null as { date: string; balanceCents: number } | null,
+    );
+}
 
-  // --- Outcome box -------------------------------------------------------------
+// The bound line under a found banner: the tested failing bound with its
+// gap, or the "no smaller candidate" caveat.
+function boundLineHtml(
+  lever: string,
+  boundRecord: SearchCandidateRecord | undefined,
+  gap: { unit: string; value: number } | undefined,
+): string {
+  return boundRecord === undefined
+    ? `<br>No smaller ${escapeHtml(lever)} candidate was tested, so this is the smallest passing tested change, not a proven minimum.`
+    : `<br>Tested bound: ${escapeHtml(boundRecord.summary ?? boundRecord.id)} fails at least one scenario check (gap ${
+        gap?.unit === "days" ? `${gap.value} days` : formatCents(gap?.value ?? 0)
+      }).`;
+}
+
+// The "found" banner: best summary, scenario coverage with its lowest point,
+// change size, the round it was found in, and the tested bound.
+function foundOutcomeHtml(
+  search: CounterofferReceipt,
+  best: SearchCandidateRecord,
+  bestRound: number,
+): string {
+  const lowestAcross = lowestAcrossScenarios(best);
+  const lowestPart =
+    lowestAcross === null
+      ? ""
+      : `; lowest ${formatCents(lowestAcross.balanceCents)} on ${escapeHtml(formatDate(lowestAcross.date))}`;
+  const boundRecord =
+    search.bound === null || search.bound === undefined
+      ? undefined
+      : search.rounds.flatMap((r) => r.candidates).find((c) => c.id === search.bound?.candidate);
+  const boundLine = boundLineHtml(best.lever, boundRecord, search.bound?.gap);
+  return `<div class="banner banner--ok"><strong>${escapeHtml(best.summary ?? best.id)}</strong><br>
+Passes all ${scenarioCount(best)} tested scenario checks${lowestPart}; change size ${formatCents(best.rankCents ?? 0)}; found in round ${bestRound} of ${search.rounds.length}.${boundLine}</div>`;
+}
+
+function counterofferOutcome(search: CounterofferReceipt): string {
   const best = search.best === null ? undefined : search.rounds.flatMap((r) => r.candidates).find(
     (c) => c.id === search.best,
   );
   const bestRound =
     best === undefined ? 0 : (search.rounds.find((r) => r.candidates.includes(best))?.round ?? 0);
-  let outcome: string;
   if (search.status === "found" && best !== undefined) {
-    const lowestAcross = Object.values(best.perScenario ?? {})
-      .flatMap((scenarios) => Object.values(scenarios))
-      .reduce(
-        (acc, r) => (acc === null || r.lowest.balanceCents < acc.balanceCents ? r.lowest : acc),
-        null as { date: string; balanceCents: number } | null,
-      );
-    const lowestPart =
-      lowestAcross === null
-        ? ""
-        : `; lowest ${formatCents(lowestAcross.balanceCents)} on ${escapeHtml(formatDate(lowestAcross.date))}`;
-    const boundRecord =
-      search.bound === null || search.bound === undefined
-        ? undefined
-        : search.rounds.flatMap((r) => r.candidates).find((c) => c.id === search.bound?.candidate);
-    const boundLine =
-      boundRecord === undefined
-        ? `<br>No smaller ${escapeHtml(best.lever)} candidate was tested, so this is the smallest passing tested change, not a proven minimum.`
-        : `<br>Tested bound: ${escapeHtml(boundRecord.summary ?? boundRecord.id)} fails at least one scenario check (gap ${
-            search.bound?.gap.unit === "days"
-              ? `${search.bound.gap.value} days`
-              : formatCents(search.bound?.gap.value ?? 0)
-          }).`;
-    outcome = `<div class="banner banner--ok"><strong>${escapeHtml(best.summary ?? best.id)}</strong><br>
-Passes all ${scenarioCount(best)} tested scenario checks${lowestPart}; change size ${formatCents(best.rankCents ?? 0)}; found in round ${bestRound} of ${search.rounds.length}.${boundLine}</div>`;
-  } else if (search.status === "not_needed") {
-    outcome = `<div class="banner banner--ok"><strong>Not needed.</strong> Both readings already keep cash at or above the floor as signed.</div>`;
-  } else if (search.status === "needs_review") {
-    outcome = `<div class="banner banner--blocked"><strong>Counteroffer search needs human review.</strong> ${escapeHtml(search.reason ?? search.stopReason)}${search.detail !== undefined ? ` — ${escapeHtml(search.detail)}` : ""}</div>`;
-  } else {
-    outcome = `<div class="banner banner--warn"><strong>No counteroffer found.</strong> No tested change within ${search.rounds.length} rounds kept cash at or above the floor in every scenario.</div>`;
+    return foundOutcomeHtml(search, best, bestRound);
   }
+  if (search.status === "not_needed") {
+    return `<div class="banner banner--ok"><strong>Not needed.</strong> Both readings already keep cash at or above the floor as signed.</div>`;
+  }
+  if (search.status === "needs_review") {
+    return `<div class="banner banner--blocked"><strong>Counteroffer search needs human review.</strong> ${escapeHtml(search.reason ?? search.stopReason)}${search.detail !== undefined ? ` — ${escapeHtml(search.detail)}` : ""}</div>`;
+  }
+  return `<div class="banner banner--warn"><strong>No counteroffer found.</strong> No tested change within ${search.rounds.length} rounds kept cash at or above the floor in every scenario.</div>`;
+}
 
-  // --- Per-round tables ----------------------------------------------------------
+function renderCounteroffer(receipt: RunReceipt): string {
+  const search = receipt.counteroffer;
+  if (search === undefined) return "";
+
+  const outcome = counterofferOutcome(search);
   const roundsHtml = renderSearchRounds(search);
 
   return `<section class="counteroffer">
@@ -502,59 +534,69 @@ ${roundsHtml}
 </section>`;
 }
 
-// The round tables plus the rejected-candidate review table; shared by the
-// main counteroffer search and the client-reply follow-up search.
-function renderSearchRounds(search: CounterofferReceipt): string {
-  const rejected: { id: string; lever: string; rejection: { by: string; code: string; field?: string; detail: string } }[] = [];
-  const roundsHtml = search.rounds
-    .map((round) => {
-      const rows = round.candidates
-        .map((c) => {
-          if (c.rejection !== undefined) {
-            rejected.push({ id: c.id, lever: c.lever, rejection: c.rejection });
-          }
-          const status =
-            c.status === "duplicate"
-              ? `duplicate of ${escapeHtml(c.duplicateOf ?? "?")}`
-              : c.status === "rejected_malformed"
-                ? "rejected"
-                : c.passesAll === true
-                  ? "passes"
-                  : c.passesAll === false
-                    ? "fails"
-                    : "tested";
-          const terms =
-            c.summary !== undefined
-              ? escapeHtml(c.summary)
-              : `${escapeHtml(c.lever)} (${escapeHtml(JSON.stringify(c.params))})`;
-          const changeSize = c.rankCents === undefined ? "—" : formatCents(c.rankCents);
-          return `    <tr><td>${escapeHtml(c.id)}<br><span class="caption">${escapeHtml(c.lever)}</span><br><span class="caption">${escapeHtml(c.rationale)}</span></td><td>${terms}</td><td>${escapeHtml(c.worker ?? "—")}</td><td>${candidateResultCells(c)}</td><td>${changeSize}</td><td>${escapeHtml(status)}</td></tr>`;
-        })
-        .join("\n");
-      const modelBits = [escapeHtml(search.model)];
-      if (round.modelVersion !== undefined) modelBits.push(escapeHtml(round.modelVersion));
-      if (round.servedBy !== undefined) modelBits.push(escapeHtml(round.servedBy));
-      const workers = [
-        ...new Set(
-          round.candidates
-            .filter((c) => c.status === "tested" && c.worker !== undefined)
-            .map((c) => c.worker as string),
-        ),
-      ];
-      const workerCaption =
-        workers.length === 0
-          ? ""
-          : workers.length === 1
-            ? `<p class="caption">Tested on ${escapeHtml(workers[0] ?? "")}</p>`
-            : `<p class="caption">Tested in parallel on ${workers.map(escapeHtml).join(", ")}</p>`;
-      return `  <h3>Round ${round.round}</h3>
+type RejectedCandidate = {
+  id: string;
+  lever: string;
+  rejection: { by: string; code: string; field?: string; detail: string };
+};
+
+// One candidate row; rejected candidates are also collected for the review
+// table rendered after the rounds.
+function candidateRow(c: SearchCandidateRecord, rejected: RejectedCandidate[]): string {
+  if (c.rejection !== undefined) {
+    rejected.push({ id: c.id, lever: c.lever, rejection: c.rejection });
+  }
+  const status =
+    c.status === "duplicate"
+      ? `duplicate of ${escapeHtml(c.duplicateOf ?? "?")}`
+      : c.status === "rejected_malformed"
+        ? "rejected"
+        : c.passesAll === true
+          ? "passes"
+          : c.passesAll === false
+            ? "fails"
+            : "tested";
+  const terms =
+    c.summary !== undefined
+      ? escapeHtml(c.summary)
+      : `${escapeHtml(c.lever)} (${escapeHtml(JSON.stringify(c.params))})`;
+  const changeSize = c.rankCents === undefined ? "—" : formatCents(c.rankCents);
+  return `    <tr><td>${escapeHtml(c.id)}<br><span class="caption">${escapeHtml(c.lever)}</span><br><span class="caption">${escapeHtml(c.rationale)}</span></td><td>${terms}</td><td>${escapeHtml(c.worker ?? "—")}</td><td>${candidateResultCells(c)}</td><td>${changeSize}</td><td>${escapeHtml(status)}</td></tr>`;
+}
+
+function renderRound(round: SearchRound, model: string, rejected: RejectedCandidate[]): string {
+  const rows = round.candidates.map((c) => candidateRow(c, rejected)).join("\n");
+  const modelBits = [escapeHtml(model)];
+  if (round.modelVersion !== undefined) modelBits.push(escapeHtml(round.modelVersion));
+  if (round.servedBy !== undefined) modelBits.push(escapeHtml(round.servedBy));
+  const workers = [
+    ...new Set(
+      round.candidates
+        .filter((c) => c.status === "tested" && c.worker !== undefined)
+        .map((c) => c.worker as string),
+    ),
+  ];
+  const workerCaption =
+    workers.length === 0
+      ? ""
+      : workers.length === 1
+        ? `<p class="caption">Tested on ${escapeHtml(workers[0] ?? "")}</p>`
+        : `<p class="caption">Tested in parallel on ${workers.map(escapeHtml).join(", ")}</p>`;
+  return `  <h3>Round ${round.round}</h3>
   <p class="model-note">Model's note (model's own words): ${escapeHtml(round.modelNote)} <span class="caption">[${modelBits.join(", ")}]</span></p>
   <table>
     <tr><th>Candidate</th><th>Terms</th><th>Worker</th><th>Result</th><th>Change size</th><th>Status</th></tr>
 ${rows}
   </table>
 ${workerCaption}`;
-    })
+}
+
+// The round tables plus the rejected-candidate review table; shared by the
+// main counteroffer search and the client-reply follow-up search.
+function renderSearchRounds(search: CounterofferReceipt): string {
+  const rejected: RejectedCandidate[] = [];
+  const roundsHtml = search.rounds
+    .map((round) => renderRound(round, search.model, rejected))
     .join("\n");
 
   // --- Needs human review ---------------------------------------------------------
@@ -601,6 +643,101 @@ function plainCases(
     .join("; ");
 }
 
+type FailingLowest = {
+  lowest: { date: string; balanceCents: number };
+  where: string;
+};
+
+// The single lowest failing balance, plus every failing scenario that hits
+// it, so the verdict names the case in plain words.
+function lowestFailingCase(
+  receipt: RunReceipt,
+  counter: SearchCandidateRecord | undefined,
+): FailingLowest | null {
+  const failing = Object.entries(counter?.perScenario ?? {}).flatMap(([readingId, scenarios]) =>
+    Object.entries(scenarios)
+      .filter(([, r]) => !r.passes)
+      .map(([scenarioId, r]) => ({ readingId, scenarioId, lowest: r.lowest })),
+  );
+  const lowestFailing = failing.reduce<(typeof failing)[number] | null>(
+    (acc, r) => (acc === null || r.lowest.balanceCents < acc.lowest.balanceCents ? r : acc),
+    null,
+  );
+  if (lowestFailing === null) return null;
+  return {
+    lowest: lowestFailing.lowest,
+    where: plainCases(
+      receipt,
+      failing.filter(
+        (f) =>
+          f.lowest.balanceCents === lowestFailing.lowest.balanceCents &&
+          f.lowest.date === lowestFailing.lowest.date,
+      ),
+    ),
+  };
+}
+
+function replyVerdict(
+  receipt: RunReceipt,
+  reply: ClientReplyReceipt,
+  failingLowest: FailingLowest | null,
+): string {
+  if (reply.status === "safe") {
+    return `  <div class="banner banner--ok"><strong>Safe:</strong> the client's counter keeps cash at or above the floor in every scenario.</div>`;
+  }
+  if (reply.status === "needs_review") {
+    return `  <div class="banner banner--blocked"><strong>Client reply needs human review.</strong> ${escapeHtml(reply.reason ?? "")}${reply.detail !== undefined ? ` — ${escapeHtml(reply.detail)}` : ""}</div>`;
+  }
+  const notSafe =
+    failingLowest === null
+      ? "<strong>Not safe:</strong> the client's counter fails at least one scenario check."
+      : `<strong>Not safe:</strong> the client's counter leaves a lowest balance of ${formatMoneyShort(failingLowest.lowest.balanceCents)} on ${escapeHtml(formatDateShort(failingLowest.lowest.date))}, ${formatMoneyShort(receipt.assumptions.floorCents - failingLowest.lowest.balanceCents)} under the floor (${escapeHtml(failingLowest.where)}).`;
+  return `  <div class="banner banner--warn">${notSafe}</div>`;
+}
+
+// The follow-up search block: the counterproposal banner plus the shared
+// round tables. Empty when the reply needed no counterproposal.
+// The follow-up search's outcome banner: counterproposal found (with its
+// tested bound), needs review, or nothing found.
+function responseOutcomeHtml(
+  response: CounterofferReceipt,
+  best: SearchCandidateRecord | undefined,
+  boundRecord: SearchCandidateRecord | undefined,
+): string {
+  if (response.status === "found" && best !== undefined) {
+    const boundLine = boundLineHtml(best.lever, boundRecord, response.bound?.gap);
+    return `  <div class="banner banner--ok"><strong>Counterproposal: ${escapeHtml(best.summary ?? best.id)}</strong>${boundLine}</div>`;
+  }
+  if (response.status === "needs_review") {
+    return `  <div class="banner banner--blocked"><strong>Reply search needs human review.</strong> ${escapeHtml(response.reason ?? response.stopReason)}${response.detail !== undefined ? ` — ${escapeHtml(response.detail)}` : ""}</div>`;
+  }
+  return `  <div class="banner banner--warn"><strong>No fix found.</strong> No tested change within ${response.rounds.length} rounds kept cash at or above the floor in every scenario.</div>`;
+}
+
+function replyResponseHtml(reply: ClientReplyReceipt): string {
+  const response = reply.response;
+  if (response === undefined) return "";
+  const best =
+    response.best === null
+      ? undefined
+      : response.rounds.flatMap((r) => r.candidates).find((c) => c.id === response.best);
+  const boundRecord =
+    response.bound === null || response.bound === undefined
+      ? undefined
+      : (response.rounds
+          .flatMap((r) => r.candidates)
+          .find((c) => c.id === response.bound?.candidate) ??
+        // The bound can be the seed record — it lives in allRecords, not in
+        // any round's candidate list.
+        (reply.counter?.id === response.bound?.candidate
+          ? reply.counter
+          : undefined));
+  const responseOutcome = responseOutcomeHtml(response, best, boundRecord);
+  return `  <h3>Our counterproposal search</h3>
+${responseOutcome}
+${renderSearchRounds(response)}`;
+}
+
 // The client's reply letter: what it proposed, how that tested on every
 // worker, and the follow-up search when it failed.
 function renderClientReply(receipt: RunReceipt): string {
@@ -635,83 +772,9 @@ function renderClientReply(receipt: RunReceipt): string {
   </table>
 ${testedCaption}`;
 
-  // The single lowest failing balance, plus every failing scenario that hits
-  // it, so the verdict names the case in plain words.
-  const failing = Object.entries(counter?.perScenario ?? {}).flatMap(([readingId, scenarios]) =>
-    Object.entries(scenarios)
-      .filter(([, r]) => !r.passes)
-      .map(([scenarioId, r]) => ({ readingId, scenarioId, lowest: r.lowest })),
-  );
-  const lowestFailing = failing.reduce<(typeof failing)[number] | null>(
-    (acc, r) => (acc === null || r.lowest.balanceCents < acc.lowest.balanceCents ? r : acc),
-    null,
-  );
-  const failingLowest =
-    lowestFailing === null
-      ? null
-      : {
-          lowest: lowestFailing.lowest,
-          where: plainCases(
-            receipt,
-            failing.filter(
-              (f) =>
-                f.lowest.balanceCents === lowestFailing.lowest.balanceCents &&
-                f.lowest.date === lowestFailing.lowest.date,
-            ),
-          ),
-        };
-
-  let verdict: string;
-  if (reply.status === "safe") {
-    verdict = `  <div class="banner banner--ok"><strong>Safe:</strong> the client's counter keeps cash at or above the floor in every scenario.</div>`;
-  } else if (reply.status === "needs_review") {
-    verdict = `  <div class="banner banner--blocked"><strong>Client reply needs human review.</strong> ${escapeHtml(reply.reason ?? "")}${reply.detail !== undefined ? ` — ${escapeHtml(reply.detail)}` : ""}</div>`;
-  } else {
-    const notSafe =
-      failingLowest === null
-        ? "<strong>Not safe:</strong> the client's counter fails at least one scenario check."
-        : `<strong>Not safe:</strong> the client's counter leaves a lowest balance of ${formatMoneyShort(failingLowest.lowest.balanceCents)} on ${escapeHtml(formatDateShort(failingLowest.lowest.date))}, ${formatMoneyShort(receipt.assumptions.floorCents - failingLowest.lowest.balanceCents)} under the floor (${escapeHtml(failingLowest.where)}).`;
-    verdict = `  <div class="banner banner--warn">${notSafe}</div>`;
-  }
-
-  const response = reply.response;
-  let responseHtml = "";
-  if (response !== undefined) {
-    const best =
-      response.best === null
-        ? undefined
-        : response.rounds.flatMap((r) => r.candidates).find((c) => c.id === response.best);
-    const boundRecord =
-      response.bound === null || response.bound === undefined
-        ? undefined
-        : (response.rounds
-            .flatMap((r) => r.candidates)
-            .find((c) => c.id === response.bound?.candidate) ??
-          // The bound can be the seed record — it lives in allRecords, not in
-          // any round's candidate list.
-          (reply.counter?.id === response.bound?.candidate
-            ? reply.counter
-            : undefined));
-    let responseOutcome: string;
-    if (response.status === "found" && best !== undefined) {
-      const boundLine =
-        boundRecord === undefined
-          ? `<br>No smaller ${escapeHtml(best.lever)} candidate was tested, so this is the smallest passing tested change, not a proven minimum.`
-          : `<br>Tested bound: ${escapeHtml(boundRecord.summary ?? boundRecord.id)} fails at least one scenario check (gap ${
-              response.bound?.gap.unit === "days"
-                ? `${response.bound.gap.value} days`
-                : formatCents(response.bound?.gap.value ?? 0)
-            }).`;
-      responseOutcome = `  <div class="banner banner--ok"><strong>Counterproposal: ${escapeHtml(best.summary ?? best.id)}</strong>${boundLine}</div>`;
-    } else if (response.status === "needs_review") {
-      responseOutcome = `  <div class="banner banner--blocked"><strong>Reply search needs human review.</strong> ${escapeHtml(response.reason ?? response.stopReason)}${response.detail !== undefined ? ` — ${escapeHtml(response.detail)}` : ""}</div>`;
-    } else {
-      responseOutcome = `  <div class="banner banner--warn"><strong>No fix found.</strong> No tested change within ${response.rounds.length} rounds kept cash at or above the floor in every scenario.</div>`;
-    }
-    responseHtml = `  <h3>Our counterproposal search</h3>
-${responseOutcome}
-${renderSearchRounds(response)}`;
-  }
+  const failingLowest = lowestFailingCase(receipt, counter);
+  const verdict = replyVerdict(receipt, reply, failingLowest);
+  const responseHtml = replyResponseHtml(reply);
 
   return `<section class="client-reply">
   <h2>Client reply</h2>

@@ -6,7 +6,7 @@ import type { ChatResult, StructuredChatConfig } from "../interpret/chat.ts";
 import type { WorkerJob, WorkerJobResult, WorkerPool } from "../worker/pool.ts";
 import { WorkerUnavailableError } from "../worker/pool.ts";
 import { compileCandidate } from "./levers.ts";
-import type { Lever, SearchBase } from "./levers.ts";
+import type { CompileOk, Lever, ProposedCandidate, SearchBase } from "./levers.ts";
 import { COUNTEROFFER_SYSTEM_PROMPT } from "./prompt.ts";
 import { PROPOSAL_SCHEMA, PROPOSAL_SCHEMA_NAME } from "./schema.ts";
 import { validateProposal } from "./validate.ts";
@@ -229,6 +229,37 @@ function bracketEndpoint(record: SearchCandidateRecord): BracketEndpoint {
 // failing candidate with the largest change still below it (or the largest
 // failing change at all when nothing passed). Only tested candidates count; a
 // duplicate's verdict already counts once under its original's id.
+// One family's bracket: the passing candidate with the smallest change, and
+// the failing candidate with the largest change still below it (or the
+// largest failing change at all when nothing passed).
+function familyBracket(list: SearchCandidateRecord[]): TestedBracket {
+  const first = list[0] as SearchCandidateRecord;
+  const passes = list.filter((c) => c.passesAll === true);
+  const fails = list.filter((c) => c.passesAll === false);
+  const smallestPass =
+    passes.length === 0
+      ? undefined
+      : passes.reduce((a, b) => (changeMetric(b) < changeMetric(a) ? b : a));
+  let largestFail: SearchCandidateRecord | undefined;
+  if (smallestPass === undefined) {
+    if (fails.length > 0) {
+      largestFail = fails.reduce((a, b) => (changeMetric(b) > changeMetric(a) ? b : a));
+    }
+  } else {
+    const below = fails.filter((c) => changeMetric(c) < changeMetric(smallestPass));
+    if (below.length > 0) {
+      largestFail = below.reduce((a, b) => (changeMetric(b) > changeMetric(a) ? b : a));
+    }
+  }
+  return {
+    lever: first.lever,
+    date: first.params.date,
+    split_count: first.params.split_count,
+    smallestPass: smallestPass === undefined ? null : bracketEndpoint(smallestPass),
+    largestFail: largestFail === undefined ? null : bracketEndpoint(largestFail),
+  };
+}
+
 export function testedBrackets(records: SearchCandidateRecord[]): TestedBracket[] {
   const families = new Map<string, SearchCandidateRecord[]>();
   for (const record of records) {
@@ -240,31 +271,7 @@ export function testedBrackets(records: SearchCandidateRecord[]): TestedBracket[
   }
   const brackets: TestedBracket[] = [];
   for (const list of families.values()) {
-    const first = list[0] as SearchCandidateRecord;
-    const passes = list.filter((c) => c.passesAll === true);
-    const fails = list.filter((c) => c.passesAll === false);
-    const smallestPass =
-      passes.length === 0
-        ? undefined
-        : passes.reduce((a, b) => (changeMetric(b) < changeMetric(a) ? b : a));
-    let largestFail: SearchCandidateRecord | undefined;
-    if (smallestPass === undefined) {
-      if (fails.length > 0) {
-        largestFail = fails.reduce((a, b) => (changeMetric(b) > changeMetric(a) ? b : a));
-      }
-    } else {
-      const below = fails.filter((c) => changeMetric(c) < changeMetric(smallestPass));
-      if (below.length > 0) {
-        largestFail = below.reduce((a, b) => (changeMetric(b) > changeMetric(a) ? b : a));
-      }
-    }
-    brackets.push({
-      lever: first.lever,
-      date: first.params.date,
-      split_count: first.params.split_count,
-      smallestPass: smallestPass === undefined ? null : bracketEndpoint(smallestPass),
-      largestFail: largestFail === undefined ? null : bracketEndpoint(largestFail),
-    });
+    brackets.push(familyBracket(list));
   }
   return brackets;
 }
@@ -383,16 +390,300 @@ function buildUserPrompt(args: {
 
 // The counteroffer search: propose -> compile -> run on workers -> repeat.
 // The runner is the only source of numbers; the model only proposes.
-export async function runCounterofferSearch(args: SearchArgs): Promise<CounterofferReceipt> {
-  const maxRounds = args.maxRounds ?? DEFAULT_MAX_ROUNDS;
-  const chat = args.chat ?? callStructuredChat;
-  const model = args.model;
-  const rounds: SearchRound[] = [];
-  const escrowIds = new Set(args.base.rules.map((r) => r.id));
-  const seenRules = new Map<string, string>(); // rules digest -> first candidate id
-  const allRecords: SearchCandidateRecord[] = [...(args.seedRecords ?? [])];
+type Runnable = { record: SearchCandidateRecord; escrowRules: PaymentRule[] };
 
-  // Both readings already pass as signed: nothing to search.
+type RoundJobs = {
+  batchResults: Map<string, WorkerJobResult>;
+  localDigests: Map<string, string>;
+};
+
+// Builds each runnable candidate's per-reading job, assigns workers
+// round-robin, runs every batch concurrently and collects results by jobId.
+async function runRoundJobs(
+  runnable: Runnable[],
+  readings: SearchReading[],
+  escrowIds: Set<string>,
+  pool: WorkerPool,
+): Promise<{ ok: true } & RoundJobs | { ok: false; detail: string }> {
+  const jobsByWorker = new Map<string, WorkerJob[]>();
+  const localDigests = new Map<string, string>();
+  runnable.forEach((candidate, i) => {
+    const worker = pool.workers[i % pool.workers.length] as string;
+    candidate.record.worker = worker;
+    for (const reading of readings) {
+      const asSigned = reading.rawInput.candidates[0];
+      const nonEscrow = (asSigned?.paymentRules ?? []).filter((r) => !escrowIds.has(r.id));
+      const input = {
+        ...reading.rawInput,
+        candidates: [
+          {
+            id: candidate.record.id,
+            rankCents: candidate.record.rankCents ?? 0,
+            totalCents: asSigned?.totalCents ?? 0,
+            paymentRules: [...candidate.escrowRules, ...nonEscrow],
+          },
+        ],
+      };
+      const jobId = `${candidate.record.id}@${reading.id}`;
+      localDigests.set(jobId, digestValue(input));
+      const list = jobsByWorker.get(worker) ?? [];
+      list.push({ jobId, input });
+      jobsByWorker.set(worker, list);
+    }
+  });
+
+  const batchResults = new Map<string, WorkerJobResult>();
+  try {
+    const settled = await Promise.all(
+      [...jobsByWorker.entries()].map(([worker, jobs]) =>
+        pool.runBatch(worker, jobs).then((results) => ({ worker, results })),
+      ),
+    );
+    for (const { results } of settled) {
+      for (const result of results) batchResults.set(result.jobId, result);
+    }
+  } catch (error) {
+    if (error instanceof WorkerUnavailableError) {
+      return { ok: false, detail: error.message };
+    }
+    throw error;
+  }
+  return { ok: true, batchResults, localDigests };
+}
+
+// Writes each runnable's outcome back onto its record: per-scenario verdicts
+// and input/result digests, or a runner rejection when the job failed.
+function foldRoundResults(
+  runnable: Runnable[],
+  readings: SearchReading[],
+  ran: RoundJobs,
+): { ok: true } | { ok: false; reason: string; detail: string } {
+  for (const candidate of runnable) {
+    const record = candidate.record;
+    record.perScenario = {};
+    record.inputDigests = {};
+    record.resultDigests = {};
+    for (const reading of readings) {
+      const jobId = `${record.id}@${reading.id}`;
+      const result = ran.batchResults.get(jobId);
+      if (result === undefined) {
+        return {
+          ok: false,
+          reason: "workers_unavailable",
+          detail: `worker returned no result for ${jobId}`,
+        };
+      }
+      if (!result.ok) {
+        record.status = "rejected_malformed";
+        record.rejection = {
+          by: "runner",
+          code: result.code,
+          ...(result.field !== undefined ? { field: result.field } : {}),
+          detail: result.message,
+        };
+        record.perScenario = undefined;
+        record.inputDigests = undefined;
+        record.resultDigests = undefined;
+        break;
+      }
+      const output = result.output;
+      if (output.runnerVersion !== RUNNER_VERSION || output.inputDigest !== ran.localDigests.get(jobId)) {
+        return {
+          ok: false,
+          reason: "worker_digest_mismatch",
+          detail: `worker output for ${jobId} does not match the coordinator's input digest`,
+        };
+      }
+      const perScenario: Record<string, CompactResult> = {};
+      for (const [scenarioId, scenarioResult] of Object.entries(
+        output.results[record.id] ?? {},
+      )) {
+        perScenario[scenarioId] = compact(scenarioResult);
+      }
+      record.perScenario[reading.id] = perScenario;
+      record.inputDigests[reading.id] = output.inputDigest;
+      record.resultDigests[reading.id] = output.resultDigest;
+    }
+    if (record.status === "tested") {
+      record.passesAll = readings.every((reading) =>
+        reading.rawInput.scenarios.every(
+          (scen) => record.perScenario?.[reading.id]?.[scen.id]?.passes === true,
+        ),
+      );
+    }
+  }
+  return { ok: true };
+}
+
+// Compile one round's proposed candidates, recording each in the round and in
+// allRecords: malformed proposals are rejected, rule-identical ones marked
+// duplicates of the first identical candidate, and the rest are runnable.
+function compileRoundCandidates(args: {
+  search: SearchArgs;
+  round: number;
+  roundRecord: SearchRound;
+  candidates: ProposedCandidate[];
+  allRecords: SearchCandidateRecord[];
+  seenRules: Map<string, string>;
+}): Runnable[] {
+  const { search, round, roundRecord, candidates, allRecords, seenRules } = args;
+  const runnable: Runnable[] = [];
+  candidates.forEach((p, index) => {
+    const record: SearchCandidateRecord = {
+      id: `${search.idPrefix ?? ""}r${round}c${index + 1}`,
+      lever: p.lever,
+      params: {
+        amount_cents: p.amount_cents,
+        date: p.date,
+        split_count: p.split_count,
+        net_days: p.net_days,
+      },
+      rationale: p.rationale,
+      status: "tested",
+    };
+    allRecords.push(record);
+    roundRecord.candidates.push(record);
+    const compiled = compileCandidate(search.base, p);
+    if (!compiled.ok) {
+      record.status = "rejected_malformed";
+      record.rejection = {
+        by: "compile",
+        code: compiled.code,
+        field: compiled.field,
+        detail: compiled.detail,
+      };
+      return;
+    }
+    record.rankCents = compiled.rankCents;
+    record.centDays = compiled.centDays;
+    record.summary = compiled.summary;
+    const rulesDigest = digestValue(compiled.escrowRules);
+    const prior = seenRules.get(rulesDigest);
+    if (prior !== undefined) {
+      record.status = "duplicate";
+      record.duplicateOf = prior;
+      return;
+    }
+    seenRules.set(rulesDigest, record.id);
+    runnable.push({ record, escrowRules: compiled.escrowRules });
+  });
+  return runnable;
+}
+
+// Duplicates reuse the original's outcome: the verdicts carry over, the
+// digests do not — this candidate's own input (with its own id) never ran.
+function propagateDuplicates(allRecords: SearchCandidateRecord[]): void {
+  for (const record of allRecords) {
+    if (record.status !== "duplicate" || record.duplicateOf === undefined) continue;
+    const original = allRecords.find((c) => c.id === record.duplicateOf);
+    if (original === undefined) continue;
+    record.passesAll = original.passesAll;
+    record.perScenario = original.perScenario;
+  }
+}
+
+// One search round: ask the model, record the round, compile + dedupe its
+// candidates, run them on workers and fold the results back. Returns a
+// terminal receipt when the round ends the search (model or worker failure),
+// undefined to continue.
+async function runSearchRound(args: {
+  round: number;
+  maxRounds: number;
+  search: SearchArgs;
+  chat: typeof callStructuredChat;
+  model: string;
+  rounds: SearchRound[];
+  allRecords: SearchCandidateRecord[];
+  seenRules: Map<string, string>;
+  escrowIds: Set<string>;
+}): Promise<CounterofferReceipt | undefined> {
+  const { round, maxRounds, search, chat, model, rounds, allRecords, seenRules, escrowIds } =
+    args;
+  const chatResult: ChatResult = await chat(search.chatConfig, {
+    model,
+    systemPrompt: COUNTEROFFER_SYSTEM_PROMPT + (search.systemPromptSuffix ?? ""),
+    userPrompt: buildUserPrompt({ round, maxRounds, search, previousRounds: rounds }),
+    schemaName: PROPOSAL_SCHEMA_NAME,
+    schema: PROPOSAL_SCHEMA,
+  });
+  if (!chatResult.ok) {
+    return receipt({
+      status: "needs_review",
+      stopReason: "model_error",
+      reason: chatResult.reason,
+      detail: chatResult.detail,
+      model,
+      rounds,
+    });
+  }
+  const validated = validateProposal(chatResult.parsed);
+  if (!validated.ok) {
+    return receipt({
+      status: "needs_review",
+      stopReason: "model_error",
+      reason: "schema_mismatch",
+      detail: validated.detail,
+      model,
+      rounds,
+    });
+  }
+  const proposal = validated.proposal;
+  const roundRecord: SearchRound = {
+    round,
+    modelNote: proposal.roundNote,
+    done: proposal.done,
+    ...modelInfo(chatResult),
+    candidates: [],
+  };
+  rounds.push(roundRecord);
+
+  // Compile + dedupe ---------------------------------------------------------
+  const runnable = compileRoundCandidates({
+    search,
+    round,
+    roundRecord,
+    candidates: proposal.candidates,
+    allRecords,
+    seenRules,
+  });
+
+  // Build + distribute jobs ----------------------------------------------------
+  const ran = await runRoundJobs(runnable, search.readings, escrowIds, search.pool);
+  if (!ran.ok) {
+    return receipt({
+      status: "needs_review",
+      stopReason: "worker_error",
+      reason: "workers_unavailable",
+      detail: ran.detail,
+      model,
+      rounds,
+    });
+  }
+
+  // Fold results back ----------------------------------------------------------
+  const fold = foldRoundResults(runnable, search.readings, ran);
+  if (!fold.ok) {
+    return receipt({
+      status: "needs_review",
+      stopReason: "worker_error",
+      reason: fold.reason,
+      detail: fold.detail,
+      model,
+      rounds,
+    });
+  }
+
+  propagateDuplicates(allRecords);
+  return undefined;
+}
+
+// Early exits: both readings already pass as signed (nothing to search), or
+// the worker pool is empty.
+function preflightReceipt(
+  args: SearchArgs,
+  model: string,
+  rounds: SearchRound[],
+): CounterofferReceipt | undefined {
   if (args.readings.every((r) => allPass(r.asSignedResults))) {
     return receipt({
       status: "not_needed",
@@ -401,7 +692,6 @@ export async function runCounterofferSearch(args: SearchArgs): Promise<Counterof
       rounds,
     });
   }
-
   if (args.pool.workers.length === 0) {
     return receipt({
       status: "needs_review",
@@ -412,216 +702,48 @@ export async function runCounterofferSearch(args: SearchArgs): Promise<Counterof
       rounds,
     });
   }
+  return undefined;
+}
+
+export async function runCounterofferSearch(args: SearchArgs): Promise<CounterofferReceipt> {
+  const maxRounds = args.maxRounds ?? DEFAULT_MAX_ROUNDS;
+  const chat = args.chat ?? callStructuredChat;
+  const model = args.model;
+  const rounds: SearchRound[] = [];
+  const escrowIds = new Set(args.base.rules.map((r) => r.id));
+  const seenRules = new Map<string, string>(); // rules digest -> first candidate id
+  const allRecords: SearchCandidateRecord[] = [...(args.seedRecords ?? [])];
+
+  const preflight = preflightReceipt(args, model, rounds);
+  if (preflight !== undefined) return preflight;
 
   for (let round = 1; round <= maxRounds; round += 1) {
-    const chatResult: ChatResult = await chat(args.chatConfig, {
-      model,
-      systemPrompt: COUNTEROFFER_SYSTEM_PROMPT + (args.systemPromptSuffix ?? ""),
-      userPrompt: buildUserPrompt({ round, maxRounds, search: args, previousRounds: rounds }),
-      schemaName: PROPOSAL_SCHEMA_NAME,
-      schema: PROPOSAL_SCHEMA,
-    });
-    if (!chatResult.ok) {
-      return receipt({
-        status: "needs_review",
-        stopReason: "model_error",
-        reason: chatResult.reason,
-        detail: chatResult.detail,
-        model,
-        rounds,
-      });
-    }
-    const validated = validateProposal(chatResult.parsed);
-    if (!validated.ok) {
-      return receipt({
-        status: "needs_review",
-        stopReason: "model_error",
-        reason: "schema_mismatch",
-        detail: validated.detail,
-        model,
-        rounds,
-      });
-    }
-    const proposal = validated.proposal;
-    const roundRecord: SearchRound = {
+    const ended = await runSearchRound({
       round,
-      modelNote: proposal.roundNote,
-      done: proposal.done,
-      ...modelInfo(chatResult),
-      candidates: [],
-    };
-    rounds.push(roundRecord);
-
-    // Compile + dedupe ---------------------------------------------------------
-    const runnable: { record: SearchCandidateRecord; escrowRules: PaymentRule[] }[] = [];
-    proposal.candidates.forEach((p, index) => {
-      const record: SearchCandidateRecord = {
-        id: `${args.idPrefix ?? ""}r${round}c${index + 1}`,
-        lever: p.lever,
-        params: {
-          amount_cents: p.amount_cents,
-          date: p.date,
-          split_count: p.split_count,
-          net_days: p.net_days,
-        },
-        rationale: p.rationale,
-        status: "tested",
-      };
-      allRecords.push(record);
-      roundRecord.candidates.push(record);
-      const compiled = compileCandidate(args.base, p);
-      if (!compiled.ok) {
-        record.status = "rejected_malformed";
-        record.rejection = {
-          by: "compile",
-          code: compiled.code,
-          field: compiled.field,
-          detail: compiled.detail,
-        };
-        return;
-      }
-      record.rankCents = compiled.rankCents;
-      record.centDays = compiled.centDays;
-      record.summary = compiled.summary;
-      const rulesDigest = digestValue(compiled.escrowRules);
-      const prior = seenRules.get(rulesDigest);
-      if (prior !== undefined) {
-        record.status = "duplicate";
-        record.duplicateOf = prior;
-        return;
-      }
-      seenRules.set(rulesDigest, record.id);
-      runnable.push({ record, escrowRules: compiled.escrowRules });
+      maxRounds,
+      search: args,
+      chat,
+      model,
+      rounds,
+      allRecords,
+      seenRules,
+      escrowIds,
     });
-
-    // Build + distribute jobs ----------------------------------------------------
-    const jobsByWorker = new Map<string, WorkerJob[]>();
-    const localDigests = new Map<string, string>();
-    runnable.forEach((candidate, i) => {
-      const worker = args.pool.workers[i % args.pool.workers.length] as string;
-      candidate.record.worker = worker;
-      for (const reading of args.readings) {
-        const asSigned = reading.rawInput.candidates[0];
-        const nonEscrow = (asSigned?.paymentRules ?? []).filter((r) => !escrowIds.has(r.id));
-        const input = {
-          ...reading.rawInput,
-          candidates: [
-            {
-              id: candidate.record.id,
-              rankCents: candidate.record.rankCents ?? 0,
-              totalCents: asSigned?.totalCents ?? 0,
-              paymentRules: [...candidate.escrowRules, ...nonEscrow],
-            },
-          ],
-        };
-        const jobId = `${candidate.record.id}@${reading.id}`;
-        localDigests.set(jobId, digestValue(input));
-        const list = jobsByWorker.get(worker) ?? [];
-        list.push({ jobId, input });
-        jobsByWorker.set(worker, list);
-      }
-    });
-
-    const batchResults = new Map<string, WorkerJobResult>();
-    try {
-      const settled = await Promise.all(
-        [...jobsByWorker.entries()].map(([worker, jobs]) =>
-          args.pool.runBatch(worker, jobs).then((results) => ({ worker, results })),
-        ),
-      );
-      for (const { results } of settled) {
-        for (const result of results) batchResults.set(result.jobId, result);
-      }
-    } catch (error) {
-      if (error instanceof WorkerUnavailableError) {
-        return receipt({
-          status: "needs_review",
-          stopReason: "worker_error",
-          reason: "workers_unavailable",
-          detail: error.message,
-          model,
-          rounds,
-        });
-      }
-      throw error;
-    }
-
-    // Fold results back ----------------------------------------------------------
-    for (const candidate of runnable) {
-      const record = candidate.record;
-      record.perScenario = {};
-      record.inputDigests = {};
-      record.resultDigests = {};
-      for (const reading of args.readings) {
-        const jobId = `${record.id}@${reading.id}`;
-        const result = batchResults.get(jobId);
-        if (result === undefined) {
-          return receipt({
-            status: "needs_review",
-            stopReason: "worker_error",
-            reason: "workers_unavailable",
-            detail: `worker returned no result for ${jobId}`,
-            model,
-            rounds,
-          });
-        }
-        if (!result.ok) {
-          record.status = "rejected_malformed";
-          record.rejection = {
-            by: "runner",
-            code: result.code,
-            ...(result.field !== undefined ? { field: result.field } : {}),
-            detail: result.message,
-          };
-          record.perScenario = undefined;
-          record.inputDigests = undefined;
-          record.resultDigests = undefined;
-          break;
-        }
-        const output = result.output;
-        if (output.runnerVersion !== RUNNER_VERSION || output.inputDigest !== localDigests.get(jobId)) {
-          return receipt({
-            status: "needs_review",
-            stopReason: "worker_error",
-            reason: "worker_digest_mismatch",
-            detail: `worker output for ${jobId} does not match the coordinator's input digest`,
-            model,
-            rounds,
-          });
-        }
-        const perScenario: Record<string, CompactResult> = {};
-        for (const [scenarioId, scenarioResult] of Object.entries(
-          output.results[record.id] ?? {},
-        )) {
-          perScenario[scenarioId] = compact(scenarioResult);
-        }
-        record.perScenario[reading.id] = perScenario;
-        record.inputDigests[reading.id] = output.inputDigest;
-        record.resultDigests[reading.id] = output.resultDigest;
-      }
-      if (record.status === "tested") {
-        record.passesAll = args.readings.every((reading) =>
-          reading.rawInput.scenarios.every(
-            (scen) => record.perScenario?.[reading.id]?.[scen.id]?.passes === true,
-          ),
-        );
-      }
-    }
-
-    // Duplicates reuse the original's outcome. ------------------------------------
-    for (const record of allRecords) {
-      if (record.status !== "duplicate" || record.duplicateOf === undefined) continue;
-      const original = allRecords.find((c) => c.id === record.duplicateOf);
-      if (original === undefined) continue;
-      // The verdicts carry over; the digests do not — this candidate's own
-      // input (with its own id) was never run.
-      record.passesAll = original.passesAll;
-      record.perScenario = original.perScenario;
-    }
-
-    if (proposal.done) break;
+    if (ended !== undefined) return ended;
+    if (rounds[rounds.length - 1]?.done === true) break;
   }
 
+  return finalizeSearch(model, rounds, allRecords);
+}
+
+// The terminal receipt once the rounds end: best candidate, the stop reason
+// (the model declared done vs the round cap) and the failing bound for the
+// best's lever family.
+function finalizeSearch(
+  model: string,
+  rounds: SearchRound[],
+  allRecords: SearchCandidateRecord[],
+): CounterofferReceipt {
   const best = findBest(rounds);
   const lastRound = rounds[rounds.length - 1];
   const stopReason: SearchStopReason =
@@ -672,6 +794,40 @@ export function clientReplyCallDigest(args: {
   });
 }
 
+// The worker batch for one compiled candidate: one job per reading (as-signed
+// rules plus the candidate's escrow rules) and the local digest map used to
+// verify the worker's result digests.
+function buildCandidateJobs(
+  base: SearchBase,
+  readings: SearchReading[],
+  record: SearchCandidateRecord,
+  compiled: CompileOk,
+): { jobs: WorkerJob[]; localDigests: Map<string, string> } {
+  const escrowIds = new Set(base.rules.map((r) => r.id));
+  const jobs: WorkerJob[] = readings.map((reading) => {
+    const asSigned = reading.rawInput.candidates[0];
+    const nonEscrow = (asSigned?.paymentRules ?? []).filter((r) => !escrowIds.has(r.id));
+    return {
+      jobId: `${record.id}@${reading.id}`,
+      input: {
+        ...reading.rawInput,
+        candidates: [
+          {
+            id: record.id,
+            rankCents: compiled.rankCents,
+            totalCents: asSigned?.totalCents ?? 0,
+            paymentRules: [...compiled.escrowRules, ...nonEscrow],
+          },
+        ],
+      },
+    };
+  });
+  return {
+    jobs,
+    localDigests: new Map(jobs.map((j) => [j.jobId, digestValue(j.input)])),
+  };
+}
+
 // Re-verifies a carried-forward best candidate: recompile the same lever, run
 // it once on the first worker for both readings, and require the worker's
 // result digests to match the previous run's records.
@@ -708,26 +864,7 @@ export async function reverifyBestCandidate(args: {
       detail: `carried candidate ${record.id} no longer compiles: ${compiled.detail}`,
     };
   }
-  const escrowIds = new Set(base.rules.map((r) => r.id));
-  const jobs: WorkerJob[] = readings.map((reading) => {
-    const asSigned = reading.rawInput.candidates[0];
-    const nonEscrow = (asSigned?.paymentRules ?? []).filter((r) => !escrowIds.has(r.id));
-    return {
-      jobId: `${record.id}@${reading.id}`,
-      input: {
-        ...reading.rawInput,
-        candidates: [
-          {
-            id: record.id,
-            rankCents: compiled.rankCents,
-            totalCents: asSigned?.totalCents ?? 0,
-            paymentRules: [...compiled.escrowRules, ...nonEscrow],
-          },
-        ],
-      },
-    };
-  });
-  const localDigests = new Map(jobs.map((j) => [j.jobId, digestValue(j.input)]));
+  const { jobs, localDigests } = buildCandidateJobs(base, readings, record, compiled);
   let results: WorkerJobResult[];
   try {
     results = await pool.runBatch(worker, jobs);
@@ -816,26 +953,7 @@ export async function testClientCandidate(args: {
   record.centDays = compiled.centDays;
   record.summary = compiled.summary;
 
-  const escrowIds = new Set(base.rules.map((r) => r.id));
-  const jobs: WorkerJob[] = readings.map((reading) => {
-    const asSigned = reading.rawInput.candidates[0];
-    const nonEscrow = (asSigned?.paymentRules ?? []).filter((r) => !escrowIds.has(r.id));
-    return {
-      jobId: `${record.id}@${reading.id}`,
-      input: {
-        ...reading.rawInput,
-        candidates: [
-          {
-            id: record.id,
-            rankCents: compiled.rankCents,
-            totalCents: asSigned?.totalCents ?? 0,
-            paymentRules: [...compiled.escrowRules, ...nonEscrow],
-          },
-        ],
-      },
-    };
-  });
-  const localDigests = new Map(jobs.map((j) => [j.jobId, digestValue(j.input)]));
+  const { jobs, localDigests } = buildCandidateJobs(base, readings, record, compiled);
 
   let perWorker: [string, WorkerJobResult[]][];
   try {
