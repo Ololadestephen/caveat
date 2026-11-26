@@ -50,10 +50,11 @@ export function weekdayName(iso: string): string {
 }
 
 function formatCents(cents: number): string {
-  const dollars = Math.floor(cents / 100);
-  const rest = String(Math.abs(cents % 100)).padStart(2, "0");
+  const abs = Math.abs(cents);
+  const dollars = Math.floor(abs / 100);
+  const rest = String(abs % 100).padStart(2, "0");
   const grouped = String(dollars).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `$${grouped}.${rest}`;
+  return `${cents < 0 ? "-" : ""}$${grouped}.${rest}`;
 }
 
 const MONTH_ABBR = [
@@ -79,9 +80,10 @@ export function formatDateShort(iso: string): string {
 
 // $8,000 whole dollars, else $8,000.50 — headline phrasing drops the cents.
 export function formatMoneyShort(cents: number): string {
-  const grouped = String(Math.floor(cents / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  const rest = cents % 100;
-  return rest === 0 ? `$${grouped}` : `$${grouped}.${String(rest).padStart(2, "0")}`;
+  const abs = Math.abs(cents);
+  const grouped = String(Math.floor(abs / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const rest = abs % 100;
+  return `${cents < 0 ? "-" : ""}$${grouped}${rest === 0 ? "" : `.${String(rest).padStart(2, "0")}`}`;
 }
 
 function excerptFor(excerpts: readonly Excerpt[], excerptId: string): Excerpt | undefined {

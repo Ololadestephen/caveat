@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { TERMS_READING_LABELS } from "../plan/terms.ts";
 import { canonicalJson } from "../runner/digest.ts";
 import type { ScenarioResult } from "../runner/types.ts";
 import type { RunReceipt } from "./receipt.ts";
@@ -31,11 +30,13 @@ const MONTH_NAMES = [
   "December",
 ];
 
-// $8,000 when whole dollars, else $8,000.50 — never the "$x,xxx.00" page style.
+// $8,000 when whole dollars, else $8,000.50; -$7,000 when negative — never
+// the "$x,xxx.00" page style.
 function money(cents: number): string {
-  const grouped = String(Math.floor(cents / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  const rest = cents % 100;
-  return rest === 0 ? `$${grouped}` : `$${grouped}.${String(rest).padStart(2, "0")}`;
+  const abs = Math.abs(cents);
+  const grouped = String(Math.floor(abs / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const rest = abs % 100;
+  return `${cents < 0 ? "-" : ""}$${grouped}${rest === 0 ? "" : `.${String(rest).padStart(2, "0")}`}`;
 }
 
 function formatDate(iso: string): string {
@@ -360,7 +361,7 @@ export function renderTermsDraft(receipt: RunReceipt): string {
             ).filter((e) => e.kind === "payment").length,
           );
     lines.push(
-      `${next()}. The agreement does not say whether partial months are billed. One reading bills ${feeText} pro rata by calendar day on the last day of every calendar month that overlaps the term (${terms.termStart.text} – ${terms.termEnd.text}); the other invoices only for calendar months wholly inside it. Caveat ran both readings — ${TERMS_READING_LABELS.partial_months_prorated} produces ${billedCount} invoices, ${TERMS_READING_LABELS.partial_months_not_billed} ${notBilledCount}.`,
+      `${next()}. The agreement does not say whether partial months are billed. One reading bills ${feeText} pro rata by calendar day on the last day of every calendar month that overlaps the term (${terms.termStart.text} – ${terms.termEnd.text}); the other invoices only for calendar months wholly inside it. Caveat ran both readings — under the pro-rata reading (partial months billed by calendar day; the agreement does not say) it produces ${billedCount} invoices; under the not-billed reading, ${notBilledCount}.`,
     );
     lines.push("   Ask: which reading the parties intend, and whether May and September invoice in full.");
   }
