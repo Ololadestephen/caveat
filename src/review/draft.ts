@@ -208,6 +208,12 @@ export function renderDraft(receipt: RunReceipt): string {
     }
   }
   const cash = receipt.cashSource;
+  if (cash?.kind === "owner_file_invalid") {
+    lines.push(
+      `${cash.fileName} (version ${cash.versionTag}) could not be read: ${cash.detail}. No cash results were produced until it is fixed.`,
+    );
+    return `${lines.join("\n")}\n`;
+  }
   if (cash?.kind === "owner_file") {
     const total = a.costs.reduce((sum, c) => sum + c.amountCents, 0);
     lines.push(

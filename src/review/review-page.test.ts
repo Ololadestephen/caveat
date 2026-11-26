@@ -673,3 +673,22 @@ describe("renderReviewPage — cash source labels", () => {
     expect(html).toContain("my-cash.csv (version abc123def456)");
   });
 });
+
+describe("renderReviewPage — invalid owner cash file", () => {
+  it("labels the file as unreadable and produces no numbers", () => {
+    const receipt = JSON.parse(
+      JSON.stringify(fixtureReceipt("run-page-cash-invalid")),
+    ) as RunReceipt;
+    receipt.cashSource = {
+      kind: "owner_file_invalid",
+      fileName: "my-cash.csv",
+      versionTag: "abc123def456",
+      sha12: "000aaa111bbb",
+      detail: "line 4: bad_amount: '6000.5' is not an amount like \"1234.56\"",
+    };
+    const html = renderReviewPage(receipt);
+    expect(html).toContain(
+      "my-cash.csv (version abc123def456) could not be read: line 4: bad_amount: &#39;6000.5&#39; is not an amount like &quot;1234.56&quot;. No cash results were produced until it is fixed.",
+    );
+  });
+});

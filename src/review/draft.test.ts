@@ -171,3 +171,21 @@ describe("owner cash file closing line", () => {
     );
   });
 });
+
+describe("invalid owner cash file closing line", () => {
+  it("labels the file as unreadable with its detail", () => {
+    const receipt = {
+      ...JSON.parse(JSON.stringify(RECEIPT)),
+      cashSource: {
+        kind: "owner_file_invalid",
+        fileName: "my-cash.csv",
+        versionTag: "abc123def456",
+        sha12: "000aaa111bbb",
+        detail: "line 4: bad_amount: '6000.5' is not an amount like \"1234.56\"",
+      },
+    } as RunReceipt;
+    expect(renderDraft(receipt)).toContain(
+      "my-cash.csv (version abc123def456) could not be read: line 4: bad_amount: '6000.5' is not an amount like \"1234.56\". No cash results were produced until it is fixed.",
+    );
+  });
+});

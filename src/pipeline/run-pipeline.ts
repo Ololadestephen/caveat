@@ -824,13 +824,20 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   // invalid file blocks the run rather than falling back silently.
   let assumptions = demoAssumptions;
   let cashSource: NonNullable<RunReceipt["cashSource"]> = { kind: "demo_assumptions" };
+  let cashInvalid = false;
   if (cashFile !== undefined) {
     const parsed = parseCashFile(cashFile.bytes, demoAssumptions);
     if (!parsed.ok) {
-      blockedReasons.push({
-        reason: "cash_file_invalid",
-        detail: `line ${parsed.line}: ${parsed.code}: ${parsed.detail}`,
-      });
+      const detail = `line ${parsed.line}: ${parsed.code}: ${parsed.detail}`;
+      cashInvalid = true;
+      blockedReasons.push({ reason: "cash_file_invalid", detail });
+      cashSource = {
+        kind: "owner_file_invalid",
+        fileName: cashFile.fileName,
+        versionTag: versionTag({ fileId: cashFile.fileId, versionId: cashFile.versionId }),
+        sha12: sha12(cashFile.sha256),
+        detail,
+      };
     } else {
       assumptions = parsed.assumptions;
       cashSource = {
@@ -853,14 +860,23 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     cashNumbers(assumptions),
     cashNumbers(demoAssumptions),
   );
-  const { readings, inputs, reasons: runnerReasons, expectedCheck } = await runReadings(
-    schedule,
-    review,
-    effectiveAction,
-    assumptions,
-    expectedEligible,
-    config,
-  );
+  // An invalid cash file produces no results: readings and the expected
+  // check are skipped entirely, and nothing reaches the search.
+  const { readings, inputs, reasons: runnerReasons, expectedCheck } = cashInvalid
+    ? {
+        readings: [],
+        inputs: {},
+        reasons: [] as { reason: string; detail: string }[],
+        expectedCheck: undefined,
+      }
+    : await runReadings(
+        schedule,
+        review,
+        effectiveAction,
+        assumptions,
+        expectedEligible,
+        config,
+      );
   blockedReasons.push(...runnerReasons);
   timer.record("runner");
 

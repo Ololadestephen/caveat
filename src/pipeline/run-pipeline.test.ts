@@ -732,8 +732,19 @@ describe("owner cash file", () => {
     expect(receipt.blockedReasons).toContainEqual(
       expect.objectContaining({ reason: "cash_file_invalid" }),
     );
-    expect(
-      receipt.blockedReasons.find((r) => r.reason === "cash_file_invalid")?.detail,
-    ).toMatch(/^line 2: bad_amount: /);
+    const detail = receipt.blockedReasons.find(
+      (r) => r.reason === "cash_file_invalid",
+    )?.detail;
+    expect(detail).toMatch(/^line 2: bad_amount: /);
+    // An invalid file is labelled, not silently replaced: no demo results.
+    expect(receipt.cashSource?.kind).toBe("owner_file_invalid");
+    if (receipt.cashSource?.kind !== "owner_file_invalid") throw new Error("unreachable");
+    expect(receipt.cashSource.fileName).toBe("my-cash.csv");
+    expect(receipt.cashSource.versionTag).toMatch(/^[0-9a-f]{12}$/);
+    expect(receipt.cashSource.sha12).toMatch(/^[0-9a-f]{12}$/);
+    expect(receipt.cashSource.detail).toBe(detail);
+    expect(receipt.readings).toEqual([]);
+    expect(receipt.expectedCheck).toBeUndefined();
+    expect(receipt.counteroffer).toBeUndefined();
   });
 });

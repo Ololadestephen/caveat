@@ -87,9 +87,17 @@ export type RunReceipt = {
   readings: ReceiptReading[];
   assumptions: TwinveeAssumptions;
   // Which cash numbers the run used: the owner's my-cash.csv when present and
-  // valid, else the demo fixture.
+  // valid, else the demo fixture. An invalid owner file keeps its label and
+  // the parse detail — the run is blocked and produces no cash results.
   cashSource?:
     | { kind: "owner_file"; fileName: string; versionTag: string; sha12: string }
+    | {
+        kind: "owner_file_invalid";
+        fileName: string;
+        versionTag: string;
+        sha12: string;
+        detail: string;
+      }
     | { kind: "demo_assumptions" };
   // What the expected-fixture check did this run; absent when the readings
   // never ran or the check was disabled.

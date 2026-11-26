@@ -415,6 +415,10 @@ function renderHeadline(receipt: RunReceipt): string {
 
 function renderCashNumbers(receipt: RunReceipt): string {
   const a = receipt.assumptions;
+  if (receipt.cashSource?.kind === "owner_file_invalid") {
+    const cash = receipt.cashSource;
+    return `<p class="caption cash-numbers"><strong>Cash numbers:</strong> ${escapeHtml(cash.fileName)} (version ${escapeHtml(cash.versionTag)}) could not be read: ${escapeHtml(cash.detail)}. No cash results were produced until it is fixed.</p>`;
+  }
   const source =
     receipt.cashSource?.kind === "owner_file"
       ? `${escapeHtml(receipt.cashSource.fileName)} (version ${escapeHtml(receipt.cashSource.versionTag)})`
