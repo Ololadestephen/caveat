@@ -179,7 +179,7 @@ function kickRun(ctx: AppContext, runId: string, args: StartRunArgs): void {
       runId,
       reviewsDir: deps.reviewsDir,
       fixturesDir: deps.fixturesDir,
-      boxFolder: deps.boxFolder,
+      boxFolder: contractProfile(args.contract)?.boxFolder ?? deps.boxFolder,
       trigger: args.trigger,
       contract: args.contract,
       ...(deps.decisionModel !== undefined ? { decisionModel: deps.decisionModel } : {}),
