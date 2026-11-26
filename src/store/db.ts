@@ -330,9 +330,12 @@ export function selectCarrySources(
   for (const row of listRuns(db, contract)) {
     if (row.status === "failed" || row.status === "running") continue;
     const receipt = parseReceiptJson(row.receipt_json);
+    // needs_review receipts enter the pool too: the generic pipeline only
+    // carries calls from reviewable sources, but a review file may name a
+    // needs_review run whose extraction the reviewer confirmed (extractedIn).
     if (
       receipt !== undefined &&
-      receipt.status === "reviewable" &&
+      (receipt.status === "reviewable" || receipt.status === "needs_review") &&
       receipt.typedCallDigests !== undefined
     ) {
       sources.push({ runId: row.id, receipt });

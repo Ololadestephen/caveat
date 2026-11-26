@@ -483,6 +483,8 @@ describe("manual run baseline", () => {
     expect(runId).toBeTruthy();
     const config = r.pipelineConfigs.find((c) => (c as { runId?: string }).runId === runId);
     expect((config?.previous as { runId?: string } | undefined)?.runId).toBe("run-good");
-    expect(config?.carrySources?.map((s) => s.runId)).toEqual(["run-good"]);
+    // needs_review receipts join the pool so a review file can name them via
+    // extractedIn; the pipeline still only carries calls from reviewable ones.
+    expect(config?.carrySources?.map((s) => s.runId)).toEqual(["run-blocked", "run-good"]);
   });
 });

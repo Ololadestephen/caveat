@@ -456,7 +456,7 @@ describe("optional source files", () => {
     // the blocked run is never a source.
     expect(
       started[0]?.args.carrySources?.map((s) => s.runId),
-    ).toEqual(["run-reviewable"]);
+    ).toEqual(["run-blocked", "run-reviewable"]);
     db.close();
   });
 
