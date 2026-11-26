@@ -1,7 +1,7 @@
 # Caveat
 
-Caveat reads a consultant's contract documents from Box, asks a model typed
-questions about the payment terms, and stress-tests the answers against a
+Caveat reads a consultant's contract documents from Box, has TypeSafe's Jev
+make typed decisions about the payment terms, and stress-tests the answers against a
 deterministic cash-flow model before anyone signs. Every run ends in a
 receipt that a human must approve; the export is a draft counteroffer note —
 never sent, never legal advice.
@@ -31,6 +31,17 @@ A Caveat run on them surfaces five things a reader can miss:
   file. The coordinator watches the Box folder; when the amendment is
   re-uploaded as a new Box version (same bytes), the old approval is marked
   `stale`, its export is refused, and a fresh draft goes into review.
+- **Your own cash numbers.** A `my-cash.csv` in the Box folder (opening
+  balance, cash floor, dated costs) replaces the demo assumptions. It is
+  validated strictly; an invalid file blocks the run with its line number
+  instead of falling back. A new version replans like a document change.
+- **The client's reply.** When `04-client-reply.pdf` lands in Box, Jev first
+  checks that it proposes exactly one payment change, the OpenRouter model
+  copies that change verbatim with its clause, and code parses it into the
+  same typed lever fields the search uses. Both workers test it and must
+  agree. A safe counter is marked safe; an unsafe one starts a follow-up
+  search seeded with the client's offer, and the draft proposes the tested
+  fix. Anything not read cleanly goes to human review. Nothing is sent.
 
 ## Architecture
 
@@ -41,14 +52,27 @@ A Caveat run on them surfaces five things a reader can miss:
   `running → reviewable → approved`, with `stale`, `needs_review`, `failed`
   and `superseded` states kept visible. A run interrupted mid-flight becomes
   a `failed` row on restart, not a silent disappearance.
-- **Connectors**: the only route to Box and OpenRouter is the coordinator's
-  Sprite connectors, scoped by an access policy (the proof folder's
-  `/2.0/folders/*` and `/2.0/files/*` endpoints, and `/v1/chat/completions`
-  for OpenRouter). The Box and OpenRouter keys are held by the connectors
+- **Connectors**: the only route to Box, TypeSafe and OpenRouter is the
+  coordinator's Sprite connectors, scoped by an access policy (the proof
+  folder's `/2.0/folders/*` and `/2.0/files/*` endpoints, `/v1/systemone`
+  for the TypeSafeAI connector, and `/v1/chat/completions` for OpenRouter).
+  The Box, TypeSafe and OpenRouter keys are held by the connectors
   and never reach this repo, the operator's machine or any Sprite. The
   operator's machine holds only its `sprite` CLI login, which the proof
   scripts use through `sprite exec` and `sprite proxy`; the coordinator
   holds no org token.
+- **Typed decisions with Jev** (`src/interpret/jev.ts`): Jev
+  (`jev-1.14.0`, pinned) answers through the TypeSafeAI connector's
+  `/v1/systemone`. It makes three decisions: the release-timing choice
+  (cash on fixed dates, escrow release, transaction-triggered, or
+  ambiguous), a follow-up choice of which excerpt states the first release
+  (asked only after a confident decision, worded for the chosen answer),
+  and a yes/no gate on whether the client's letter proposes exactly one
+  payment change. The review page shows Jev's probabilities for every
+  option. An answer below 0.80 confidence, or an "ambiguous" choice, goes
+  to human review. Jev only decides; text extraction (the escrow schedule,
+  the client's terms) and the counteroffer search use the OpenRouter model,
+  and code validates every copied quote and parses every amount and date.
 - **Counteroffer search** (`src/search/`): each round the model proposes 2
   or 3 candidates as strict JSON, each using a different lever. The four
   levers move money already in the deal earlier: a cash deposit at signing,
@@ -77,8 +101,8 @@ A Caveat run on them surfaces five things a reader can miss:
   the deterministic steps always rerun. Sprites pause when idle and the
   watcher pauses with them; the next request wakes it and it checks again.
   It never uploads to Box or sends anything.
-- **Worker Sprites** (`caveat-wa`, `caveat-wb`): hold no Box/OpenRouter
-  grants at all. The coordinator reaches them through one Custom API
+- **Worker Sprites** (`caveat-wa`, `caveat-wb`): hold no Box, TypeSafe or
+  OpenRouter grants at all; all three connectors refuse them (403). The coordinator reaches them through one Custom API
   connector per worker (`caveat-worker-a`, `caveat-worker-b`) pointing at
   that worker's org-private Sprite URL and restricted to `/run-batch`; the
   gateway refuses connectors that target the Sprites API itself, so workers
@@ -97,7 +121,8 @@ A Caveat run on them surfaces five things a reader can miss:
 ## What is live, synthetic, or assumed
 
 - **Live**: the three source PDFs in the Box test folder (text renderings of
-  the public EDGAR exhibits below), the model calls through OpenRouter, the
+  the public EDGAR exhibits below), the Jev decisions through the TypeSafeAI
+  connector, the extraction and search calls through OpenRouter, the
   deterministic cash runner, the counteroffer search on the worker Sprites,
   the Box watcher, the web app, and the export-time recheck that detects Box
   drift.
@@ -106,7 +131,9 @@ A Caveat run on them surfaces five things a reader can miss:
   cash assumptions (opening cash, cash floor, monthly costs on the 15th), the
   October 1, 2026 escrow funding date (Section 3(b) says only "immediately
   upon execution"), and the typed-decision fixture cases used by the M1
-  proof. The First Amendment payment due on execution of the merger
+  proof. The client reply letters used to test the reply loop
+  (`fixtures/box/reply-v1`, `reply-v2`) are synthetic and labeled as such.
+  The First Amendment payment due on execution of the merger
   agreement has no stated date and is left out of the cash model.
 - **Runner policies**: payments due on a weekend are counted on the next
   business day (the contract itself says January 2, 2027), costs never move,
@@ -195,10 +222,18 @@ costs or modeled extensions are demo assumptions, not facts about the parties.
 The cash-runner arithmetic is checked against a fixed synthetic ledger.
 
 ## Environment
-- `CAVEAT_DECISION_MODEL` — model id for every typed call, including the
+- `CAVEAT_DECISION_MODEL` — OpenRouter model id for extraction and the
   counteroffer search (default `nvidia/nemotron-3.5-super-vl:free`).
-  Jev (`typesafe/jev-router`) is configurable, untested: setting this
-  variable changes only the model id in the request, but no run has used
-  Jev, and it is priced on OpenRouter rather than free.
+- When a TypeSafeAI connector is visible to the coordinator, Jev makes the
+  typed decisions and each receipt records provider `typesafe`, model
+  `jev-1.14.0`, the probabilities and token usage. Without one, the
+  release-timing decision falls back to the OpenRouter model, the letter
+  gate is skipped, and the receipt says so.
+- Live receipt: run `run-20261126-152146-799a` — Jev chose `escrow_release`
+  (confidence 0.96), cited Second Amendment §3(b)(i) (confidence 1.00), and
+  passed the client letter gate (p = 0.92); the client's counter tested safe
+  on both workers. Earlier runs where the first wording of the citation
+  question split 70/30 between two true clauses were sent to human review
+  and kept as evidence.
 
 **Not legal advice. Drafts are never sent.**
