@@ -164,7 +164,7 @@ export type PipelineResult = {
   timingsMs: Record<string, number>;
 };
 
-class PipelineError extends Error {
+export class PipelineError extends Error {
   readonly step: string;
   constructor(step: string, cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause));
@@ -687,7 +687,7 @@ async function carrySearch(
 }
 
 // File-level diff between two source tuples for the incremental receipt.
-function diffFiles(
+export function diffFiles(
   previous: SourceTuple,
   next: SourceTuple,
 ): IncrementalInfo["changedFiles"] {
@@ -718,7 +718,7 @@ function diffFiles(
   return changed;
 }
 
-function diffSectionDigests(
+export function diffSectionDigests(
   previous: Record<string, string>,
   next: Record<string, string>,
 ): IncrementalInfo["changedSections"] {

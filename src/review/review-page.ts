@@ -272,6 +272,7 @@ function renderHumanReview(receipt: RunReceipt): string {
   <p>The review record is invalid: ${escapeHtml(hr.reason)} — ${escapeHtml(hr.detail)}</p>
 </section>`;
   }
+  if (hr.status === "not_applicable") return "";
   const { review } = hr;
   const base = review.baseRetainer;
   const revisionPart =
