@@ -43,6 +43,48 @@ A Caveat run on them surfaces five things a reader can miss:
   search seeded with the client's offer, and the draft proposes the tested
   fix. Anything not read cleanly goes to human review. Nothing is sent.
 
+## Second contract: Aviat Networks
+
+The same pipeline runs on a different contract with no code forks: an Aviat US
+independent-contractor agreement,
+[a public SEC EDGAR exhibit](https://www.sec.gov/Archives/edgar/data/1377789/000137778924000024/consultingagreement05282024.htm).
+Its two Box files (`01-agreement.pdf`, `02-exhibit-a.pdf`) are text renderings
+of the agreement body and Exhibit A only — Exhibits B and C are omitted.
+
+- **Generic extraction.** The model copies each payment term verbatim with
+  its clause: net-30 payment terms in `01-agreement.pdf` §2(a) and
+  `02-exhibit-a.pdf` §3.3, and the $5,000/month fee in §3.1 whose invoice-day
+  rule ("the last day of the invoiced month") sits in §3.2 — a term may cite a
+  second excerpt for its date rule. Jev cross-checks each term against its own
+  quote (p = 0.85 / 0.93 / 0.92).
+- **A staged term-bounds pass.** When a recurring fee needs the agreement's
+  bounds and the main extraction leaves them unstated, a Jev choice picks the
+  term clause (`e16`, §9 "Term", p = 0.99) and a second extraction reads just
+  the dates from it: May 29, 2024 – September 29, 2024.
+- **Confirmation bound to the extraction.** The reviewer's file confirms the
+  exact verbatim terms *of a named run* (`extractedIn`); the run that produced
+  them need not have reached reviewable, since only the review gate blocked
+  it. Entries that don't match that run's terms leave the run
+  `needs_review | terms_unconfirmed`.
+- **Two readings again.** The agreement does not say whether partial months
+  are billed: the owner's reading bills the fee pro rata by calendar day in
+  whole dollars ($484 for May, $4,833 for September, $5,000 in between); the
+  other invoices only whole months inside the term. Both run under the
+  `on_time` and `paid_15_days_late` scenarios.
+- **Demo cash, labeled.** With no `my-cash.csv` in the folder, opening
+  balance, floor and costs come from the demo-assumptions fixture and are
+  labeled as such on the page and in the draft.
+- **Live proof.** `run-20261126-192834-406d` ended `reviewable` with every
+  typed call carried from the confirmed extraction, both readings run on both
+  worker Sprites with identical result digests matching the coordinator's,
+  and the same digests reproduced by an independent recompute on the runner.
+  Runner code changed: **0 lines** — the same deterministic runner digested
+  every scenario. Cash falls below the demo floor in every scenario (worst
+  -$7,000 on Dec 15, 2024 under the not-billed reading); that is a result,
+  not a failure.
+- **Not yet.** The counteroffer search is not available for this contract
+  type yet; the review page says so explicitly.
+
 ## Architecture
 
 - **Coordinator Sprite** (`caveat-coord`): runs the `caveat` HTTP service
