@@ -146,6 +146,9 @@ export type PipelineConfig = {
   workers?: string;
   chat?: typeof callStructuredChat;
   trigger?: "manual" | "watcher";
+  // The contract profile this run belongs to. Absent means twinvee — the
+  // escrow path ignores it.
+  contract?: string;
   // The run this one is based on. When its receipt carries digests, matching
   // typed calls reuse the previous outcomes instead of re-asking the model.
   previous?: { runId: string; receipt: RunReceipt; sourceTuple: SourceTuple };

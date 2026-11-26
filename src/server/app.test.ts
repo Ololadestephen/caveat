@@ -50,6 +50,7 @@ type Rig = {
   pipelineConfigs: {
     previous?: { runId: string };
     carrySources?: { runId: string }[];
+    contract?: string;
   }[];
 };
 
@@ -171,6 +172,24 @@ describe("caveat app", () => {
     const second = await post(r, "/runs");
     expect(second.status).toBe(409);
     expect(await second.text()).toContain("already in progress");
+  });
+
+  it("starts a run for the named contract and rejects unknown ones", async () => {
+    const r = await rig();
+    expect((await post(r, "/runs", "contract=bogus")).status).toBe(400);
+    const res = await post(r, "/runs", "contract=aviat");
+    expect(res.status).toBe(303);
+    const runId = res.headers.get("location")!.replace("/runs/", "");
+    const run = await waitForRun(r.db, runId);
+    expect(run.contract).toBe("aviat");
+    // The pipeline sees the contract so dispatch can pick the path.
+    expect(r.pipelineConfigs.at(-1)?.contract).toBe("aviat");
+  });
+
+  it("defaults a bare POST to the twinvee contract", async () => {
+    const r = await rig();
+    const runId = await startRun(r);
+    expect(getRun(r.db, runId)?.contract).toBe("twinvee");
   });
 
   it("rejects POSTs without a matching Origin", async () => {

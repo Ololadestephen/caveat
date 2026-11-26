@@ -94,10 +94,10 @@ function makeDeps(
   } = {},
 ): { deps: WatcherDeps; state: WatcherState; started: Started[] } {
   const started: Started[] = [];
-  const state: WatcherState = { lastCheckedAt: null, lastResult: null };
+  const state: WatcherState = { lastCheckedAt: null, results: {} };
   const deps: WatcherDeps = {
     db,
-    boxFolder: "caveat_TEST",
+    contracts: [{ id: "twinvee", boxFolder: "caveat_TEST" }],
     intervalMs: 60000,
     connections:
       opts.connections ??
@@ -148,7 +148,7 @@ describe("watchTick", () => {
 
     await watchTick(deps, state);
 
-    expect(state.lastResult).toBe("no_change");
+    expect(state.results.twinvee).toBe("no_change");
     expect(recheck).not.toHaveBeenCalled();
     expect(listWatchEvents(db, 10)).toHaveLength(0);
     expect(getRun(db, "run-latest")?.status).toBe("approved");
@@ -185,7 +185,7 @@ describe("watchTick", () => {
 
     await watchTick(deps, state);
 
-    expect(state.lastResult).toBe("change_found");
+    expect(state.results.twinvee).toBe("change_found");
     const expectedDetail = JSON.stringify(diffSourceTuple(old, confirmed));
     expect(getRun(db, "run-approved")?.status).toBe("stale");
     expect(getRun(db, "run-approved")?.stale_detail_json).toBe(expectedDetail);
@@ -230,7 +230,7 @@ describe("watchTick", () => {
     expect(getRun(db, "run-w1")?.status).toBe("running");
 
     await watchTick(deps, state);
-    expect(state.lastResult).toBe("skipped_busy");
+    expect(state.results.twinvee).toBe("skipped_busy");
     expect(started).toHaveLength(1);
     expect(listWatchEvents(db, 10)).toHaveLength(2);
   });
@@ -263,7 +263,7 @@ describe("watchTick", () => {
 
     // The folder still shows v2, but the latest run already covers it.
     await watchTick(deps, state);
-    expect(state.lastResult).toBe("no_change");
+    expect(state.results.twinvee).toBe("no_change");
     expect(started).toHaveLength(1);
     expect(listWatchEvents(db, 10).map((e) => e.result)).toEqual([
       "run_failed",
@@ -291,7 +291,7 @@ describe("watchTick", () => {
     await watchTick(deps, state);
     await watchTick(deps, state);
 
-    expect(state.lastResult).toBe("box_unavailable");
+    expect(state.results.twinvee).toBe("box_unavailable");
     const events = listWatchEvents(db, 10);
     expect(events).toHaveLength(1);
     expect(events[0]?.result).toBe("unavailable");
@@ -325,7 +325,7 @@ describe("startWatcher", () => {
     const watcher = startWatcher(base.deps);
     await vi.advanceTimersByTimeAsync(6_000); // first tick at ~5 s
     expect(listing).toHaveBeenCalledTimes(1);
-    expect(watcher.state.lastResult).toBe("no_change");
+    expect(watcher.state.results.twinvee).toBe("no_change");
     await vi.advanceTimersByTimeAsync(60_000); // then every interval
     expect(listing).toHaveBeenCalledTimes(2);
     watcher.stop();
@@ -370,7 +370,7 @@ describe("optional source files", () => {
         }),
     });
     await watchTick(deps, state);
-    expect(state.lastResult).toBe("change_found");
+    expect(state.results.twinvee).toBe("change_found");
     expect(started).toHaveLength(1);
     expect(started[0]?.args.sourceTuple).toEqual(confirmed);
     expect(getRun(db, "run-latest")?.status).toBe("stale");
@@ -414,7 +414,7 @@ describe("optional source files", () => {
         }),
     });
     await watchTick(deps, state);
-    expect(state.lastResult).toBe("change_found");
+    expect(state.results.twinvee).toBe("change_found");
     expect(started).toHaveLength(1);
     expect(started[0]?.args.sourceTuple).toEqual(confirmed);
     expect(getRun(db, "run-latest")?.status).toBe("stale");
@@ -449,7 +449,7 @@ describe("optional source files", () => {
         }),
     });
     await watchTick(deps, state);
-    expect(state.lastResult).toBe("change_found");
+    expect(state.results.twinvee).toBe("change_found");
     expect(started).toHaveLength(1);
     expect(started[0]?.args.previous?.runId).toBe("run-reviewable");
     // The carry pool holds every reviewable run with digests, newest first —
@@ -458,5 +458,52 @@ describe("optional source files", () => {
       started[0]?.args.carrySources?.map((s) => s.runId),
     ).toEqual(["run-reviewable"]);
     db.close();
+  });
+
+  it("ticks each contract's folder and starts the changed contract's run", async () => {
+    const db = openDb(":memory:");
+    // twinvee's latest run matches the listing, so only aviat changes.
+    const tuple = makeTuple("v1");
+    seedRun(db, {
+      id: "run-t1",
+      createdAt: "2026-11-25T01:00:00Z",
+      status: "reviewable",
+      sourceTuple: tuple,
+      trigger: "watcher",
+    });
+    const started: Started[] = [];
+    const state: WatcherState = { lastCheckedAt: null, results: {} };
+    const confirmed = makeTuple("av1");
+    const deps: WatcherDeps = {
+      db,
+      contracts: [
+        { id: "twinvee", boxFolder: "caveat_TEST" },
+        { id: "aviat", boxFolder: "caveat_AVIAT" },
+      ],
+      intervalMs: 60000,
+      connections: () => Promise.resolve([{ provider: "box", gatewayBaseUrl: "http://box.test" }]),
+      findFolder: (_gw, _p, name) => Promise.resolve({ id: `F-${name}`, type: "folder", name }),
+      listFolderItems: (_gw, folderId) =>
+        Promise.resolve(folderId === "F-caveat_TEST" ? entriesFor(tuple) : []),
+      recheck: () =>
+        Promise.resolve({
+          ok: true,
+          tuple: confirmed,
+          changes: [{ fileName: confirmed[0]?.fileName ?? "", kind: "added" }],
+        }),
+      startRun: (args) => {
+        started.push({ args, runId: "run-w1", onFinish: args.onFinish });
+        return "run-w1";
+      },
+    };
+    await watchTick(deps, state);
+    expect(state.results.twinvee).toBe("no_change");
+    expect(started).toHaveLength(1);
+    expect(started[0]?.args.contract).toBe("aviat");
+    const events = db
+      .prepare("SELECT result, detail_json FROM watch_events ORDER BY at")
+      .all() as { result: string; detail_json: string | null }[];
+    expect(events.map((e) => e.result)).toEqual(["changed", "run_started"]);
+    expect((JSON.parse(events[0]?.detail_json ?? "{}") as { contract: string }).contract).toBe("aviat");
   });
 });

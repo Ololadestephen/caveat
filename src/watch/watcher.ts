@@ -27,7 +27,8 @@ export type WatcherResult =
 // In-memory poll state only — no-change ticks must not write rows.
 export type WatcherState = {
   lastCheckedAt: string | null;
-  lastResult: WatcherResult | null;
+  // Last tick outcome per contract id.
+  results: Record<string, WatcherResult>;
 };
 
 export type PreviousRun = {
@@ -36,13 +37,19 @@ export type PreviousRun = {
   sourceTuple: SourceTuple;
 };
 
+// One contract profile's folder, ticked in order. A change in any folder
+// starts that contract's run; the remaining folders wait for the next tick
+// because only one run may be in flight.
+export type WatcherContract = { id: string; boxFolder: string };
+
 export type WatcherDeps = {
   db: DatabaseSync;
-  boxFolder: string;
+  contracts: WatcherContract[];
   intervalMs: number;
   // Creates the run row and starts the pipeline. Returns the new run id.
   startRun: (args: {
     trigger: "watcher";
+    contract: string;
     previous?: PreviousRun;
     carrySources?: { runId: string; receipt: RunReceipt }[];
     // The confirmed tuple the watcher already fetched — stored on the run row
@@ -133,6 +140,7 @@ function listingMatchesTuple(
 async function confirmChange(
   deps: WatcherDeps,
   state: WatcherState,
+  contract: WatcherContract,
   fns: {
     findFolder: NonNullable<WatcherDeps["findFolder"]>;
     listItems: NonNullable<WatcherDeps["listFolderItems"]>;
@@ -141,10 +149,13 @@ async function confirmChange(
   },
 ): Promise<{ confirmed: SourceTuple; outcome: Extract<RecheckOutcome, { ok: true }> } | undefined> {
   const { findFolder, listItems, recheck, box } = fns;
-  const folder = await findFolder(box.gatewayBaseUrl, "0", deps.boxFolder);
+  const folder = await findFolder(box.gatewayBaseUrl, "0", contract.boxFolder);
   if (folder === undefined) {
-    state.lastResult = "box_unavailable";
-    recordEvent(deps, "unavailable", { detail: `folder ${deps.boxFolder} not found` });
+    state.results[contract.id] = "box_unavailable";
+    recordEvent(deps, "unavailable", {
+      contract: contract.id,
+      detail: `folder ${contract.boxFolder} not found`,
+    });
     return undefined;
   }
   const listing = await listItems(box.gatewayBaseUrl, folder.id, {
@@ -153,13 +164,13 @@ async function confirmChange(
 
   // A run that failed before reading Box stores an empty tuple; it must not
   // become the baseline, or every listing would match it vacuously.
-  const latestRun = listRuns(deps.db).find(
+  const latestRun = listRuns(deps.db, contract.id).find(
     (r) => (parseTuple(r.source_tuple_json)?.length ?? 0) > 0,
   );
   const latestTuple =
     latestRun === undefined ? undefined : parseTuple(latestRun.source_tuple_json);
   if (latestTuple !== undefined && listingMatchesTuple(listing, latestTuple)) {
-    state.lastResult = "no_change";
+    state.results[contract.id] = "no_change";
     return undefined;
   }
 
@@ -167,13 +178,13 @@ async function confirmChange(
   const outcome = await recheck(
     box.gatewayBaseUrl,
     "0",
-    deps.boxFolder,
+    contract.boxFolder,
     latestTuple ?? [],
     { timeoutMs: deps.recheckTimeoutMs ?? 30_000 },
   );
   if (!outcome.ok) {
-    state.lastResult = "box_unavailable";
-    recordEvent(deps, "unavailable", { detail: outcome.detail });
+    state.results[contract.id] = "box_unavailable";
+    recordEvent(deps, "unavailable", { contract: contract.id, detail: outcome.detail });
     return undefined;
   }
   const confirmed = outcome.tuple;
@@ -185,7 +196,7 @@ async function confirmChange(
     latestRun !== undefined &&
     diffSourceTuple(latestTuple, confirmed).length === 0
   ) {
-    state.lastResult = "no_change";
+    state.results[contract.id] = "no_change";
     return undefined;
   }
   return { confirmed, outcome };
@@ -196,10 +207,11 @@ async function confirmChange(
 function startWatcherRun(
   deps: WatcherDeps,
   state: WatcherState,
+  contract: WatcherContract,
   confirmed: SourceTuple,
   outcome: Extract<RecheckOutcome, { ok: true }>,
 ): void {
-  for (const run of listRuns(deps.db)) {
+  for (const run of listRuns(deps.db, contract.id)) {
     if (
       run.status !== "approved" &&
       run.status !== "reviewable" &&
@@ -214,16 +226,17 @@ function startWatcherRun(
       markStale(deps.db, run.id, JSON.stringify(changes));
     }
   }
-  recordEvent(deps, "changed", { changes: outcome.changes });
-  state.lastResult = "change_found";
+  recordEvent(deps, "changed", { contract: contract.id, changes: outcome.changes });
+  state.results[contract.id] = "change_found";
 
   // Baseline for incremental work: the most recent run whose stored receipt
   // passed every gate and carries digests; see selectBaseline.
-  const previous = selectBaseline(deps.db);
-  const carrySources = selectCarrySources(deps.db);
+  const previous = selectBaseline(deps.db, contract.id);
+  const carrySources = selectCarrySources(deps.db, contract.id);
 
   const runId = deps.startRun({
     trigger: "watcher",
+    contract: contract.id,
     sourceTuple: confirmed,
     ...(previous !== undefined ? { previous } : {}),
     carrySources,
@@ -233,6 +246,7 @@ function startWatcherRun(
           deps,
           "run_failed",
           {
+            contract: contract.id,
             detail: "the watcher-started run failed; start a run manually to retry",
           },
           runId,
@@ -240,7 +254,7 @@ function startWatcherRun(
       }
     },
   });
-  recordEvent(deps, "run_started", { changes: outcome.changes }, runId);
+  recordEvent(deps, "run_started", { contract: contract.id, changes: outcome.changes }, runId);
 }
 
 // One watcher tick. Exported for tests; startWatcher schedules it.
@@ -267,7 +281,7 @@ export async function watchTick(deps: WatcherDeps, state: WatcherState): Promise
 
   // A run in flight already holds the folder state in flux; do nothing.
   if (hasRunningRun(deps.db)) {
-    state.lastResult = "skipped_busy";
+    for (const contract of deps.contracts) state.results[contract.id] = "skipped_busy";
     return;
   }
 
@@ -275,23 +289,27 @@ export async function watchTick(deps: WatcherDeps, state: WatcherState): Promise
     const conns = await connections();
     const box = conns.find((c) => c.provider === "box");
     if (box === undefined) {
-      state.lastResult = "box_unavailable";
+      for (const contract of deps.contracts) state.results[contract.id] = "box_unavailable";
       recordEvent(deps, "unavailable", { detail: "box connector not configured" });
       return;
     }
 
-    const change = await confirmChange(deps, state, {
-      findFolder,
-      listItems,
-      recheck,
-      box,
-    });
-    if (change === undefined) return;
-    const { confirmed, outcome } = change;
-
-    startWatcherRun(deps, state, confirmed, outcome);
+    for (const contract of deps.contracts) {
+      // A run started for an earlier folder is already in flight; the rest of
+      // the folders are checked again on the next tick.
+      if (hasRunningRun(deps.db)) return;
+      const change = await confirmChange(deps, state, contract, {
+        findFolder,
+        listItems,
+        recheck,
+        box,
+      });
+      if (change === undefined) continue;
+      startWatcherRun(deps, state, contract, change.confirmed, change.outcome);
+      return;
+    }
   } catch (error) {
-    state.lastResult = "error";
+    state.results.error = "error";
     recordEvent(deps, "error", {
       detail: error instanceof Error ? error.message : String(error),
     });
@@ -321,7 +339,7 @@ function fireTick(
 // First tick ~5 s after start, then every interval. intervalMs 0 disables the
 // watcher entirely (an inert object is returned so the UI can still read it).
 export function startWatcher(deps: WatcherDeps): Watcher {
-  const state: WatcherState = { lastCheckedAt: null, lastResult: null };
+  const state: WatcherState = { lastCheckedAt: null, results: {} };
   if (deps.intervalMs <= 0) {
     return { state, stop: () => {} };
   }

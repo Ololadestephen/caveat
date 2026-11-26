@@ -1,0 +1,15 @@
+{
+  "note": "Demo assumptions for the Aviat agreement, not facts about the parties",
+  "startDate": "2024-05-29",
+  "openingCents": 600000,
+  "floorCents": 200000,
+  "costs": [
+    { "id": "cost-2024-06", "date": "2024-06-15", "amountCents": 400000 },
+    { "id": "cost-2024-07", "date": "2024-07-15", "amountCents": 400000 },
+    { "id": "cost-2024-08", "date": "2024-08-15", "amountCents": 400000 },
+    { "id": "cost-2024-09", "date": "2024-09-15", "amountCents": 400000 },
+    { "id": "cost-2024-10", "date": "2024-10-15", "amountCents": 400000 },
+    { "id": "cost-2024-11", "date": "2024-11-15", "amountCents": 400000 },
+    { "id": "cost-2024-12", "date": "2024-12-15", "amountCents": 400000 }
+  ]
+}

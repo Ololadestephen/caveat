@@ -20,7 +20,7 @@ import {
   supersedeOthers,
 } from "./db.ts";
 
-function seedRun(db: ReturnType<typeof openDb>, id: string): void {
+function seedRun(db: ReturnType<typeof openDb>, id: string, contract = "twinvee"): void {
   createRun(db, {
     id,
     createdAt: "2026-11-24T12:00:00Z",
@@ -29,6 +29,7 @@ function seedRun(db: ReturnType<typeof openDb>, id: string): void {
     receiptHash: "rhash",
     draftText: "draft",
     draftHash: "dhash",
+    contract,
   });
 }
 
@@ -47,14 +48,30 @@ describe("run lifecycle", () => {
     const db = openDb(":memory:");
     seedRun(db, "run-old");
     seedRun(db, "run-new");
-    supersedeOthers(db, "run-new");
+    supersedeOthers(db, "run-new", "twinvee");
     expect(getRun(db, "run-old")?.superseded_by).toBe("run-new");
     expect(getRun(db, "run-new")?.superseded_by).toBeNull();
     // A still-newer run re-points every earlier run at itself.
     seedRun(db, "run-newest");
-    supersedeOthers(db, "run-newest");
+    supersedeOthers(db, "run-newest", "twinvee");
     expect(getRun(db, "run-old")?.superseded_by).toBe("run-newest");
     expect(getRun(db, "run-new")?.superseded_by).toBe("run-newest");
+  });
+
+  it("scopes supersede and listing to a contract", () => {
+    const db = openDb(":memory:");
+    seedRun(db, "run-t1", "twinvee");
+    seedRun(db, "run-a1", "aviat");
+    supersedeOthers(db, "run-a1", "aviat");
+    // Only the same-contract run is superseded.
+    expect(getRun(db, "run-a1")?.superseded_by).toBeNull();
+    expect(getRun(db, "run-t1")?.superseded_by).toBeNull();
+    seedRun(db, "run-a2", "aviat");
+    supersedeOthers(db, "run-a2", "aviat");
+    expect(getRun(db, "run-a1")?.superseded_by).toBe("run-a2");
+    expect(getRun(db, "run-t1")?.superseded_by).toBeNull();
+    expect(listRuns(db, "aviat").map((r) => r.id)).toEqual(["run-a2", "run-a1"]);
+    expect(listRuns(db).length).toBe(3);
   });
 
   it("lists runs newest first", () => {

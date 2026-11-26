@@ -30,6 +30,7 @@ export type RunRow = {
   superseded_by: string | null;
   stale_detail_json: string | null;
   trigger: "manual" | "watcher";
+  contract: string;
 };
 
 export type WatchEventRow = {
@@ -59,7 +60,7 @@ export type ExportRow = {
   draft_hash: string;
 };
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const MIGRATIONS: string[] = [
   `
@@ -128,6 +129,12 @@ const MIGRATIONS: string[] = [
     run_id TEXT
   );
   `,
+  // Contract profiles: each run belongs to one contract. Baselines, carry
+  // sources and stale/superseded marking are all scoped per contract; runs
+  // that predate this migration belong to twinvee.
+  `
+  ALTER TABLE runs ADD COLUMN "contract" TEXT NOT NULL DEFAULT 'twinvee';
+  `,
 ];
 
 export function newRunId(now = new Date()): string {
@@ -172,13 +179,14 @@ export function createRun(
     draftText: string;
     draftHash: string;
     trigger?: "manual" | "watcher";
+    contract?: string;
   },
 ): void {
   db.prepare(
     `INSERT INTO runs (id, created_at, status, status_reason, source_tuple_json,
        receipt_json, receipt_hash, draft_text, draft_hash, superseded_by, stale_detail_json,
-       "trigger")
-     VALUES (?, ?, 'running', NULL, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+       "trigger", "contract")
+     VALUES (?, ?, 'running', NULL, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
   ).run(
     run.id,
     run.createdAt,
@@ -188,6 +196,7 @@ export function createRun(
     run.draftText,
     run.draftHash,
     run.trigger ?? "manual",
+    run.contract ?? "twinvee",
   );
 }
 
@@ -230,10 +239,16 @@ export function getRun(db: DatabaseSync, id: string): RunRow | undefined {
   return db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as RunRow | undefined;
 }
 
-export function listRuns(db: DatabaseSync): RunRow[] {
-  return db
-    .prepare("SELECT * FROM runs ORDER BY created_at DESC, id DESC")
-    .all() as unknown as RunRow[];
+export function listRuns(db: DatabaseSync, contract?: string): RunRow[] {
+  return (
+    contract === undefined
+      ? db.prepare("SELECT * FROM runs ORDER BY created_at DESC, id DESC").all()
+      : db
+          .prepare(
+            "SELECT * FROM runs WHERE contract = ? ORDER BY created_at DESC, id DESC",
+          )
+          .all(contract)
+  ) as unknown as RunRow[];
 }
 
 function parseTupleJson(json: string): SourceTuple | undefined {
@@ -266,8 +281,9 @@ function parseReceiptJson(json: string): RunReceipt | undefined {
 // then the newest non-failed run at all.
 export function selectBaseline(
   db: DatabaseSync,
+  contract: string,
 ): { runId: string; receipt: RunReceipt; sourceTuple: SourceTuple } | undefined {
-  const candidates = listRuns(db).filter(
+  const candidates = listRuns(db, contract).filter(
     (r) => r.status !== "failed" && r.status !== "running",
   );
   const pick = (
@@ -307,10 +323,11 @@ export function selectBaseline(
 // receipts are never sources: a blocked answer is always re-asked.
 export function selectCarrySources(
   db: DatabaseSync,
+  contract: string,
   cap = 20,
 ): { runId: string; receipt: RunReceipt }[] {
   const sources: { runId: string; receipt: RunReceipt }[] = [];
-  for (const row of listRuns(db)) {
+  for (const row of listRuns(db, contract)) {
     if (row.status === "failed" || row.status === "running") continue;
     const receipt = parseReceiptJson(row.receipt_json);
     if (
@@ -366,10 +383,14 @@ export function finishRun(
   );
 }
 
-// Every earlier run is superseded once a newer run exists — the reviewer must
-// always look at the latest evidence.
-export function supersedeOthers(db: DatabaseSync, newRunId: string): void {
-  db.prepare("UPDATE runs SET superseded_by = ? WHERE id != ?").run(newRunId, newRunId);
+// Every earlier run of the same contract is superseded once a newer run
+// exists — the reviewer must always look at the latest evidence.
+export function supersedeOthers(db: DatabaseSync, newRunId: string, contract: string): void {
+  db.prepare("UPDATE runs SET superseded_by = ? WHERE id != ? AND contract = ?").run(
+    newRunId,
+    newRunId,
+    contract,
+  );
 }
 
 export function getApproval(db: DatabaseSync, runId: string): ApprovalRow | undefined {
