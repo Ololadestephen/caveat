@@ -59,7 +59,7 @@ type FetchedFile = {
 
 type OptionalFetched = FetchedFile & { fileId: string; versionId: string };
 
-const DEFAULT_WORKERS = "caveat-wa,caveat-wb";
+const DEFAULT_WORKERS = "caveat-wa=caveat-worker-a,caveat-wb=caveat-worker-b";
 
 function readEnv(name: string): string | undefined {
   const value = process.env[name];
