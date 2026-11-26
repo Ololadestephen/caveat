@@ -299,21 +299,29 @@ export function buildTermCrosscheckRequests(
   terms: ValidatedTerm[],
   model: string,
 ): { model: string; state: unknown; questions: Record<string, unknown> }[] | undefined {
-  const byQuote = new Map<string, ValidatedTerm[]>();
+  // A split-citation term's date text is verified against both quotes, so the
+  // group key (and the request state) is the quote pair, not quote alone.
+  const byQuotes = new Map<string, ValidatedTerm[]>();
   for (const t of terms) {
-    const group = byQuote.get(t.quote);
-    if (group === undefined) byQuote.set(t.quote, [t]);
+    const key = JSON.stringify([t.quote, t.dateQuote]);
+    const group = byQuotes.get(key);
+    if (group === undefined) byQuotes.set(key, [t]);
     else group.push(t);
   }
   const requests: { model: string; state: unknown; questions: Record<string, unknown> }[] = [];
-  for (const [quote, group] of byQuote) {
+  for (const group of byQuotes.values()) {
+    const first = group[0]!;
+    const state =
+      first.dateQuote === null
+        ? { quote: first.quote }
+        : { quote: first.quote, date_quote: first.dateQuote };
     const questions: Record<string, unknown> = {};
     for (const t of group) {
       const instructions = termCrosscheckInstructions(t);
       if (instructions === undefined) return undefined;
       questions[`term_${t.id}`] = { type: "noul", instructions };
     }
-    requests.push({ model, state: { quote }, questions });
+    requests.push({ model, state, questions });
   }
   return requests;
 }

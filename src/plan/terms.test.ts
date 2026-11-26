@@ -32,6 +32,8 @@ function term(overrides: Partial<ValidatedTerm> & { id: string; kind: ValidatedT
     netDays: null,
     excerptId: "02-exhibit-a.pdf#§3",
     quote: "q",
+    dateExcerptId: null,
+    dateQuote: null,
     ...overrides,
   };
 }

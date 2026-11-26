@@ -35,6 +35,8 @@ function term(id: string, quote: string, excerptId: string): ValidatedTerm {
     netDays: 30,
     excerptId,
     quote,
+    dateExcerptId: null,
+    dateQuote: null,
   };
 }
 
@@ -59,6 +61,19 @@ function entry(overrides: Record<string, unknown> = {}): Record<string, unknown>
   };
 }
 
+const T3: ValidatedTerm = {
+  ...term("term-3", "$5,000.00 per month", "02-exhibit-a.pdf#§3.1"),
+  kind: "fixed_date_payment",
+  amountText: "$5,000.00",
+  amountCents: 500000,
+  netDaysText: null,
+  netDays: null,
+  dateText: "the last day of the invoiced month",
+  date: { kind: "month_end" },
+  dateExcerptId: "02-exhibit-a.pdf#§3.2",
+  dateQuote: "the Fees on the last day of the invoiced month",
+};
+
 describe("validateTermsReview", () => {
   it("confirms every extracted term with a matching entry", () => {
     const out = validateTermsReview(
@@ -71,6 +86,41 @@ describe("validateTermsReview", () => {
     expect(out.decisions.map((d) => d.termId)).toEqual(["term-1", "term-2"]);
     expect(out.decisions[0]?.reviewer).toBe("owner");
     expect(out.extras).toEqual([]);
+  });
+
+  it("a split-citation term confirms only when the entry's date fields match", () => {
+    const entryFields = {
+      kind: "fixed_date_payment",
+      excerptId: "02-exhibit-a.pdf#§3.1",
+      quote: "$5,000.00 per month",
+    };
+    const ok = validateTermsReview(
+      {
+        terms: [
+          entry({
+            ...entryFields,
+            dateExcerptId: "02-exhibit-a.pdf#§3.2",
+            dateQuote: "the Fees on the last day of the invoiced month",
+          }),
+        ],
+      },
+      [T3],
+      sections,
+    );
+    expect(ok.status).toBe("confirmed");
+
+    for (const bad of [
+      { dateExcerptId: "02-exhibit-a.pdf#§3.9", dateQuote: "the Fees on the last day of the invoiced month" },
+      { dateExcerptId: "02-exhibit-a.pdf#§3.2", dateQuote: "different words" },
+      {},
+    ]) {
+      const out = validateTermsReview(
+        { terms: [entry({ ...entryFields, ...bad })] },
+        [T3],
+        sections,
+      );
+      expect(out).toMatchObject({ status: "needs_review", reason: "terms_unconfirmed" });
+    }
   });
 
   it("a missing entry blocks with terms_unconfirmed naming the term", () => {

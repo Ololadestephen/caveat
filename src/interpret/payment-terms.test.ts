@@ -41,6 +41,8 @@ function aviatParsed(): Record<string, unknown> {
         net_days_text: "net thirty (30) calendar days",
         excerpt_id: "01.pdf#§2(a)",
         quote: "net thirty (30) calendar days after receipt",
+        date_excerpt_id: null,
+        date_quote: null,
       },
       {
         kind: "fixed_date_payment",
@@ -50,6 +52,8 @@ function aviatParsed(): Record<string, unknown> {
         net_days_text: null,
         excerpt_id: "02.pdf#§3.1",
         quote: "pay Consultant $5,000.00 per month.",
+        date_excerpt_id: null,
+        date_quote: null,
       },
       {
         kind: "fixed_date_payment",
@@ -59,6 +63,8 @@ function aviatParsed(): Record<string, unknown> {
         net_days_text: null,
         excerpt_id: "02.pdf#§3.2",
         quote: "invoice Company for the Fees on the last day of the invoiced month",
+        date_excerpt_id: null,
+        date_quote: null,
       },
       {
         kind: "payment_terms",
@@ -68,6 +74,8 @@ function aviatParsed(): Record<string, unknown> {
         net_days_text: "net 30 days",
         excerpt_id: "02.pdf#§3.3",
         quote: "net 30 days after the date",
+        date_excerpt_id: null,
+        date_quote: null,
       },
     ],
     term_start: { text: "May 29, 2024", excerpt_id: "01.pdf#§9", quote: "commence on May 29, 2024" },
@@ -129,6 +137,82 @@ describe("validatePaymentTermsExtraction", () => {
     expect(invoice?.amountCents).toBeNull();
     expect(out.terms.termStart?.iso).toBe("2024-05-29");
     expect(out.terms.termEnd?.iso).toBe("2024-09-29");
+  });
+
+  it("accepts a split citation: the amount in one excerpt, its date rule in another", () => {
+    const parsed = aviatParsed();
+    const terms = parsed.terms as Record<string, unknown>[];
+    // The §3.1 fee and the §3.2 invoice-day rule fold into one term.
+    terms.splice(1, 2, {
+      kind: "fixed_date_payment",
+      amount_text: "$5,000.00",
+      date_text: "the last day of the invoiced month",
+      recurrence_text: "per month",
+      net_days_text: null,
+      excerpt_id: "02.pdf#§3.1",
+      quote: "pay Consultant $5,000.00 per month.",
+      date_excerpt_id: "02.pdf#§3.2",
+      date_quote: "the Fees on the last day of the invoiced month",
+    });
+    const out = validatePaymentTermsExtraction(parsed, excerpts(), 0.8);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const fee = out.terms.terms.find((t) => t.kind === "fixed_date_payment");
+    expect(fee?.dateExcerptId).toBe("02.pdf#§3.2");
+    expect(fee?.dateQuote).toBe("the Fees on the last day of the invoiced month");
+    expect(fee?.date).toEqual({ kind: "month_end" });
+    expect(fee?.recurrence).toBe("monthly");
+  });
+
+  it("rejects a date_text that is not verbatim within its date_quote", () => {
+    const parsed = aviatParsed();
+    const terms = parsed.terms as Record<string, unknown>[];
+    terms.splice(1, 2, {
+      kind: "fixed_date_payment",
+      amount_text: "$5,000.00",
+      date_text: "monthly",
+      recurrence_text: "per month",
+      net_days_text: null,
+      excerpt_id: "02.pdf#§3.1",
+      quote: "pay Consultant $5,000.00 per month.",
+      date_excerpt_id: "02.pdf#§3.2",
+      date_quote: "the Fees on the last day of the invoiced month",
+    });
+    const out = validatePaymentTermsExtraction(parsed, excerpts(), 0.8);
+    expect(out).toMatchObject({ ok: false, reason: "quote_not_verbatim" });
+  });
+
+  it("rejects a date_quote that is not verbatim in its excerpt", () => {
+    const parsed = aviatParsed();
+    const terms = parsed.terms as Record<string, unknown>[];
+    terms.splice(1, 2, {
+      kind: "fixed_date_payment",
+      amount_text: "$5,000.00",
+      date_text: "the last day of the invoiced month",
+      recurrence_text: "per month",
+      net_days_text: null,
+      excerpt_id: "02.pdf#§3.1",
+      quote: "pay Consultant $5,000.00 per month.",
+      date_excerpt_id: "02.pdf#§3.2",
+      date_quote: "not in the excerpt at all",
+    });
+    const out = validatePaymentTermsExtraction(parsed, excerpts(), 0.8);
+    expect(out).toMatchObject({ ok: false, reason: "quote_not_verbatim" });
+  });
+
+  it("rejects date_* fields on payment_terms and unpaired split fields", () => {
+    const parsed = aviatParsed();
+    const terms = parsed.terms as Record<string, unknown>[];
+    terms[0]!.date_excerpt_id = "02.pdf#§3.3";
+    terms[0]!.date_quote = "net 30 days after";
+    const out = validatePaymentTermsExtraction(parsed, excerpts(), 0.8);
+    expect(out).toMatchObject({ ok: false, reason: "schema_mismatch" });
+
+    const parsed2 = aviatParsed();
+    const terms2 = parsed2.terms as Record<string, unknown>[];
+    terms2[1]!.date_quote = "pay Consultant $5,000.00 per month.";
+    const out2 = validatePaymentTermsExtraction(parsed2, excerpts(), 0.8);
+    expect(out2).toMatchObject({ ok: false, reason: "schema_mismatch" });
   });
 
   it("orders terms by document position, not array order", () => {

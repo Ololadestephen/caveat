@@ -33,6 +33,8 @@ const TERM_FIELDS = [
   "net_days_text",
   "excerpt_id",
   "quote",
+  "date_excerpt_id",
+  "date_quote",
 ];
 
 export const PAYMENT_TERMS_JSON_SCHEMA = {
@@ -56,6 +58,8 @@ export const PAYMENT_TERMS_JSON_SCHEMA = {
           net_days_text: { type: ["string", "null"] },
           excerpt_id: { type: "string" },
           quote: { type: "string" },
+          date_excerpt_id: { type: ["string", "null"] },
+          date_quote: { type: ["string", "null"] },
         },
       },
     },
@@ -93,7 +97,7 @@ export const PAYMENT_TERMS_JSON_SCHEMA = {
   },
 } as const;
 
-export const PAYMENT_TERMS_USER_PROMPT = `Extract every term in these excerpts that sets when the consultant is paid in cash, exactly as written, as a list of terms. kind is one of: fixed_date_payment (an amount paid or invoiced on a stated date or on a stated day of each month: amount_text, date_text for the date or the day-of-month rule, and recurrence_text such as "per month" when it repeats), deposit (an amount paid at signing or before work starts: amount_text and date_text), payment_terms (how long after an invoice payment is due: net_days_text only), escrow_release (an amount released from escrow on a date: amount_text and date_text). Leave fields a kind does not use as null. Also give term_start and term_end: the dates the agreement's term starts and ends, exactly as written, or null if not stated. Every text value must be copied verbatim from its quote, and every quote verbatim from one supplied excerpt; excerpt_id is that excerpt's id. Do not include equity, stock, expenses or reimbursements. Do not add, total, or convert amounts or dates.`;
+export const PAYMENT_TERMS_USER_PROMPT = `Extract every term in these excerpts that sets when the consultant is paid in cash, exactly as written, as a list of terms. kind is one of: fixed_date_payment (an amount paid or invoiced on a stated date or on a stated day of each month: amount_text, recurrence_text such as "per month" when it repeats, and date_text for the date or the day-of-month rule), deposit (an amount paid at signing or before work starts: amount_text and date_text), payment_terms (how long after an invoice payment is due: net_days_text only), escrow_release (an amount released from escrow on a date: amount_text and date_text). Leave fields a kind does not use as null. quote and excerpt_id: the sentence stating the amount (or, for payment_terms, the days) and its excerpt. When a term's date or day-of-month rule is stated in a different excerpt from its amount, copy that sentence into date_quote and its excerpt id into date_excerpt_id; otherwise set both to null. Also give term_start and term_end: the dates the agreement's term starts and ends, exactly as written, usually in a section about the term of the agreement, or null if not stated. Every text value must be copied verbatim from its quote, and every quote verbatim from one supplied excerpt. Do not include equity, stock, expenses or reimbursements. Do not add, total, or convert amounts or dates.`;
 
 // What a term's date_text can parse to: a concrete calendar date, or a
 // day-of-month rule for a recurring term.
@@ -155,6 +159,10 @@ export type ValidatedTerm = {
   netDays: number | null;
   excerptId: string;
   quote: string;
+  // Set when the term's date text is cited from a different excerpt than its
+  // amount — both null when the one quote carries everything.
+  dateExcerptId: string | null;
+  dateQuote: string | null;
 };
 
 export type ValidatedPaymentTerms = {
@@ -216,7 +224,17 @@ type RawTerm = {
   net_days_text: string | null;
   excerpt_id: string;
   quote: string;
+  date_excerpt_id: string | null;
+  date_quote: string | null;
 };
+
+// Only kinds whose term carries a date may split that date's citation into a
+// second excerpt; payment_terms never does.
+const DATE_CITATION_KINDS: readonly TermKind[] = [
+  "fixed_date_payment",
+  "deposit",
+  "escrow_release",
+];
 
 function checkFieldVerbatim(
   fieldValue: unknown,
@@ -264,6 +282,41 @@ function rawTerms(value: unknown, excerptById: ExcerptIndex): { ok: true; value:
     if (!quoteInText(term.quote, excerpt.text)) {
       return invalid("quote_not_verbatim", `${path}.quote is not verbatim in its cited excerpt`);
     }
+    // The split citation: date_excerpt_id/date_quote come as a pair, only on
+    // kinds that carry a date, and the pair must resolve verbatim — then
+    // date_text is checked against date_quote instead of quote.
+    const hasDateQuote = term.date_excerpt_id !== null || term.date_quote !== null;
+    let dateVerbatimIn = term.quote;
+    if (hasDateQuote) {
+      if (!DATE_CITATION_KINDS.includes(term.kind)) {
+        return invalid("schema_mismatch", `${path}: date_excerpt_id/date_quote must be null for kind ${term.kind}`);
+      }
+      if (term.date_excerpt_id === null || term.date_quote === null) {
+        return invalid("schema_mismatch", `${path}: date_excerpt_id and date_quote must be set together`);
+      }
+      for (const [key, value] of [
+        ["date_excerpt_id", term.date_excerpt_id],
+        ["date_quote", term.date_quote],
+      ] as const) {
+        if (typeof value !== "string" || value.length === 0) {
+          return invalid("schema_mismatch", `${path}.${key} must be a non-empty string or null`);
+        }
+      }
+      const dateExcerpt = excerptById.get(term.date_excerpt_id);
+      if (dateExcerpt === undefined) {
+        return invalid(
+          "unknown_excerpt",
+          `${path}.date_excerpt_id cites excerpt id ${JSON.stringify(term.date_excerpt_id)} which was not supplied`,
+        );
+      }
+      if (!quoteInText(term.date_quote, dateExcerpt.text)) {
+        return invalid("quote_not_verbatim", `${path}.date_quote is not verbatim in its cited excerpt`);
+      }
+      if (term.date_text === null) {
+        return invalid("schema_mismatch", `${path}.date_text is required when date_quote is set`);
+      }
+      dateVerbatimIn = term.date_quote;
+    }
     // Field set per kind: required present, unused null, every text verbatim.
     const spec = KIND_FIELDS[term.kind];
     for (const field of ["amount_text", "date_text", "recurrence_text", "net_days_text"]) {
@@ -278,7 +331,11 @@ function rawTerms(value: unknown, excerptById: ExcerptIndex): { ok: true; value:
       if (spec.required.includes(field) && fieldValue === null) {
         return invalid("schema_mismatch", `${path}.${field} is required for kind ${term.kind}`);
       }
-      const bad = checkFieldVerbatim(fieldValue, `${path}.${field}`, term.quote);
+      const bad = checkFieldVerbatim(
+        fieldValue,
+        `${path}.${field}`,
+        field === "date_text" ? dateVerbatimIn : term.quote,
+      );
       if (bad !== undefined) return bad;
     }
     if (
@@ -417,6 +474,8 @@ function buildTerm(term: RawTerm, id: string): { ok: true; value: ValidatedTerm 
       netDays,
       excerptId: term.excerpt_id,
       quote: term.quote,
+      dateExcerptId: term.date_excerpt_id,
+      dateQuote: term.date_quote,
     },
   };
 }

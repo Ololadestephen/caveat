@@ -605,6 +605,8 @@ describe("JevDecisionProvider cross-checks", () => {
       netDays: null,
       excerptId: "e.pdf#§1",
       quote,
+      dateExcerptId: null,
+      dateQuote: null,
       ...fields,
     });
 
@@ -662,6 +664,25 @@ describe("JevDecisionProvider cross-checks", () => {
       const out = await provider(fetchImpl).crosscheckPaymentTerms(terms);
       expect(out.status).toBe("pass");
       expect(bodies(fetchImpl)).toHaveLength(1);
+    });
+
+    it("a split-citation term adds its date quote to the request state", async () => {
+      const terms = [
+        term("term-1", "fixed_date_payment", {
+          amountText: "$5,000.00",
+          dateText: "the last day of the invoiced month",
+          recurrenceText: "per month",
+          dateExcerptId: "e.pdf#§2",
+          dateQuote: "the Fees on the last day of the invoiced month",
+        }, "fee quote"),
+      ];
+      const fetchImpl = noulFetch({}, 0.9);
+      const out = await provider(fetchImpl).crosscheckPaymentTerms(terms);
+      expect(out.status).toBe("pass");
+      expect(lastBody(fetchImpl).state).toEqual({
+        quote: "fee quote",
+        date_quote: "the Fees on the last day of the invoiced month",
+      });
     });
 
     it("mismatch: a clear no names the term", async () => {

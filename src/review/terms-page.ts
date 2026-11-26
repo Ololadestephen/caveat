@@ -108,7 +108,13 @@ function renderTermsSection(receipt: RunReceipt): string {
             ? "rejected"
             : "unconfirmed"
           : `confirmed by ${escapeHtml(decision.reviewer)}`;
-      return `    <tr><td>${escapeHtml(kindLabel(term))}</td><td>${escapeHtml(term.quote)}</td><td>${escapeHtml(term.excerptId)}</td><td>${parsedValue(term)}</td><td>${jev}</td><td>${reviewer}</td></tr>`;
+      const dateCell =
+        term.dateQuote === null
+          ? ""
+          : `<br><span class="mono">date: ${escapeHtml(term.dateQuote)}</span>`;
+      const dateClause =
+        term.dateExcerptId === null ? "" : `<br>date: ${escapeHtml(term.dateExcerptId)}`;
+      return `    <tr><td>${escapeHtml(kindLabel(term))}</td><td>${escapeHtml(term.quote)}${dateCell}</td><td>${escapeHtml(term.excerptId)}${dateClause}</td><td>${parsedValue(term)}</td><td>${jev}</td><td>${reviewer}</td></tr>`;
     })
     .join("\n");
   const bounds =

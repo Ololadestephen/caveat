@@ -11,6 +11,10 @@ export type TermReviewEntry = {
   kind: TermKind;
   excerptId: string;
   quote: string;
+  // Required when the extracted term splits its date citation into a second
+  // excerpt; ignored for terms that cite a single quote.
+  dateExcerptId?: string;
+  dateQuote?: string;
   decision: "confirm" | "reject";
   reviewer: string;
 };
@@ -106,6 +110,14 @@ export function validateTermsReview(
         return fail("review_citation_invalid", `${path}.${key} must be a non-empty string`);
       }
     }
+    for (const [key, value] of [
+      ["dateExcerptId", item.dateExcerptId],
+      ["dateQuote", item.dateQuote],
+    ] as const) {
+      if (value !== undefined && (typeof value !== "string" || value.length === 0)) {
+        return fail("review_citation_invalid", `${path}.${key} must be a non-empty string`);
+      }
+    }
     if (decision !== "confirm" && decision !== "reject") {
       return fail(
         "review_citation_invalid",
@@ -129,6 +141,8 @@ export function validateTermsReview(
       kind: kind as TermKind,
       excerptId: excerptId as string,
       quote: quote as string,
+      ...(item.dateExcerptId !== undefined ? { dateExcerptId: item.dateExcerptId as string } : {}),
+      ...(item.dateQuote !== undefined ? { dateQuote: item.dateQuote as string } : {}),
       decision,
       reviewer: reviewer as string,
     });
@@ -144,7 +158,9 @@ export function validateTermsReview(
         !matched.has(i) &&
         e.kind === term.kind &&
         e.excerptId === term.excerptId &&
-        e.quote === term.quote,
+        e.quote === term.quote &&
+        (term.dateExcerptId === null ||
+          (e.dateExcerptId === term.dateExcerptId && e.dateQuote === term.dateQuote)),
     );
     if (idx === -1) {
       missing.push(term.id);

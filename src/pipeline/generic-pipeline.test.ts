@@ -46,24 +46,21 @@ const TERMS_JSON = {
       net_days_text: "net thirty (30) calendar days",
       excerpt_id: "01-agreement.pdf#§2",
       quote: "net thirty (30) calendar days after receipt",
+      date_excerpt_id: null,
+      date_quote: null,
     },
     {
+      // The fee's amount and invoice-day rule sit in different excerpts: the
+      // term cites §3.1 for the amount and §3.2 for the date.
       kind: "fixed_date_payment",
       amount_text: "$5,000.00",
-      date_text: "per month",
-      recurrence_text: null,
+      date_text: "the last day of the invoiced month",
+      recurrence_text: "per month",
       net_days_text: null,
       excerpt_id: "02-exhibit-a.pdf#§3.1",
       quote: "pay Consultant $5,000.00 per month",
-    },
-    {
-      kind: "fixed_date_payment",
-      amount_text: "the Fees",
-      date_text: "the last day of the invoiced month",
-      recurrence_text: null,
-      net_days_text: null,
-      excerpt_id: "02-exhibit-a.pdf#§3.2",
-      quote: "the Fees on the last day of the invoiced month",
+      date_excerpt_id: "02-exhibit-a.pdf#§3.2",
+      date_quote: "the Fees on the last day of the invoiced month",
     },
     {
       kind: "payment_terms",
@@ -73,6 +70,8 @@ const TERMS_JSON = {
       net_days_text: "net 30 days",
       excerpt_id: "02-exhibit-a.pdf#§3.3",
       quote: "net 30 days after",
+      date_excerpt_id: null,
+      date_quote: null,
     },
   ],
   term_start: {
@@ -93,6 +92,8 @@ const REVIEW_JSON = {
     kind: t.kind,
     excerptId: t.excerpt_id,
     quote: t.quote,
+    ...(t.date_excerpt_id !== null ? { dateExcerptId: t.date_excerpt_id } : {}),
+    ...(t.date_quote !== null ? { dateQuote: t.date_quote } : {}),
     decision: "confirm",
     reviewer: "owner",
   })),
@@ -210,7 +211,7 @@ describe("runGenericPipeline", () => {
     expect(receipt.questionIds).toEqual(["payment_terms"]);
     expect(receipt.paymentTerms?.outcome.status).toBe("extracted");
     expect(receipt.paymentTerms?.crosscheck?.map((c) => c.noul)).toEqual([
-      0.95, 0.95, 0.95, 0.95,
+      0.95, 0.95, 0.95,
     ]);
     expect(receipt.paymentTerms?.confirmation?.status).toBe("confirmed");
     expect(receipt.typedCallDigests?.payment_terms).toMatch(/^[0-9a-f]{64}$/);
@@ -238,7 +239,7 @@ describe("runGenericPipeline", () => {
     expect(receipt.readings).toEqual([]);
     // Extraction and cross-check still ran and are recorded.
     expect(receipt.paymentTerms?.outcome.status).toBe("extracted");
-    expect(receipt.paymentTerms?.crosscheck).toHaveLength(4);
+    expect(receipt.paymentTerms?.crosscheck).toHaveLength(3);
   });
 
   it("blocks with jev_crosscheck_mismatch when Jev rejects a term", async () => {
