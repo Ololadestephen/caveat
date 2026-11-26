@@ -576,6 +576,31 @@ ${reviewRows}
 ${reviewHtml}`;
 }
 
+const SCENARIO_PHRASES: Record<string, string> = {
+  no_extensions: "with no extensions granted",
+  all_extensions: "with all extensions granted",
+};
+
+// "Retainer superseded reading, with or without extensions" — plain words for
+// the failing reading/scenario pairs.
+function plainCases(
+  receipt: RunReceipt,
+  cases: { readingId: string; scenarioId: string }[],
+): string {
+  const byReading = new Map<string, string[]>();
+  for (const c of cases) byReading.set(c.readingId, [...(byReading.get(c.readingId) ?? []), c.scenarioId]);
+  return [...byReading.entries()]
+    .map(([readingId, scenarioIds]) => {
+      const label = receipt.readings.find((r) => r.id === readingId)?.label ?? readingId;
+      const scenarios =
+        scenarioIds.includes("no_extensions") && scenarioIds.includes("all_extensions")
+          ? "with or without extensions"
+          : scenarioIds.map((id) => SCENARIO_PHRASES[id] ?? id).join(", ");
+      return `${label} reading, ${scenarios}`;
+    })
+    .join("; ");
+}
+
 // The client's reply letter: what it proposed, how that tested on every
 // worker, and the follow-up search when it failed.
 function renderClientReply(receipt: RunReceipt): string {
@@ -606,17 +631,31 @@ function renderClientReply(receipt: RunReceipt): string {
   </table>
 ${testedCaption}`;
 
-  const failingLowest = Object.entries(counter?.perScenario ?? {})
-    .flatMap(([readingId, scenarios]) =>
-      Object.entries(scenarios)
-        .filter(([, r]) => !r.passes)
-        .map(([scenarioId, r]) => ({ where: `${readingId}/${scenarioId}`, lowest: r.lowest })),
-    )
-    .reduce(
-      (acc, r) =>
-        acc === null || r.lowest.balanceCents < acc.lowest.balanceCents ? r : acc,
-      null as { where: string; lowest: { date: string; balanceCents: number } } | null,
-    );
+  // The single lowest failing balance, plus every failing scenario that hits
+  // it, so the verdict names the case in plain words.
+  const failing = Object.entries(counter?.perScenario ?? {}).flatMap(([readingId, scenarios]) =>
+    Object.entries(scenarios)
+      .filter(([, r]) => !r.passes)
+      .map(([scenarioId, r]) => ({ readingId, scenarioId, lowest: r.lowest })),
+  );
+  const lowestFailing = failing.reduce<(typeof failing)[number] | null>(
+    (acc, r) => (acc === null || r.lowest.balanceCents < acc.lowest.balanceCents ? r : acc),
+    null,
+  );
+  const failingLowest =
+    lowestFailing === null
+      ? null
+      : {
+          lowest: lowestFailing.lowest,
+          where: plainCases(
+            receipt,
+            failing.filter(
+              (f) =>
+                f.lowest.balanceCents === lowestFailing.lowest.balanceCents &&
+                f.lowest.date === lowestFailing.lowest.date,
+            ),
+          ),
+        };
 
   let verdict: string;
   if (reply.status === "safe") {
@@ -627,7 +666,7 @@ ${testedCaption}`;
     const notSafe =
       failingLowest === null
         ? "<strong>Not safe:</strong> the client's counter fails at least one scenario check."
-        : `<strong>Not safe:</strong> the client's counter leaves a lowest balance of ${formatCents(failingLowest.lowest.balanceCents)} on ${escapeHtml(formatDate(failingLowest.lowest.date))} in ${escapeHtml(failingLowest.where)}.`;
+        : `<strong>Not safe:</strong> the client's counter leaves a lowest balance of ${formatMoneyShort(failingLowest.lowest.balanceCents)} on ${escapeHtml(formatDateShort(failingLowest.lowest.date))}, ${formatMoneyShort(receipt.assumptions.floorCents - failingLowest.lowest.balanceCents)} under the floor (${escapeHtml(failingLowest.where)}).`;
     verdict = `  <div class="banner banner--warn">${notSafe}</div>`;
   }
 

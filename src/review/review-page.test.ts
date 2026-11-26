@@ -817,7 +817,10 @@ describe("renderReviewPage — client reply", () => {
     );
     expect(html).toContain("Not safe:");
     expect(html).toContain("$8,000");
-    expect(html).toContain("retainer_superseded/no_extensions");
+    expect(html).toContain(
+      "the client's counter leaves a lowest balance of $8,000 on Dec 15, 2026, $2,000 under the floor (Retainer superseded reading, with or without extensions).",
+    );
+    expect(html).not.toContain("retainer_superseded/");
     expect(html).toContain("Our counterproposal search");
     expect(html).toContain("Counterproposal: pay $6,000");
     expect(html).toContain("reply-r1c1");
