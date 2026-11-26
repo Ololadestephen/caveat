@@ -14,6 +14,12 @@ import type { ContractSection } from "../evidence/sections.ts";
 import { versionTag, sha12 } from "../evidence/recheck.ts";
 import type { SourceTuple } from "../evidence/recheck.ts";
 import { DECISION_SYSTEM_PROMPT } from "../interpret/prompt.ts";
+import {
+  buildGateRequest,
+  buildReleaseTimingRequest,
+  JEV_MODEL,
+  JevDecisionProvider,
+} from "../interpret/jev.ts";
 import { OpenRouterDecisionProvider } from "../interpret/openrouter.ts";
 import { decisionSchema } from "../interpret/schema.ts";
 import {
@@ -22,7 +28,8 @@ import {
 } from "../interpret/schedule.ts";
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import { RELEASE_TIMING } from "../interpret/types.ts";
-import type { DecisionOutcome, Excerpt, Question } from "../interpret/types.ts";
+import type { DecisionOutcome, Excerpt, JevGate, Question } from "../interpret/types.ts";
+import type { DecisionProvider } from "../interpret/provider.ts";
 import { parseCashFile } from "../plan/cash-file.ts";
 import {
   buildTwinveeInputs,
@@ -184,6 +191,7 @@ class StageTimer {
 type Connectors = {
   boxConn: Connection;
   openrouterConn: Connection;
+  typesafeConn?: Connection;
   all: Connection[];
 };
 
@@ -197,11 +205,17 @@ async function connect(config: PipelineConfig, timer: StageTimer): Promise<Conne
     config.connections ?? (await timer.step("gateway_list", listConnections()));
   const boxConn = connections.find((c) => c.provider === "box");
   const openrouterConn = connections.find((c) => c.provider === "openrouter");
+  const typesafeConn = connections.find((c) => c.provider === "typesafe");
   if (boxConn === undefined) throw new PipelineError("box", new Error("box connector not configured"));
   if (openrouterConn === undefined) {
     throw new PipelineError("openrouter", new Error("openrouter connector not configured"));
   }
-  return { boxConn, openrouterConn, all: connections };
+  return {
+    boxConn,
+    openrouterConn,
+    ...(typesafeConn !== undefined ? { typesafeConn } : {}),
+    all: connections,
+  };
 }
 
 // "worker=connector" entries; a bare name uses it as both.
@@ -711,7 +725,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   // --- Connectors -------------------------------------------------------------
   timer.begin();
   const connectors = await connect(config, timer);
-  const { boxConn, openrouterConn } = connectors;
+  const { boxConn, openrouterConn, typesafeConn } = connectors;
   timer.record("gateway_list");
 
   // --- Evidence: fetch all three PDFs -------------------------------------------
@@ -778,14 +792,22 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
   // Digests of exactly what determines each typed call; a matching digest in
   // the previous run's receipt means its outcome can be reused verbatim.
   const excerptDigestInputs = decisionExcerpts.map((e) => ({ id: e.id, text: e.text }));
-  const decisionCallDigest = digestValue({
-    schemaName: `${question.spec.id}_decision`,
-    schema: decisionSchema(question.spec.actions),
-    systemPrompt: DECISION_SYSTEM_PROMPT,
-    model,
-    questionId: question.id,
-    excerpts: excerptDigestInputs,
-  });
+  // The digest covers the exact provider payload, so an OpenRouter answer can
+  // never be carried as a Jev one (and vice versa).
+  const decisionCallDigest =
+    typesafeConn !== undefined
+      ? digestValue({
+          provider: "typesafe",
+          request: buildReleaseTimingRequest(question, JEV_MODEL),
+        })
+      : digestValue({
+          schemaName: `${question.spec.id}_decision`,
+          schema: decisionSchema(question.spec.actions),
+          systemPrompt: DECISION_SYSTEM_PROMPT,
+          model,
+          questionId: question.id,
+          excerpts: excerptDigestInputs,
+        });
   const scheduleCallDigest = digestValue({
     schemaName: "schedule_extraction",
     schema: SCHEDULE_JSON_SCHEMA,
@@ -805,6 +827,13 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
           questionId: "client_counter",
           excerpts: replyExcerpts.map((e) => ({ id: e.id, text: e.text })),
         });
+  const clientGateDigest =
+    typesafeConn === undefined || replyExcerpts.length === 0
+      ? "none"
+      : digestValue({
+          provider: "typesafe",
+          request: buildGateRequest(replyExcerpts, JEV_MODEL),
+        });
   let clientReplySearchDigest = "none";
   const previous = config.previous;
   // The pool of carry sources, newest first; a source lends only the calls
@@ -822,6 +851,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
       | "release_timing"
       | "escrow_schedule"
       | "counteroffer_search"
+      | "client_letter_gate"
       | "client_counter"
       | "client_reply_search",
     digest: string,
@@ -846,10 +876,15 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     decision = { ...prevDecision, carriedFrom: decisionSource.runId };
     carriedForward.push("release_timing");
   } else {
-    const provider = new OpenRouterDecisionProvider({
-      gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
-      model,
-    });
+    const provider: DecisionProvider =
+      typesafeConn !== undefined
+        ? new JevDecisionProvider({
+            gatewayBaseUrl: typesafeConn.gatewayBaseUrl,
+          })
+        : new OpenRouterDecisionProvider({
+            gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
+            model,
+          });
     decision = await provider.decide(question);
     reran.push("release_timing");
   }
@@ -1064,9 +1099,50 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
     let citation: ClientCitation | undefined;
     let workers: string[] | undefined;
     let replyFail: { reason: string; detail: string } | undefined;
-    const counterSource = carrySourceFor("client_counter", clientCounterDigest);
+
+    // Jev letter gate (TypeSafe connection only): the letter must propose
+    // exactly one payment change before any OpenRouter extraction runs. A
+    // failing gate makes no model call beyond the gate itself.
+    let gate: JevGate | undefined;
+    if (typesafeConn !== undefined) {
+      const gateSource = carrySourceFor("client_letter_gate", clientGateDigest);
+      const carriedGate = gateSource?.receipt.clientReply?.gate;
+      if (carriedGate !== undefined) {
+        gate = carriedGate;
+        carriedForward.push("client_letter_gate");
+      } else {
+        const jev = new JevDecisionProvider({
+          gatewayBaseUrl: typesafeConn.gatewayBaseUrl,
+        });
+        const g = await jev.gateLetter(replyExcerpts);
+        reran.push("client_letter_gate");
+        if (g.status === "pass") {
+          gate = g.gate;
+        } else {
+          if (g.status !== "failed") gate = g.gate;
+          replyFail =
+            g.status === "not_single"
+              ? {
+                  reason: "counter_not_single_change",
+                  detail: `Jev decided the letter does not propose exactly one payment change (p = ${g.gate.noul.toFixed(2)})`,
+                }
+              : g.status === "uncertain"
+                ? {
+                    reason: "low_confidence",
+                    detail: `Jev could not decide whether the letter proposes exactly one payment change (p = ${g.gate.noul.toFixed(2)})`,
+                  }
+                : { reason: g.reason, detail: g.detail };
+        }
+      }
+    }
+
+    const counterSource =
+      replyFail === undefined
+        ? carrySourceFor("client_counter", clientCounterDigest)
+        : undefined;
     const prevReply = counterSource?.receipt.clientReply;
     const carryRead =
+      replyFail === undefined &&
       counterSource !== undefined &&
       prevReply?.counter !== undefined &&
       prevReply.citation !== undefined;
@@ -1081,7 +1157,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
       };
       citation = prevReply.citation;
       carriedForward.push("client_counter");
-    } else {
+    } else if (replyFail === undefined) {
       const extractor = new OpenRouterClientCounterExtractor({
         gatewayBaseUrl: openrouterConn.gatewayBaseUrl,
         model,
@@ -1139,6 +1215,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
         ...replyFileMeta,
         reason: replyFail.reason,
         detail: replyFail.detail,
+        ...(gate !== undefined ? { gate } : {}),
         ...(citation !== undefined ? { citation } : {}),
         ...(counterRecord !== undefined ? { counter: counterRecord } : {}),
         ...(workers !== undefined ? { workers } : {}),
@@ -1150,6 +1227,7 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
         citation,
         counter: counterRecord,
         ...(workers !== undefined ? { workers } : {}),
+        ...(gate !== undefined ? { gate } : {}),
       };
       if (counterRecord.passesAll === true) {
         clientReply = { status: "safe", ...counterFields };
@@ -1298,6 +1376,9 @@ export async function runPipeline(config: PipelineConfig): Promise<PipelineResul
       counteroffer_search: searchCallDigest,
       // Only present when a reply letter was processed — runs without one stay
       // byte-identical to runs predating the reply feature.
+      ...(clientGateDigest !== "none"
+        ? { client_letter_gate: clientGateDigest }
+        : {}),
       ...(clientCounterDigest !== "none"
         ? { client_counter: clientCounterDigest }
         : {}),

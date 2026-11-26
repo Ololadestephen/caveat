@@ -608,6 +608,10 @@ function renderClientReply(receipt: RunReceipt): string {
   if (reply === undefined) return "";
 
   const head = `  <p class="caption">Client reply letter <code>${escapeHtml(reply.fileName)}</code> (version ${escapeHtml(reply.versionTag)}).</p>`;
+  const gateHtml =
+    reply.gate === undefined
+      ? ""
+      : `  <p class="caption">Jev: exactly one payment change, p = ${reply.gate.noul.toFixed(2)}</p>`;
   const quoteHtml =
     reply.citation === undefined
       ? ""
@@ -712,6 +716,7 @@ ${renderSearchRounds(response)}`;
   return `<section class="client-reply">
   <h2>Client reply</h2>
 ${head}
+${gateHtml}
 ${quoteHtml}
 ${termHtml}
 ${resultsHtml}

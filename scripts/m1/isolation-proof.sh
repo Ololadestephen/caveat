@@ -68,6 +68,7 @@ GW_OF() {
 }
 BOX_GW="$(GW_OF box)"
 OPENROUTER_GW="$(GW_OF openrouter)"
+TYPESAFE_GW="$(GW_OF typesafe)"
 
 # Worker connectors are custom_api entries named caveat-worker-a/-b (their
 # label lives in provider_account_name / display_name, not `name`).
@@ -110,6 +111,15 @@ for W in "$WORKER_A" "$WORKER_B"; do
   else
     eval "OPENROUTER_CODE_${W#caveat-}=not_configured"
     check "openrouter_gateway_denied_$W" skipped_not_configured
+  fi
+
+  if [ -n "$TYPESAFE_GW" ]; then
+    CODE=$(remote "$W" "curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST '$TYPESAFE_GW/v1/systemone' -H 'Content-Type: application/json' -d '{\"model\":\"jev-latest\",\"state\":\"x\",\"questions\":{\"q\":{\"type\":\"noul\",\"instructions\":\"y?\"}}}'" || echo "000")
+    eval "TYPESAFE_CODE_${W#caveat-}=$CODE"
+    check "typesafe_gateway_denied_$W" "$([ "$CODE" = 403 ] && echo pass || echo fail)"
+  else
+    eval "TYPESAFE_CODE_${W#caveat-}=not_configured"
+    check "typesafe_gateway_denied_$W" skipped_not_configured
   fi
 
   # Both worker connectors must refuse calls from the workers themselves.

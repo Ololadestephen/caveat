@@ -1,6 +1,6 @@
 import type { EvidenceFlag } from "../evidence/flags.ts";
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
-import type { DecisionOutcome, Excerpt, Question } from "../interpret/types.ts";
+import type { DecisionOutcome, Excerpt, JevGate, Question } from "../interpret/types.ts";
 import type { PolicyAdjustment, TwinveeAssumptions } from "../plan/twinvee.ts";
 import type { ScenarioResult } from "../runner/types.ts";
 import type { CounterofferReceipt, SearchCandidateRecord } from "../search/loop.ts";
@@ -43,6 +43,8 @@ export type ClientReplyReceipt = {
   // The client's proposed change as a tested search record (id "client").
   counter?: SearchCandidateRecord;
   workers?: string[];
+  // The Jev letter-gate answer, when a TypeSafe connection ran the gate.
+  gate?: JevGate;
   // The follow-up search, present on countered/no_fix/needs_review(search).
   response?: CounterofferReceipt;
 };
@@ -94,6 +96,7 @@ export type RunReceipt = {
     release_timing: string;
     escrow_schedule: string;
     counteroffer_search: string;
+    client_letter_gate?: string;
     client_counter?: string;
     client_reply_search?: string;
   };

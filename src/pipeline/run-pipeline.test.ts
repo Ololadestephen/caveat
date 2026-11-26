@@ -46,10 +46,34 @@ describe("runPipeline connector checks", () => {
 
 const BOX = "http://box.test";
 const OR = "http://or.test";
+const TS = "http://ts.test";
 const CONNECTIONS = [
   { provider: "box", gatewayBaseUrl: BOX },
   { provider: "openrouter", gatewayBaseUrl: OR },
 ];
+const TYPESAFE_CONNECTIONS = [
+  ...CONNECTIONS,
+  { provider: "typesafe", gatewayBaseUrl: TS },
+];
+
+const JEV_ACTION_KEYS = [
+  "cash_on_fixed_date",
+  "escrow_release",
+  "transaction_triggered",
+  "ambiguous",
+];
+const jevChoice = (choice: string, confidence: number, keys: string[]) => ({
+  type: "choice",
+  choice,
+  confidence,
+  probabilities: Object.fromEntries(
+    keys.map((k) => [k, k === choice ? confidence : (1 - confidence) / (keys.length - 1)]),
+  ),
+});
+const JEV_DECIDED_ANSWERS = {
+  release_timing: jevChoice("escrow_release", 0.95, JEV_ACTION_KEYS),
+  release_timing_source: jevChoice("e1", 0.9, ["e1"]),
+};
 
 const FILE_NAMES = [
   "01-consulting-agreement.pdf",
@@ -201,6 +225,11 @@ function stubFetch(
     replyKind?: "pass" | "fail" | "unreadable";
     counterJson?: unknown;
     proposalJson?: unknown;
+    typesafe?: {
+      decisionAnswers?: Record<string, unknown>;
+      gateNoul?: number;
+      calls?: string[];
+    };
   } = {},
 ): void {
   const impl = (url: unknown, init?: unknown): Promise<Response> => {
@@ -212,6 +241,35 @@ function stubFetch(
             .response_format?.json_schema?.name
         : undefined;
 
+    if (u === `${TS}/v1/systemone`) {
+      const questions =
+        typeof body === "string"
+          ? (JSON.parse(body) as { questions?: Record<string, unknown> }).questions
+          : undefined;
+      const kind =
+        questions !== undefined && "release_timing" in questions
+          ? "release_timing"
+          : questions !== undefined && "single_payment_change" in questions
+            ? "client_letter_gate"
+            : "other";
+      opts.typesafe?.calls?.push(kind);
+      const answers =
+        kind === "client_letter_gate"
+          ? {
+              single_payment_change: {
+                type: "noul",
+                noul: opts.typesafe?.gateNoul ?? 0.95,
+              },
+            }
+          : (opts.typesafe?.decisionAnswers ?? JEV_DECIDED_ANSWERS);
+      return Promise.resolve(
+        jsonResponse({
+          model: "jev-1.14.0",
+          answers,
+          usage: { input_tokens: 9, output_tokens: 2 },
+        }),
+      );
+    }
     if (u === `${OR}/v1/chat/completions`) {
       if (opts.chatCounts !== undefined && schema !== undefined) {
         opts.chatCounts[schema] = (opts.chatCounts[schema] ?? 0) + 1;
@@ -1113,5 +1171,160 @@ describe("client reply", () => {
       "escrow_schedule",
       "counteroffer_search",
     ]);
+  });
+});
+
+describe("Jev provider", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const runOpts = (extra: Record<string, unknown> = {}) => ({
+    ...config,
+    reviewsDir: writeReviewsDir(),
+    connections: TYPESAFE_CONNECTIONS,
+    pdfText: cannedPdfLines,
+    assertExpected: false,
+    ...extra,
+  });
+  const POOL = () => new InProcessPool(["wa-test", "wb-test"]);
+
+  it("decides release_timing via Jev, gates the letter, then extracts with OpenRouter", async () => {
+    const calls: string[] = [];
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ replyKind: "pass", chatCounts, typesafe: { calls } });
+    const r = (await runPipeline(runOpts({ workerPool: POOL() }))).receipt;
+
+    expect(r.status).toBe("reviewable");
+    // The decision came from Jev with both questions' probabilities stored.
+    const outcome = r.releaseTiming?.outcome;
+    expect(outcome?.provider).toBe("typesafe");
+    expect(outcome?.model).toBe("jev-1.14.0");
+    expect(outcome?.jev?.questions.release_timing?.choice).toBe("escrow_release");
+    expect(outcome?.jev?.questions.release_timing_source?.choice).toBe("e1");
+    expect(outcome?.jev?.usage?.input_tokens).toBe(9);
+    if (outcome?.status === "decided") {
+      expect(outcome.decision.action).toBe("escrow_release");
+      expect(outcome.decision.cited_clause.excerpt_id).toBe(
+        "03-second-amendment.pdf#§3",
+      );
+    } else {
+      throw new Error("expected a decided outcome");
+    }
+    // No OpenRouter release_timing call was made at all.
+    expect(chatCounts.release_timing_decision).toBeUndefined();
+    expect(calls).toEqual(["release_timing", "client_letter_gate"]);
+    // The gate passed and was recorded; extraction stayed on OpenRouter.
+    expect(r.clientReply?.status).toBe("safe");
+    expect(r.clientReply?.gate?.noul).toBe(0.95);
+    expect(r.clientReply?.gate?.model).toBe("jev-1.14.0");
+    expect(chatCounts.client_counter).toBe(1);
+    expect(r.typedCallDigests?.client_letter_gate).toBeTruthy();
+  });
+
+  it("a failing gate routes to needs_review with no extraction call", async () => {
+    const calls: string[] = [];
+    const chatCounts: Record<string, number> = {};
+    stubFetch({
+      replyKind: "pass",
+      chatCounts,
+      typesafe: { calls, gateNoul: 0.1 },
+    });
+    const r = (await runPipeline(runOpts({ workerPool: POOL() }))).receipt;
+
+    expect(r.status).toBe("needs_review");
+    const reply = r.clientReply;
+    expect(reply?.status).toBe("needs_review");
+    expect(reply?.reason).toBe("counter_not_single_change");
+    expect(reply?.gate?.noul).toBe(0.1);
+    expect(r.blockedReasons.map((b) => b.reason)).toContain(
+      "counter_not_single_change",
+    );
+    // The gate ran; the OpenRouter extraction never did.
+    expect(calls).toEqual(["release_timing", "client_letter_gate"]);
+    expect(chatCounts.client_counter).toBeUndefined();
+    expect(reply?.counter).toBeUndefined();
+  });
+
+  it("an uncertain gate is low_confidence, also with no extraction", async () => {
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ replyKind: "pass", chatCounts, typesafe: { gateNoul: 0.5 } });
+    const r = (await runPipeline(runOpts({ workerPool: POOL() }))).receipt;
+    expect(r.clientReply?.reason).toBe("low_confidence");
+    expect(r.clientReply?.gate?.noul).toBe(0.5);
+    expect(chatCounts.client_counter).toBeUndefined();
+  });
+
+  it("the gate carries forward by digest like the other typed calls", async () => {
+    const firstCalls: string[] = [];
+    stubFetch({ replyKind: "pass", typesafe: { calls: firstCalls } });
+    const first = await runPipeline(
+      runOpts({ runId: "run-j1", workerPool: POOL(), trigger: "watcher" }),
+    );
+    expect(first.receipt.status).toBe("reviewable");
+
+    // Second run, identical content under new version ids: everything carries.
+    const calls: string[] = [];
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ chatCounts, versionId: "v2", replyKind: "pass", typesafe: { calls } });
+    const second = await runPipeline(
+      runOpts({
+        runId: "run-j2",
+        workerPool: POOL(),
+        trigger: "watcher",
+        previous: {
+          runId: "run-j1",
+          receipt: first.receipt,
+          sourceTuple: first.sourceTuple,
+        },
+        carrySources: [{ runId: "run-j1", receipt: first.receipt }],
+      }),
+    );
+    const r = second.receipt;
+    expect(r.status).toBe("reviewable");
+    expect(r.incremental?.carriedForward).toEqual([
+      "release_timing",
+      "escrow_schedule",
+      "counteroffer_search",
+      "client_letter_gate",
+      "client_counter",
+    ]);
+    // Not a single Jev call — the gate carried too.
+    expect(calls).toEqual([]);
+    expect(r.clientReply?.gate?.noul).toBe(0.95);
+  });
+
+  it("never carries a Jev decision as an OpenRouter one", async () => {
+    stubFetch({ typesafe: { calls: [] } });
+    const first = await runPipeline(
+      runOpts({ runId: "run-j1", workerPool: POOL() }),
+    );
+    expect(first.receipt.releaseTiming?.outcome.provider).toBe("typesafe");
+
+    // Without a TypeSafe connection the release_timing digest differs (the
+    // provider is inside it), so the previous decision cannot be carried.
+    const chatCounts: Record<string, number> = {};
+    stubFetch({ chatCounts });
+    const second = await runPipeline(
+      runOpts({
+        runId: "run-j2",
+        connections: CONNECTIONS,
+        workerPool: POOL(),
+        trigger: "watcher",
+        previous: {
+          runId: "run-j1",
+          receipt: first.receipt,
+          sourceTuple: first.sourceTuple,
+        },
+        carrySources: [{ runId: "run-j1", receipt: first.receipt }],
+      }),
+    );
+    const r = second.receipt;
+    expect(r.status).toBe("reviewable");
+    const outcome = r.releaseTiming?.outcome;
+    expect(outcome?.provider).toBe("openrouter");
+    expect(
+      outcome?.status === "decided" ? outcome.carriedFrom : undefined,
+    ).toBeUndefined();
+    expect(chatCounts.release_timing_decision).toBe(1);
+    expect(r.incremental?.reran).toContain("release_timing");
   });
 });

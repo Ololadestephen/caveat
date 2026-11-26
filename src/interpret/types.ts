@@ -71,7 +71,28 @@ export type NeedsReviewOutcome = {
   model?: string;
   modelVersion?: string;
   servedBy?: string;
+  // Present when a Jev decision was made — every question's raw probabilities.
+  jev?: JevInfo;
 };
+
+// TypeSafe Jev answer shapes, stored on the outcome for the review page.
+export type JevUsage = { input_tokens?: number; output_tokens?: number };
+
+export type JevChoiceResult = {
+  choice: string;
+  confidence: number;
+  probabilities: Record<string, number>;
+};
+
+export type JevInfo = {
+  provider: "typesafe";
+  model: string;
+  usage?: JevUsage;
+  questions: Record<string, JevChoiceResult>;
+};
+
+// The Jev letter gate's recorded answer on clientReply.
+export type JevGate = { noul: number; model: string; usage?: JevUsage };
 
 export type DecisionOutcome =
   | {
@@ -82,6 +103,9 @@ export type DecisionOutcome =
       modelVersion?: string;
       servedBy?: string;
       latencyMs: number;
+      // Present when a Jev decision was made — every question's raw
+      // probabilities, provider, model and usage.
+      jev?: JevInfo;
       // Set when this outcome was reused verbatim from an earlier run.
       carriedFrom?: string;
     }

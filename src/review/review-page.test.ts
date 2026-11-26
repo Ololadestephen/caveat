@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RunReceipt } from "./receipt.ts";
 import type { SearchCandidateRecord } from "../search/loop.ts";
+import type { DecisionOutcome } from "../interpret/types.ts";
 import { renderReviewBody, renderReviewPage } from "./review-page.ts";
 import { fixtureReceipt } from "./fixture-receipt.ts";
 
@@ -839,5 +840,89 @@ describe("renderReviewPage — client reply", () => {
     expect(html).toContain("the letter proposes two different changes");
     expect(html).toContain("04-client-reply.pdf");
     expect(html).not.toContain("Tested on");
+  });
+});
+
+describe("renderReviewPage — Jev", () => {
+  const JEV = {
+    provider: "typesafe" as const,
+    model: "jev-1.14.0",
+    usage: { input_tokens: 9, output_tokens: 2 },
+    questions: {
+      release_timing: {
+        choice: "escrow_release",
+        confidence: 0.95,
+        probabilities: {
+          cash_on_fixed_date: 0.02,
+          escrow_release: 0.95,
+          transaction_triggered: 0.02,
+          ambiguous: 0.01,
+        },
+      },
+      release_timing_source: {
+        choice: "e1",
+        confidence: 0.9,
+        probabilities: { e1: 0.9, e2: 0.1 },
+      },
+    },
+  };
+  const withOutcome = (outcome: DecisionOutcome) => {
+    const receipt = JSON.parse(
+      JSON.stringify(fixtureReceipt("run-page-jev")),
+    ) as RunReceipt;
+    if (receipt.releaseTiming !== null) receipt.releaseTiming.outcome = outcome;
+    return receipt;
+  };
+
+  it("decided: Jev line plus probability tables for both questions", () => {
+    const html = renderReviewPage(
+      withOutcome({
+        ...DECIDED_OUTCOME,
+        provider: "typesafe",
+        model: "jev-1.14.0",
+        jev: JEV,
+      }),
+    );
+    expect(html).toContain(
+      "Decided by Jev (jev-1.14.0) through the TypeSafeAI Connector",
+    );
+    expect(html).toContain("release_timing");
+    expect(html).toContain("release_timing_source");
+    expect(html).toContain("95.0%");
+    expect(html).toContain("escrow_release (chosen)");
+    expect(html).toContain("e1 (chosen)");
+    expect(html).toContain("confidence 0.90");
+  });
+
+  it("needs_review: the probabilities still render", () => {
+    const html = renderReviewPage(
+      withOutcome({
+        status: "needs_review",
+        reason: "low_confidence",
+        detail: "release_timing confidence 0.70 below 0.80",
+        provider: "typesafe",
+        model: "jev-1.14.0",
+        jev: JEV,
+      }),
+    );
+    expect(html).toContain(
+      "Decided by Jev (jev-1.14.0) through the TypeSafeAI Connector",
+    );
+    expect(html).toContain("95.0%");
+  });
+
+  it("client reply: the gate line shows the noul", () => {
+    const receipt = JSON.parse(
+      JSON.stringify(fixtureReceipt("run-page-jev-gate")),
+    ) as RunReceipt;
+    receipt.clientReply = {
+      status: "safe",
+      fileName: "04-client-reply.pdf",
+      versionTag: "abc123def456",
+      sha12: "000aaa111bbb",
+      gate: { noul: 0.97, model: "jev-1.14.0" },
+    };
+    const html = renderReviewPage(receipt);
+    expect(html).toContain("Jev: exactly one payment change, p = 0.97");
   });
 });
