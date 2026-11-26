@@ -1,7 +1,7 @@
 // The review page for the generic payment-terms path: the extracted terms
 // table with its Jev cross-check and reviewer decision, the unresolved
 // partial-month readings, and the shared cash/incremental/results sections.
-import type { PaymentTermsOutcome, ValidatedTerm } from "../interpret/payment-terms.ts";
+import type { PaymentTermsOutcome, ValidatedPaymentTerms, ValidatedTerm } from "../interpret/payment-terms.ts";
 import { TERM_KIND_LABELS } from "../interpret/payment-terms.ts";
 import type { JevCrosscheck } from "../interpret/types.ts";
 import type { RunReceipt } from "./receipt.ts";
@@ -83,8 +83,13 @@ function renderTermsSection(receipt: RunReceipt): string {
   <p>The terms extraction was not run.</p>
 </section>`;
   }
-  const { outcome, crosscheck, confirmation } = paymentTerms;
-  if (outcome.status === "needs_review") {
+  const { outcome, crosscheck, confirmation, termClause } = paymentTerms;
+  let terms: ValidatedPaymentTerms | undefined;
+  if (outcome.status === "extracted") {
+    terms = outcome.terms;
+  } else if (outcome.partialTerms !== undefined) {
+    terms = outcome.partialTerms;
+  } else {
     return `<section class="terms">
   <h2>Extracted payment terms</h2>
   <p class="verdict verdict--blocked">needs_review: ${escapeHtml(outcome.reason)} — ${escapeHtml(outcome.detail)}</p>
@@ -97,7 +102,7 @@ function renderTermsSection(receipt: RunReceipt): string {
     ),
   );
   const rejected = confirmation?.status === "needs_review" && confirmation.reason === "term_rejected";
-  const rows = outcome.terms.terms
+  const rows = terms.terms
     .map((term) => {
       const check: JevCrosscheck | undefined = checks.get(`term_${term.id}`);
       const jev = check === undefined ? "—" : `p = ${check.noul.toFixed(2)}`;
@@ -117,9 +122,21 @@ function renderTermsSection(receipt: RunReceipt): string {
       return `    <tr><td>${escapeHtml(kindLabel(term))}</td><td>${escapeHtml(term.quote)}${dateCell}</td><td>${escapeHtml(term.excerptId)}${dateClause}</td><td>${parsedValue(term)}</td><td>${jev}</td><td>${reviewer}</td></tr>`;
     })
     .join("\n");
+  const blocked =
+    outcome.status === "extracted"
+      ? ""
+      : `  <p class="verdict verdict--blocked">needs_review: ${escapeHtml(outcome.reason)} — ${escapeHtml(outcome.detail)}</p>\n`;
+  const pick =
+    termClause === undefined
+      ? ""
+      : `  <p class="caption">Jev term-clause pick: ${escapeHtml(termClause.choice)} (${escapeHtml(termClause.probabilities[termClause.choice]?.toFixed(2) ?? "—")})${termClause.narrowed ? "; narrowed the bounds extraction to that excerpt" : ""}.</p>\n`;
+  const boundsCite =
+    terms.termStart !== null && terms.termEnd !== null && terms.boundsFrom === "term_bounds"
+      ? ` <br>from term_bounds call: "${escapeHtml(terms.termStart.quote)}" / "${escapeHtml(terms.termEnd.quote)}" (${escapeHtml(terms.termStart.excerptId)} / ${escapeHtml(terms.termEnd.excerptId)})`
+      : "";
   const bounds =
-    outcome.terms.termStart !== null && outcome.terms.termEnd !== null
-      ? `<p class="caption">Term: ${escapeHtml(outcome.terms.termStart.text)} – ${escapeHtml(outcome.terms.termEnd.text)} (${escapeHtml(outcome.terms.termStart.excerptId)}).</p>`
+    terms.termStart !== null && terms.termEnd !== null
+      ? `<p class="caption">Term: ${escapeHtml(terms.termStart.text)} – ${escapeHtml(terms.termEnd.text)} (${escapeHtml(terms.termStart.excerptId)}).${boundsCite}</p>`
       : "";
   const extras =
     confirmation === undefined || confirmation.extras.length === 0
@@ -127,12 +144,13 @@ function renderTermsSection(receipt: RunReceipt): string {
       : `  <p class="caption">Review entries matching no extracted term (ignored): ${confirmation.extras
           .map((e) => `${escapeHtml(e.kind)} at ${escapeHtml(e.excerptId)}`)
           .join("; ")}</p>\n`;
-  const carried = outcome.carriedFrom === undefined ? "" : ` (carried from ${escapeHtml(outcome.carriedFrom)})`;
+  const carriedFrom = outcome.status === "extracted" ? outcome.carriedFrom : undefined;
+  const carried = carriedFrom === undefined ? "" : ` (carried from ${escapeHtml(carriedFrom)})`;
   return `<section class="terms">
   <h2>Extracted payment terms</h2>
-  <p class="caption">Extracted by ${escapeHtml(outcome.provider)} ${escapeHtml(outcome.model)}${carried}; cross-checked by Jev; each term confirmed by the reviewer file before results run.</p>
+  <p class="caption">Extracted by ${escapeHtml(outcome.provider)} ${escapeHtml(outcome.model ?? "unknown model")}${carried}; cross-checked by Jev; each term confirmed by the reviewer file before results run.</p>
   <p class="caption"><strong>The agreement does not say whether partial months are billed</strong> — both readings run below; invoice receipt date is not stated and is modeled as received on the invoice date.</p>
-${bounds}
+${blocked}${pick}${bounds}
   <table>
     <tr><th>Kind</th><th>Verbatim quote</th><th>Clause</th><th>Parsed value</th><th>Jev p</th><th>Reviewer</th></tr>
 ${rows}

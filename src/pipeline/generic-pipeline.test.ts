@@ -127,24 +127,78 @@ function cannedPdfLines(bytes: Uint8Array) {
   return Promise.resolve([{ page: 1, lines }]);
 }
 
-function stubFetch(opts: { noul?: number } = {}) {
+const BOUNDS_JSON = {
+  term_start: {
+    text: "May 29, 2024",
+    excerpt_id: "01-agreement.pdf#§3",
+    quote: "commence on May 29, 2024",
+  },
+  term_end: {
+    text: "September 29, 2024",
+    excerpt_id: "01-agreement.pdf#§3",
+    quote: "September 29, 2024",
+  },
+  confidence: 0.9,
+};
+
+const MISSING_BOUNDS_TERMS_JSON = { ...TERMS_JSON, term_start: null, term_end: null };
+
+function stubFetch(
+  opts: {
+    noul?: number;
+    termsJson?: unknown;
+    boundsJson?: unknown;
+    clausePick?: string;
+    clauseConfidence?: number;
+    orCalls?: { schemaName: string; userPrompt: string }[];
+  } = {},
+) {
   const impl = async (input: URL | string, init?: RequestInit) => {
     const u = String(input);
     if (u === `${TS}/v1/systemone`) {
       const body = JSON.parse((init as { body: string }).body) as {
-        questions: Record<string, unknown>;
+        questions: Record<string, { type?: string; criteria?: Record<string, string> }>;
       };
       const noul = opts.noul ?? 0.95;
       return jsonResponse({
         model: "jev-1.14.0",
         answers: Object.fromEntries(
-          Object.keys(body.questions).map((q) => [q, { type: "noul", noul }]),
+          Object.entries(body.questions).map(([q, spec]): [string, unknown] => {
+            if (spec.type === "choice") {
+              const keys = Object.keys(spec.criteria ?? {});
+              const pick = opts.clausePick ?? keys[0]!;
+              const confidence = opts.clauseConfidence ?? 0.9;
+              return [
+                q,
+                {
+                  type: "choice",
+                  choice: pick,
+                  confidence,
+                  probabilities: Object.fromEntries(
+                    keys.map((k) => [k, k === pick ? confidence : 0.05]),
+                  ),
+                },
+              ];
+            }
+            return [q, { type: "noul", noul }];
+          }),
         ),
         usage: { input_tokens: 9, output_tokens: 2 },
       });
     }
     if (u === `${OR}/v1/chat/completions`) {
-      return chatResponse(TERMS_JSON);
+      const body = JSON.parse((init as { body: string }).body) as {
+        response_format?: { json_schema?: { name?: string } };
+        messages?: { role: string; content: string }[];
+      };
+      const schemaName = body.response_format?.json_schema?.name ?? "";
+      const userPrompt =
+        body.messages?.find((m) => m.role === "user")?.content ?? "";
+      opts.orCalls?.push({ schemaName, userPrompt });
+      if (schemaName === "term_bounds") {
+        return chatResponse(opts.boundsJson ?? BOUNDS_JSON);
+      }
+      return chatResponse(opts.termsJson ?? TERMS_JSON);
     }
     if (u.startsWith(`${BOX}/2.0/folders/0/items`)) {
       return jsonResponse({ entries: [{ id: "F1", type: "folder", name: "caveat_AVIAT" }] });
@@ -326,7 +380,163 @@ describe("runGenericPipeline", () => {
     expect(receipt.blockedReasons.map((r) => r.reason)).toContain("cash_file_invalid");
     expect(receipt.readings).toEqual([]);
   });
+
+  it("makes no staged calls when the main extraction states the bounds", async () => {
+    const orCalls: { schemaName: string; userPrompt: string }[] = [];
+    stubFetch({ orCalls });
+    const { receipt } = await runGenericPipeline(config(reviewsDirWith(REVIEW_JSON)));
+    expect(receipt.status).toBe("reviewable");
+    expect(orCalls.map((c) => c.schemaName)).toEqual(["payment_terms"]);
+    expect(receipt.paymentTerms?.termClause).toBeUndefined();
+    expect(receipt.paymentTerms?.termBounds).toBeUndefined();
+    expect(receipt.typedCallDigests?.term_clause).toBeUndefined();
+    expect(receipt.typedCallDigests?.term_bounds).toBeUndefined();
+  });
+
+  it("narrows the bounds extraction to the Jev-picked clause and merges", async () => {
+    const orCalls: { schemaName: string; userPrompt: string }[] = [];
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, clausePick: "e3", orCalls });
+    const dir = reviewsDirWith(undefined);
+    const { receipt } = await runGenericPipeline(config(dir));
+
+    // The merged extraction is validated, then stops for confirmation.
+    expect(receipt.status).toBe("needs_review");
+    expect(receipt.blockedReasons.map((r) => r.reason)).toEqual(["terms_unconfirmed"]);
+    expect(receipt.readings).toEqual([]);
+    const outcome = receipt.paymentTerms?.outcome;
+    expect(outcome?.status).toBe("extracted");
+    if (outcome?.status === "extracted") {
+      expect(outcome.terms.boundsFrom).toBe("term_bounds");
+      expect(outcome.terms.boundsPick?.choice).toBe("e3");
+      expect(outcome.terms.boundsPick?.probabilities.e3).toBe(0.9);
+      expect(outcome.terms.termStart?.iso).toBe("2024-05-29");
+      expect(outcome.terms.termEnd?.iso).toBe("2024-09-29");
+    }
+    expect(receipt.paymentTerms?.termClause).toMatchObject({
+      question: "term_clause",
+      choice: "e3",
+      confidence: 0.9,
+      model: "jev-1.14.0",
+      narrowed: true,
+    });
+    expect(receipt.paymentTerms?.termBounds?.termStart?.iso).toBe("2024-05-29");
+    expect(receipt.typedCallDigests?.term_clause).toMatch(/^[0-9a-f]{64}$/);
+    expect(receipt.typedCallDigests?.term_bounds).toMatch(/^[0-9a-f]{64}$/);
+
+    // Only the picked excerpt was sent to the bounds call.
+    const boundsCall = orCalls.find((c) => c.schemaName === "term_bounds");
+    expect(boundsCall).toBeDefined();
+    expect(boundsCall?.userPrompt).toContain("commence on May 29, 2024");
+    expect(boundsCall?.userPrompt).not.toContain("net 30 days after");
+    expect(boundsCall?.userPrompt).not.toContain("last day of the invoiced month");
+  });
+
+  it("sends every excerpt to the bounds call on a low-confidence pick", async () => {
+    const orCalls: { schemaName: string; userPrompt: string }[] = [];
+    stubFetch({
+      termsJson: MISSING_BOUNDS_TERMS_JSON,
+      clausePick: "e3",
+      clauseConfidence: 0.5,
+      orCalls,
+    });
+    const { receipt } = await runGenericPipeline(config(reviewsDirWith(undefined)));
+    expect(receipt.blockedReasons.map((r) => r.reason)).toEqual(["terms_unconfirmed"]);
+    expect(receipt.paymentTerms?.termClause?.narrowed).toBe(false);
+    const boundsCall = orCalls.find((c) => c.schemaName === "term_bounds");
+    expect(boundsCall?.userPrompt).toContain("commence on May 29, 2024");
+    expect(boundsCall?.userPrompt).toContain("net 30 days after");
+  });
+
+  it("runs the bounds call over all excerpts without a TypeSafe connection", async () => {
+    const orCalls: { schemaName: string; userPrompt: string }[] = [];
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, orCalls });
+    const { receipt } = await runGenericPipeline({
+      ...config(reviewsDirWith(undefined)),
+      connections: CONNECTIONS,
+    });
+    expect(receipt.blockedReasons.map((r) => r.reason)).toEqual(["terms_unconfirmed"]);
+    expect(receipt.paymentTerms?.termClause).toBeUndefined();
+    expect(receipt.typedCallDigests?.term_clause).toBeUndefined();
+    const boundsCall = orCalls.find((c) => c.schemaName === "term_bounds");
+    expect(boundsCall?.userPrompt).toContain("net 30 days after");
+  });
+
+  it("keeps needs_review with partialTerms when the bounds call fails validation", async () => {
+    stubFetch({
+      termsJson: MISSING_BOUNDS_TERMS_JSON,
+      clausePick: "e3",
+      boundsJson: { ...BOUNDS_JSON, term_end: { ...BOUNDS_JSON.term_end, quote: "not in the excerpt" } },
+    });
+    const { receipt } = await runGenericPipeline(config(reviewsDirWith(undefined)));
+    expect(receipt.status).toBe("needs_review");
+    const reasons = receipt.blockedReasons.map((r) => r.reason);
+    expect(reasons).toContain("missing_term_bounds");
+    const outcome = receipt.paymentTerms?.outcome;
+    expect(outcome?.status).toBe("needs_review");
+    if (outcome?.status === "needs_review") {
+      // The blocked receipt still shows the terms the model read.
+      expect(outcome.partialTerms?.terms).toHaveLength(3);
+      expect(outcome.partialTerms?.terms[1]?.amountCents).toBe(500000);
+    }
+  });
+
+  it("keeps needs_review when the bounds call still leaves a bound null", async () => {
+    stubFetch({
+      termsJson: MISSING_BOUNDS_TERMS_JSON,
+      clausePick: "e3",
+      boundsJson: { ...BOUNDS_JSON, term_end: null },
+    });
+    const { receipt } = await runGenericPipeline(config(reviewsDirWith(undefined)));
+    expect(receipt.blockedReasons.map((r) => r.reason)).toContain("missing_term_bounds");
+    const outcome = receipt.paymentTerms?.outcome;
+    if (outcome?.status === "needs_review") {
+      // The filled bound is merged into the partial terms.
+      expect(outcome.partialTerms?.termStart?.iso).toBe("2024-05-29");
+      expect(outcome.partialTerms?.termEnd).toBeNull();
+      expect(outcome.partialTerms?.boundsFrom).toBe("term_bounds");
+    }
+  });
+
+  it("carries the term-clause pick, bounds and merged extraction together", async () => {
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, clausePick: "e3" });
+    const first = await runGenericPipeline(config(reviewsDirWith(REVIEW_JSON)));
+    expect(first.receipt.status).toBe("reviewable");
+    const orCalls: { schemaName: string; userPrompt: string }[] = [];
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, clausePick: "e3", orCalls });
+    const second = await runGenericPipeline({
+      ...config(reviewsDirWith(REVIEW_JSON)),
+      runId: "run-test-2",
+      previous: {
+        runId: first.receipt.runId,
+        receipt: first.receipt,
+        sourceTuple: first.sourceTuple,
+      },
+      carrySources: [{ runId: first.receipt.runId, receipt: first.receipt }],
+    });
+    const inc = second.receipt.incremental;
+    expect(inc?.carriedForward).toEqual(
+      expect.arrayContaining(["payment_terms", "term_clause", "term_bounds"]),
+    );
+    // Nothing called the model or Jev again.
+    expect(orCalls).toEqual([]);
+    expect(second.receipt.paymentTerms?.termClause?.carriedFrom).toBe(first.receipt.runId);
+    expect(second.receipt.paymentTerms?.termBounds?.carriedFrom).toBe(first.receipt.runId);
+    expect(second.receipt.typedCallDigests?.term_clause).toBe(
+      first.receipt.typedCallDigests?.term_clause,
+    );
+    expect(second.receipt.typedCallDigests?.term_bounds).toBe(
+      first.receipt.typedCallDigests?.term_bounds,
+    );
+    const outcome = second.receipt.paymentTerms?.outcome;
+    if (outcome?.status === "extracted") {
+      expect(outcome.terms.boundsFrom).toBe("term_bounds");
+      expect(outcome.terms.boundsPick?.choice).toBe("e3");
+    }
+    // The cross-check carried too (payment_terms digest covers merged terms).
+    expect(inc?.carriedForward).toContain("terms_crosscheck");
+  });
 });
+
 
 // Same fake as stubFetch but returned for composition.
 function stubFetchImpl(): typeof fetch {

@@ -37,6 +37,17 @@ const TERM_FIELDS = [
   "date_quote",
 ];
 
+const BOUND_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["text", "excerpt_id", "quote"],
+  properties: {
+    text: { type: "string" },
+    excerpt_id: { type: "string" },
+    quote: { type: "string" },
+  },
+} as const;
+
 export const PAYMENT_TERMS_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -63,41 +74,29 @@ export const PAYMENT_TERMS_JSON_SCHEMA = {
         },
       },
     },
-    term_start: {
-      anyOf: [
-        { type: "null" },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["text", "excerpt_id", "quote"],
-          properties: {
-            text: { type: "string" },
-            excerpt_id: { type: "string" },
-            quote: { type: "string" },
-          },
-        },
-      ],
-    },
-    term_end: {
-      anyOf: [
-        { type: "null" },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["text", "excerpt_id", "quote"],
-          properties: {
-            text: { type: "string" },
-            excerpt_id: { type: "string" },
-            quote: { type: "string" },
-          },
-        },
-      ],
-    },
+    term_start: { anyOf: [{ type: "null" }, BOUND_SCHEMA] },
+    term_end: { anyOf: [{ type: "null" }, BOUND_SCHEMA] },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+  },
+} as const;
+
+// The staged bounds-only extraction, sent over the Jev-picked term clause (or
+// every excerpt when the pick is not confident). The main schema must stay
+// byte-stable for the digest, so this is a separate schema.
+export const TERM_BOUNDS_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["term_start", "term_end", "confidence"],
+  properties: {
+    term_start: { anyOf: [{ type: "null" }, BOUND_SCHEMA] },
+    term_end: { anyOf: [{ type: "null" }, BOUND_SCHEMA] },
     confidence: { type: "number", minimum: 0, maximum: 1 },
   },
 } as const;
 
 export const PAYMENT_TERMS_USER_PROMPT = `Extract every term in these excerpts that sets when the consultant is paid in cash, exactly as written, as a list of terms. kind is one of: fixed_date_payment (an amount paid or invoiced on a stated date or on a stated day of each month: amount_text, recurrence_text such as "per month" when it repeats, and date_text for the date or the day-of-month rule), deposit (an amount paid at signing or before work starts: amount_text and date_text), payment_terms (how long after an invoice payment is due: net_days_text only), escrow_release (an amount released from escrow on a date: amount_text and date_text). Leave fields a kind does not use as null. quote and excerpt_id: the sentence stating the amount (or, for payment_terms, the days) and its excerpt. When a term's date or day-of-month rule is stated in a different excerpt from its amount, copy that sentence into date_quote and its excerpt id into date_excerpt_id; otherwise set both to null. Also give term_start and term_end: the dates the agreement's term starts and ends, exactly as written, usually in a section about the term of the agreement, or null if not stated. Every text value must be copied verbatim from its quote, and every quote verbatim from one supplied excerpt. Do not include equity, stock, expenses or reimbursements. Do not add, total, or convert amounts or dates.`;
+
+export const TERM_BOUNDS_USER_PROMPT = `Give the dates this agreement's term starts and ends, exactly as written. term_start: the date the term commences; term_end: the date it terminates or expires. Copy each date verbatim from its quote, and each quote verbatim from one supplied excerpt; excerpt_id is that excerpt's id. If either date is not stated, set it to null.`;
 
 // What a term's date_text can parse to: a concrete calendar date, or a
 // day-of-month rule for a recurring term.
@@ -174,11 +173,31 @@ export type ValidatedPaymentTerms = {
   termStart: TermBound | null;
   termEnd: TermBound | null;
   confidence: number;
+  // Set when the bounds came from the staged term_bounds pass rather than the
+  // main extraction — boundsPick is the Jev term_clause answer that chose the
+  // clause excerpt (with its probabilities), absent without a TypeSafe
+  // connection.
+  boundsFrom?: "term_bounds";
+  boundsPick?: {
+    choice: string;
+    confidence: number;
+    probabilities: Record<string, number>;
+    model: string;
+    usage?: unknown;
+  };
 };
+
+// A recurring term needs both bounds to expand into invoices.
+export function needsTermBounds(terms: ValidatedPaymentTerms): boolean {
+  return (
+    terms.terms.some((t) => t.recurrence === "monthly") &&
+    (terms.termStart === null || terms.termEnd === null)
+  );
+}
 
 export type PaymentTermsValidation =
   | { ok: true; terms: ValidatedPaymentTerms }
-  | { ok: false; reason: NeedsReviewReason; detail: string };
+  | { ok: false; reason: NeedsReviewReason; detail: string; partial?: ValidatedPaymentTerms };
 
 export type PaymentTermsOutcome =
   | {
@@ -192,12 +211,30 @@ export type PaymentTermsOutcome =
       // Set when this outcome was reused verbatim from an earlier run.
       carriedFrom?: string;
     }
+  // Validation failures that still produced terms carry them on partialTerms
+  // (missing bounds, low confidence) so a blocked receipt shows what was read.
+  | (NeedsReviewOutcome & { partialTerms?: ValidatedPaymentTerms });
+
+export type TermBoundsOutcome =
+  | {
+      status: "extracted";
+      termStart: TermBound | null;
+      termEnd: TermBound | null;
+      confidence: number;
+      provider: string;
+      model: string;
+      modelVersion?: string;
+      servedBy?: string;
+      latencyMs: number;
+    }
   | NeedsReviewOutcome;
 
-type Invalid = Extract<PaymentTermsValidation, { ok: false }>;
+type Invalid = Extract<PaymentTermsValidation, { ok: false }> & {
+  partial?: ValidatedPaymentTerms;
+};
 
-function invalid(reason: NeedsReviewReason, detail: string): Invalid {
-  return { ok: false, reason, detail };
+function invalid(reason: NeedsReviewReason, detail: string, partial?: ValidatedPaymentTerms): Invalid {
+  return { ok: false, reason, detail, ...(partial !== undefined ? { partial } : {}) };
 }
 
 type ExcerptIndex = Map<string, { index: number; text: string }>;
@@ -558,10 +595,18 @@ export function validatePaymentTermsExtraction(
     );
   }
 
+  const partial: ValidatedPaymentTerms = {
+    terms,
+    termStart: termStart.value,
+    termEnd: termEnd.value,
+    confidence,
+  };
+
   if (confidence < threshold) {
     return invalid(
       "low_confidence",
       `self-reported confidence ${confidence} is below threshold ${threshold}`,
+      partial,
     );
   }
 
@@ -570,18 +615,64 @@ export function validatePaymentTermsExtraction(
     return invalid(
       "missing_term_bounds",
       `term ${recurring[0]?.id} recurs monthly but term_start or term_end is not stated`,
+      partial,
     );
   }
 
   return {
     ok: true,
-    terms: {
-      terms,
-      termStart: termStart.value,
-      termEnd: termEnd.value,
-      confidence,
-    },
+    terms: partial,
   };
+}
+
+// The staged bounds-only extraction: same bound shape and verbatim chain as
+// the main extraction's term_start/term_end, minus the term list — either
+// bound may still come back null, which the caller treats as still missing.
+export function validateTermBoundsExtraction(
+  parsed: unknown,
+  excerpts: Excerpt[],
+  threshold: number,
+):
+  | { ok: true; termStart: TermBound | null; termEnd: TermBound | null; confidence: number }
+  | Invalid {
+  if (!isRecord(parsed)) {
+    return invalid("schema_mismatch", "bounds extraction is not a JSON object");
+  }
+  const topError = keySetError(parsed, ["term_start", "term_end", "confidence"]);
+  if (topError !== undefined) return invalid("schema_mismatch", topError);
+
+  const excerptById: ExcerptIndex = new Map(
+    excerpts.map((e, index) => [e.id, { index, text: e.text }]),
+  );
+
+  const startOut = boundField(parsed, "term_start", excerptById);
+  if (!startOut.ok) return startOut;
+  const endOut = boundField(parsed, "term_end", excerptById);
+  if (!endOut.ok) return endOut;
+
+  const confidence = parsed.confidence;
+  if (
+    typeof confidence !== "number" ||
+    !Number.isFinite(confidence) ||
+    confidence < 0 ||
+    confidence > 1
+  ) {
+    return invalid("schema_mismatch", "confidence must be a number between 0 and 1");
+  }
+
+  const termStart = parseBound("term_start", startOut.value);
+  if (!termStart.ok) return termStart;
+  const termEnd = parseBound("term_end", endOut.value);
+  if (!termEnd.ok) return termEnd;
+
+  if (confidence < threshold) {
+    return invalid(
+      "low_confidence",
+      `self-reported confidence ${confidence} is below threshold ${threshold}`,
+    );
+  }
+
+  return { ok: true, termStart: termStart.value, termEnd: termEnd.value, confidence };
 }
 
 export class OpenRouterPaymentTermsExtractor {
@@ -623,7 +714,7 @@ export class OpenRouterPaymentTermsExtractor {
       reason: NeedsReviewReason,
       detail: string,
       extra?: { modelVersion?: string; servedBy?: string },
-    ): PaymentTermsOutcome => ({
+    ): Extract<PaymentTermsOutcome, { status: "needs_review" }> => ({
       status: "needs_review",
       reason,
       detail,
@@ -641,11 +732,65 @@ export class OpenRouterPaymentTermsExtractor {
       this.threshold,
     );
     if (!validation.ok) {
-      return failOutcome(validation.reason, validation.detail, modelInfo(result));
+      const outcome = failOutcome(validation.reason, validation.detail, modelInfo(result));
+      if (validation.partial !== undefined) outcome.partialTerms = validation.partial;
+      return outcome;
     }
     return {
       status: "extracted",
       terms: validation.terms,
+      provider: this.name,
+      model: this.model,
+      ...modelInfo(result),
+      latencyMs: result.latencyMs,
+    };
+  }
+
+  // The staged bounds pass: one small call over the Jev-picked excerpt (or
+  // all of them). Separate schema and prompt so the main extraction's digest
+  // is untouched.
+  async extractTermBounds(
+    excerpts: Excerpt[],
+    options?: { signal?: AbortSignal },
+  ): Promise<TermBoundsOutcome> {
+    const userPrompt = `${TERM_BOUNDS_USER_PROMPT}\n\n${excerptTags(excerpts)}`;
+    const result = await callStructuredChat(
+      chatConfig(this.gatewayBaseUrl, this.timeoutMs, this.allowedModelVersions, this.fetchImpl),
+      {
+        model: this.model,
+        systemPrompt: DECISION_SYSTEM_PROMPT,
+        userPrompt,
+        schemaName: "term_bounds",
+        schema: TERM_BOUNDS_JSON_SCHEMA,
+      },
+      options,
+    );
+    if (!result.ok) {
+      return {
+        status: "needs_review",
+        reason: result.reason,
+        detail: result.detail,
+        provider: this.name,
+        model: this.model,
+        ...modelInfo(result),
+      };
+    }
+    const validation = validateTermBoundsExtraction(result.parsed, excerpts, this.threshold);
+    if (!validation.ok) {
+      return {
+        status: "needs_review",
+        reason: validation.reason,
+        detail: validation.detail,
+        provider: this.name,
+        model: this.model,
+        ...modelInfo(result),
+      };
+    }
+    return {
+      status: "extracted",
+      termStart: validation.termStart,
+      termEnd: validation.termEnd,
+      confidence: validation.confidence,
       provider: this.name,
       model: this.model,
       ...modelInfo(result),

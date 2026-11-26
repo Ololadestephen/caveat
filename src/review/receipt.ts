@@ -1,5 +1,6 @@
 import type { EvidenceFlag } from "../evidence/flags.ts";
-import type { PaymentTermsOutcome } from "../interpret/payment-terms.ts";
+import type { PaymentTermsOutcome, TermBound } from "../interpret/payment-terms.ts";
+import type { JevUsage } from "../interpret/types.ts";
 import type { ScheduleOutcome } from "../interpret/schedule.ts";
 import type { ClientCounterTexts } from "../interpret/client-counter.ts";
 import type {
@@ -121,6 +122,8 @@ export type RunReceipt = {
     // Generic payment-terms path.
     payment_terms?: string;
     terms_crosscheck?: string;
+    term_clause?: string;
+    term_bounds?: string;
   };
   releaseTiming: { outcome: DecisionOutcome; question: Question } | null;
   // The action used downstream: the decided action, or a validated human
@@ -161,6 +164,26 @@ export type RunReceipt = {
     excerpts: Excerpt[];
     crosscheck?: JevCrosscheck[];
     confirmation?: TermsReviewCheck;
+    // The staged bounds pass, when a recurring term needed bounds the main
+    // extraction left null: the Jev pick of the term clause, and the bounds
+    // extracted from the picked (or all) excerpts.
+    termClause?: {
+      question: "term_clause";
+      choice: string;
+      confidence: number;
+      probabilities: Record<string, number>;
+      model: string;
+      usage?: JevUsage;
+      // The pick met the confidence bar and only that excerpt was sent on.
+      narrowed: boolean;
+      carriedFrom?: string;
+    };
+    termBounds?: {
+      termStart: TermBound | null;
+      termEnd: TermBound | null;
+      model: string;
+      carriedFrom?: string;
+    };
   };
   // The client's reply letter (04-client-reply.pdf), when present and the run
   // reached the reply stage: what the client proposed, how it tested on every

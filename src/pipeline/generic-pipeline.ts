@@ -16,9 +16,9 @@ import { sha12, versionTag } from "../evidence/recheck.ts";
 import type { SourceTuple } from "../evidence/recheck.ts";
 import { listConnections } from "../gateway.ts";
 import type { Connection } from "../gateway.ts";
-import { JevDecisionProvider, JEV_MODEL, buildTermCrosscheckRequests } from "../interpret/jev.ts";
-import { OpenRouterPaymentTermsExtractor } from "../interpret/payment-terms.ts";
-import type { PaymentTermsOutcome } from "../interpret/payment-terms.ts";
+import { JevDecisionProvider, JEV_MODEL, buildTermClauseDigestInput, buildTermCrosscheckRequests } from "../interpret/jev.ts";
+import { OpenRouterPaymentTermsExtractor, TERM_BOUNDS_JSON_SCHEMA } from "../interpret/payment-terms.ts";
+import type { PaymentTermsOutcome, ValidatedPaymentTerms } from "../interpret/payment-terms.ts";
 import { DECISION_SYSTEM_PROMPT } from "../interpret/prompt.ts";
 import { PAYMENT_TERMS_JSON_SCHEMA } from "../interpret/payment-terms.ts";
 import type { Excerpt, JevCrosscheck } from "../interpret/types.ts";
@@ -182,7 +182,7 @@ function sectionize(
   })();
 }
 
-type TermsCarryKey = "payment_terms" | "terms_crosscheck";
+type TermsCarryKey = "payment_terms" | "terms_crosscheck" | "term_clause" | "term_bounds";
 
 // The pool of carry sources, newest first; a source lends only the calls
 // whose digest matches — needs_review receipts are filtered out.
@@ -283,9 +283,23 @@ export async function runGenericPipeline(config: PipelineConfig): Promise<Pipeli
   const termsSource = carrySourceFor("payment_terms", termsDigest);
   const prevTerms = termsSource?.receipt.paymentTerms?.outcome;
   let termsOutcome: PaymentTermsOutcome;
+  let termClause: NonNullable<RunReceipt["paymentTerms"]>["termClause"];
+  let termBounds: NonNullable<RunReceipt["paymentTerms"]>["termBounds"];
+  let termClauseDigest: string | undefined;
+  let termBoundsDigest: string | undefined;
   if (prevTerms?.status === "extracted" && termsSource !== undefined) {
     termsOutcome = { ...prevTerms, carriedFrom: termsSource.runId };
     carriedForward.push("payment_terms");
+    if (prevTerms.terms.boundsFrom === "term_bounds") {
+      termClause = termsSource.receipt.paymentTerms?.termClause;
+      if (termClause !== undefined) termClause = { ...termClause, carriedFrom: termsSource.runId };
+      termBounds = termsSource.receipt.paymentTerms?.termBounds;
+      if (termBounds !== undefined) termBounds = { ...termBounds, carriedFrom: termsSource.runId };
+      const sd = termsSource.receipt.typedCallDigests;
+      if (sd?.term_clause !== undefined) termClauseDigest = sd.term_clause;
+      if (sd?.term_bounds !== undefined) termBoundsDigest = sd.term_bounds;
+      carriedForward.push("term_clause", "term_bounds");
+    }
   } else {
     // The free tier's reasoning model can exceed the 60s default on a
     // full-document extraction; give this call extra headroom.
@@ -297,6 +311,116 @@ export async function runGenericPipeline(config: PipelineConfig): Promise<Pipeli
     termsOutcome = await extractor.extract({ id: "payment_terms", excerpts });
     reran.push("payment_terms");
   }
+
+  // --- Staged term bounds ---------------------------------------------------
+  // A recurring term needs the agreement's bounds to expand into invoices.
+  // When the main extraction left them null, Jev picks the term clause and a
+  // second extraction reads just the dates — over the picked excerpt when the
+  // pick is confident, over all of them otherwise. Each call carries by its
+  // own digest like the other typed calls.
+  if (
+    termsOutcome.status === "needs_review" &&
+    termsOutcome.reason === "missing_term_bounds" &&
+    termsOutcome.partialTerms !== undefined
+  ) {
+    const partial = termsOutcome.partialTerms;
+    let boundsExcerpts = excerpts;
+    let pick:
+      | { choice: string; confidence: number; probabilities: Record<string, number>; model: string }
+      | undefined;
+    if (connectors.typesafeConn !== undefined) {
+      const clauseDigest = digestValue(buildTermClauseDigestInput(excerpts, JEV_MODEL));
+      termClauseDigest = clauseDigest;
+      const clauseSource = carrySourceFor("term_clause", clauseDigest);
+      const prevClause = clauseSource?.receipt.paymentTerms?.termClause;
+      if (prevClause !== undefined && clauseSource !== undefined) {
+        pick = prevClause;
+        termClause = { ...prevClause, carriedFrom: clauseSource.runId };
+        carriedForward.push("term_clause");
+      } else {
+        const jev = new JevDecisionProvider({
+          gatewayBaseUrl: connectors.typesafeConn.gatewayBaseUrl,
+        });
+        const picked = await jev.pickTermClause(excerpts);
+        if (picked.status === "failed") {
+          blockedReasons.push({ reason: picked.reason, detail: picked.detail });
+        } else {
+          pick = picked.pick;
+          termClause = {
+            question: "term_clause",
+            choice: picked.pick.choice,
+            confidence: picked.pick.confidence,
+            probabilities: picked.pick.probabilities,
+            model: picked.pick.model,
+            ...(picked.pick.usage !== undefined ? { usage: picked.pick.usage } : {}),
+            narrowed: picked.pick.confidence >= 0.8,
+          };
+          reran.push("term_clause");
+        }
+      }
+      if (pick !== undefined && pick.confidence >= 0.8) {
+        const index = Number(pick.choice.slice(1)) - 1;
+        const chosen = excerpts[index];
+        if (chosen !== undefined) boundsExcerpts = [chosen];
+      }
+    }
+    // The bounds call runs unless the clause call failed (its blocker is
+    // already recorded).
+    if (connectors.typesafeConn === undefined || termClause !== undefined) {
+      const boundsDigest = digestValue({
+        schemaName: "term_bounds",
+        schema: TERM_BOUNDS_JSON_SCHEMA,
+        systemPrompt: DECISION_SYSTEM_PROMPT,
+        model,
+        questionId: "term_bounds",
+        excerpts: boundsExcerpts.map((e) => ({ id: e.id, text: e.text })),
+      });
+      termBoundsDigest = boundsDigest;
+      const boundsSource = carrySourceFor("term_bounds", boundsDigest);
+      const prevBounds = boundsSource?.receipt.paymentTerms?.termBounds;
+      let bounds: { termStart: ValidatedPaymentTerms["termStart"]; termEnd: ValidatedPaymentTerms["termEnd"] } | undefined;
+      if (prevBounds !== undefined && boundsSource !== undefined) {
+        bounds = prevBounds;
+        termBounds = { ...prevBounds, carriedFrom: boundsSource.runId };
+        carriedForward.push("term_bounds");
+      } else {
+        const boundsExtractor = new OpenRouterPaymentTermsExtractor({
+          gatewayBaseUrl: connectors.openrouterConn.gatewayBaseUrl,
+          model,
+          timeoutMs: 300_000,
+        });
+        const res = await boundsExtractor.extractTermBounds(boundsExcerpts);
+        if (res.status === "extracted") {
+          bounds = res;
+          termBounds = { termStart: res.termStart, termEnd: res.termEnd, model: res.model };
+          reran.push("term_bounds");
+        } else {
+          blockedReasons.push({ reason: res.reason, detail: res.detail });
+        }
+      }
+      if (bounds !== undefined) {
+        const merged: ValidatedPaymentTerms = {
+          ...partial,
+          termStart: partial.termStart ?? bounds.termStart,
+          termEnd: partial.termEnd ?? bounds.termEnd,
+          boundsFrom: "term_bounds",
+          ...(pick !== undefined ? { boundsPick: pick } : {}),
+        };
+        if (merged.termStart !== null && merged.termEnd !== null) {
+          termsOutcome = {
+            status: "extracted",
+            terms: merged,
+            provider: termsOutcome.provider,
+            model: termsOutcome.model ?? model,
+            latencyMs: 0,
+          };
+        } else {
+          termsOutcome = { ...termsOutcome, partialTerms: merged };
+        }
+      }
+    }
+  }
+
   if (termsOutcome.status === "needs_review") {
     blockedReasons.push({ reason: termsOutcome.reason, detail: termsOutcome.detail });
   }
@@ -476,6 +600,8 @@ export async function runGenericPipeline(config: PipelineConfig): Promise<Pipeli
       ...(termsCrosscheckDigest !== undefined
         ? { terms_crosscheck: termsCrosscheckDigest }
         : {}),
+      ...(termClauseDigest !== undefined ? { term_clause: termClauseDigest } : {}),
+      ...(termBoundsDigest !== undefined ? { term_bounds: termBoundsDigest } : {}),
     },
     releaseTiming: null,
     effectiveAction: null,
@@ -486,6 +612,8 @@ export async function runGenericPipeline(config: PipelineConfig): Promise<Pipeli
       excerpts,
       ...(termsCrosscheck !== undefined ? { crosscheck: termsCrosscheck } : {}),
       ...(confirmation !== undefined ? { confirmation } : {}),
+      ...(termClause !== undefined ? { termClause } : {}),
+      ...(termBounds !== undefined ? { termBounds } : {}),
     },
     humanReview: { status: "not_applicable" },
     flags,

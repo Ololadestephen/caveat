@@ -190,6 +190,46 @@ export function buildSourceRequest(
   };
 }
 
+export const TERM_CLAUSE_INSTRUCTIONS =
+  "Which excerpt states when this agreement's term starts and ends?";
+
+// The term-clause citation names the file as well as the section: generic
+// contracts spread their clauses across two exhibits with the same numbers.
+function fileSectionCriteria(excerpts: Excerpt[]): Record<string, string> {
+  return Object.fromEntries(
+    excerpts.map((e, i) => [
+      `e${i + 1}`,
+      `Excerpt e${i + 1} (${e.source.fileName} ${e.source.section ?? e.id})`,
+    ]),
+  );
+}
+
+// One choice question over every excerpt: Jev picks the clause that states
+// the agreement's term bounds.
+export function buildTermClauseRequest(
+  excerpts: Excerpt[],
+  model: string,
+): { model: string; state: unknown; questions: Record<string, unknown> } {
+  return {
+    model,
+    state: jevState(excerpts),
+    questions: {
+      term_clause: {
+        type: "choice",
+        instructions: TERM_CLAUSE_INSTRUCTIONS,
+        criteria: fileSectionCriteria(excerpts),
+      },
+    },
+  };
+}
+
+export function buildTermClauseDigestInput(
+  excerpts: Excerpt[],
+  model: string,
+): Record<string, unknown> {
+  return { provider: "typesafe", request: buildTermClauseRequest(excerpts, model) };
+}
+
 // What the release-timing call digest covers: both questions, with all three
 // action-specific citation instruction strings — the one actually sent
 // depends on the answer, so a matching digest must commit to all of them.
@@ -699,6 +739,38 @@ export class JevDecisionProvider implements DecisionProvider {
       status: "uncertain",
       checks: [check],
       detail: `Jev could not confirm the extracted change (p = ${noul.toFixed(2)})`,
+    };
+  }
+
+  // The staged term-clause pick: one choice over every excerpt. The answer is
+  // used by the caller to narrow the bounds extraction when confident.
+  async pickTermClause(
+    excerpts: Excerpt[],
+    options?: { signal?: AbortSignal },
+  ): Promise<
+    | { status: "picked"; pick: JevQuestionResult }
+    | { status: "failed"; reason: NeedsReviewReason; detail: string }
+  > {
+    const res = await this.post(buildTermClauseRequest(excerpts, this.model), options);
+    if (!res.ok) return { status: "failed", reason: res.reason, detail: res.detail };
+    if (res.model !== this.model) {
+      return {
+        status: "failed",
+        reason: "model_mismatch",
+        detail: `systemone answered with model ${res.model}, expected ${this.model}`,
+      };
+    }
+    const pick = parseChoice(res.answers.term_clause, excerptKeys(excerpts));
+    if (pick === undefined) {
+      return {
+        status: "failed",
+        reason: "schema_mismatch",
+        detail: "systemone answers.term_clause missing or not a choice answer",
+      };
+    }
+    return {
+      status: "picked",
+      pick: { ...pick, model: res.model, ...(res.usage !== undefined ? { usage: res.usage } : {}) },
     };
   }
 
