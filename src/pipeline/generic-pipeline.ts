@@ -32,6 +32,7 @@ import {
 import type { TermsAssumptions } from "../plan/terms.ts";
 import { RunInputError, validateRunInput } from "../runner/validate.ts";
 import { digestValue } from "../runner/digest.ts";
+import { isRecord } from "../shape.ts";
 import { RUNNER_VERSION, runFixture } from "../runner/run.ts";
 import { RECEIPT_VERSION } from "../review/receipt.ts";
 import type { RunReceipt } from "../review/receipt.ts";
@@ -280,14 +281,142 @@ export async function runGenericPipeline(config: PipelineConfig): Promise<Pipeli
     questionId: "payment_terms",
     excerpts: excerptsDigestInput,
   });
-  const termsSource = carrySourceFor("payment_terms", termsDigest);
-  const prevTerms = termsSource?.receipt.paymentTerms?.outcome;
-  let termsOutcome: PaymentTermsOutcome;
   let termClause: NonNullable<RunReceipt["paymentTerms"]>["termClause"];
   let termBounds: NonNullable<RunReceipt["paymentTerms"]>["termBounds"];
   let termClauseDigest: string | undefined;
   let termBoundsDigest: string | undefined;
-  if (prevTerms?.status === "extracted" && termsSource !== undefined) {
+  let termsCrosscheck: JevCrosscheck[] | undefined;
+  let termsCrosscheckDigest: string | undefined;
+
+  // The review file may name the run whose extraction the reviewer confirmed:
+  // that run's payment-terms calls carry even though it ended needs_review —
+  // its extraction was validated and only the review gate held it back.
+  let reviewRaw: unknown;
+  try {
+    reviewRaw =
+      profile.reviewFileName === undefined
+        ? undefined
+        : JSON.parse(await readFile(`${config.reviewsDir}/${profile.reviewFileName}`, "utf8"));
+  } catch {
+    reviewRaw = undefined;
+  }
+  const extractedIn =
+    isRecord(reviewRaw) && typeof reviewRaw.extractedIn === "string"
+      ? reviewRaw.extractedIn
+      : undefined;
+  const namedSource =
+    extractedIn === undefined
+      ? undefined
+      : (config.carrySources ?? (config.previous !== undefined ? [config.previous] : [])).find(
+          (s) => s.runId === extractedIn,
+        );
+
+  let namedCarryFailure: string | undefined;
+  let namedOutcome: Extract<PaymentTermsOutcome, { status: "extracted" }> | undefined;
+  if (extractedIn !== undefined) {
+    const prefix = `the review file names extractedIn ${extractedIn} but`;
+    if (namedSource === undefined) {
+      namedCarryFailure = `${prefix} that run is not among the carry sources`;
+    } else {
+      const sr = namedSource.receipt;
+      const prev = sr.paymentTerms?.outcome;
+      const reviewGate = (r: string) => r === "terms_unconfirmed" || r === "term_rejected";
+      const nonReviewBlocker = sr.blockedReasons.find((b) => !reviewGate(b.reason));
+      if (prev?.status !== "extracted") {
+        namedCarryFailure = `${prefix} its payment_terms outcome is ${prev?.status ?? "missing"}`;
+      } else if (prev.terms.termStart === null || prev.terms.termEnd === null) {
+        namedCarryFailure = `${prefix} its term bounds are not filled`;
+      } else if (nonReviewBlocker !== undefined) {
+        namedCarryFailure = `${prefix} it is blocked by ${nonReviewBlocker.reason}, not just the review gate`;
+      } else if (sr.typedCallDigests?.payment_terms !== termsDigest) {
+        namedCarryFailure = `${prefix} its payment_terms digest does not match this run's excerpts`;
+      } else if (connectors.typesafeConn !== undefined) {
+        // term_clause covers every excerpt; term_bounds covers the excerpt
+        // set its own pick chose (all of them when it did not narrow).
+        const clauseDigest = digestValue(buildTermClauseDigestInput(excerpts, JEV_MODEL));
+        if (sr.typedCallDigests.term_clause !== clauseDigest) {
+          namedCarryFailure = `${prefix} its term_clause digest does not match`;
+        } else {
+          const sc = sr.paymentTerms?.termClause;
+          const narrowed =
+            sc !== undefined && sc.narrowed ? excerpts[Number(sc.choice.slice(1)) - 1] : undefined;
+          const boundsExcerpts = narrowed !== undefined ? [narrowed] : excerpts;
+          const boundsDigest = digestValue({
+            schemaName: "term_bounds",
+            schema: TERM_BOUNDS_JSON_SCHEMA,
+            systemPrompt: DECISION_SYSTEM_PROMPT,
+            model,
+            questionId: "term_bounds",
+            excerpts: boundsExcerpts.map((e) => ({ id: e.id, text: e.text })),
+          });
+          if (sr.typedCallDigests.term_bounds !== boundsDigest) {
+            namedCarryFailure = `${prefix} its term_bounds digest does not match`;
+          } else {
+            const reqs = buildTermCrosscheckRequests(prev.terms.terms, JEV_MODEL);
+            const crosscheckDigest =
+              reqs === undefined ? undefined : digestValue({ provider: "typesafe", requests: reqs });
+            if (crosscheckDigest === undefined) {
+              namedCarryFailure = `${prefix} its terms cannot be cross-checked (missing texts)`;
+            } else if (sr.typedCallDigests.terms_crosscheck !== crosscheckDigest) {
+              namedCarryFailure = `${prefix} its terms_crosscheck digest does not match`;
+            }
+          }
+        }
+        if (namedCarryFailure === undefined) {
+          namedOutcome = { ...prev, carriedFrom: namedSource.runId };
+          carriedForward.push("payment_terms");
+          const digests = sr.typedCallDigests;
+          const sc = sr.paymentTerms?.termClause;
+          if (sc !== undefined) {
+            termClause = { ...sc, carriedFrom: namedSource.runId };
+            carriedForward.push("term_clause");
+          }
+          termClauseDigest = digests?.term_clause;
+          const sb = sr.paymentTerms?.termBounds;
+          if (sb !== undefined) {
+            termBounds = { ...sb, carriedFrom: namedSource.runId };
+            carriedForward.push("term_bounds");
+          }
+          termBoundsDigest = digests?.term_bounds;
+          const sx = sr.paymentTerms?.crosscheck;
+          if (sx !== undefined && sx.length > 0) {
+            termsCrosscheck = sx;
+            carriedForward.push("terms_crosscheck");
+          }
+          termsCrosscheckDigest = digests?.terms_crosscheck;
+        }
+      } else {
+        // No TypeSafe connection: the bounds call ran over every excerpt.
+        const boundsDigest = digestValue({
+          schemaName: "term_bounds",
+          schema: TERM_BOUNDS_JSON_SCHEMA,
+          systemPrompt: DECISION_SYSTEM_PROMPT,
+          model,
+          questionId: "term_bounds",
+          excerpts: excerpts.map((e) => ({ id: e.id, text: e.text })),
+        });
+        if (sr.typedCallDigests.term_bounds !== boundsDigest) {
+          namedCarryFailure = `${prefix} its term_bounds digest does not match`;
+        } else {
+          namedOutcome = { ...prev, carriedFrom: namedSource.runId };
+          carriedForward.push("payment_terms");
+          const sb = sr.paymentTerms?.termBounds;
+          if (sb !== undefined) {
+            termBounds = { ...sb, carriedFrom: namedSource.runId };
+            carriedForward.push("term_bounds");
+          }
+          termBoundsDigest = sr.typedCallDigests?.term_bounds;
+        }
+      }
+    }
+  }
+
+  const termsSource = carrySourceFor("payment_terms", termsDigest);
+  const prevTerms = termsSource?.receipt.paymentTerms?.outcome;
+  let termsOutcome: PaymentTermsOutcome;
+  if (namedOutcome !== undefined) {
+    termsOutcome = namedOutcome;
+  } else if (prevTerms?.status === "extracted" && termsSource !== undefined) {
     termsOutcome = { ...prevTerms, carriedFrom: termsSource.runId };
     carriedForward.push("payment_terms");
     if (prevTerms.terms.boundsFrom === "term_bounds") {
@@ -428,9 +557,11 @@ export async function runGenericPipeline(config: PipelineConfig): Promise<Pipeli
   // --- Jev per-term cross-check ---------------------------------------------
   // Jev verifies the extraction's restated clause on every term against that
   // term's own quote. Carries by its own digest like the other typed calls.
-  let termsCrosscheck: JevCrosscheck[] | undefined;
-  let termsCrosscheckDigest: string | undefined;
-  if (connectors.typesafeConn !== undefined && termsOutcome.status === "extracted") {
+  if (
+    connectors.typesafeConn !== undefined &&
+    termsOutcome.status === "extracted" &&
+    termsCrosscheck === undefined
+  ) {
     const requests = buildTermCrosscheckRequests(termsOutcome.terms.terms, JEV_MODEL);
     if (requests === undefined) {
       blockedReasons.push({
@@ -471,7 +602,15 @@ export async function runGenericPipeline(config: PipelineConfig): Promise<Pipeli
   // Every extracted term needs a confirmed entry in the private review file.
   let confirmation: TermsReviewCheck | undefined;
   if (termsOutcome.status === "extracted") {
-    confirmation = await loadTermsConfirmation(config, profile, termsOutcome, sections);
+    confirmation =
+      namedCarryFailure !== undefined
+        ? {
+            status: "needs_review",
+            reason: "terms_unconfirmed",
+            detail: namedCarryFailure,
+            extras: [],
+          }
+        : await loadTermsConfirmation(config, profile, termsOutcome, sections);
     if (confirmation.status === "needs_review") {
       blockedReasons.push({ reason: confirmation.reason, detail: confirmation.detail });
     }

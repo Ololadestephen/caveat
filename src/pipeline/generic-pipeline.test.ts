@@ -535,7 +535,134 @@ describe("runGenericPipeline", () => {
     // The cross-check carried too (payment_terms digest covers merged terms).
     expect(inc?.carriedForward).toContain("terms_crosscheck");
   });
+
+  it("carries the payment-terms calls from the named needs_review run", async () => {
+    // Run 1 ends at the review gate: extraction, clause pick, bounds and
+    // cross-check all validated but no review file exists yet.
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, clausePick: "e3" });
+    const first = await runGenericPipeline(config(reviewsDirWith(undefined)));
+    expect(first.receipt.status).toBe("needs_review");
+    expect(first.receipt.paymentTerms?.outcome.status).toBe("extracted");
+    expect(first.receipt.paymentTerms?.termClause?.choice).toBe("e3");
+
+    // The reviewer confirms that run's extraction in place.
+    const orCalls: { schemaName: string; userPrompt: string }[] = [];
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, clausePick: "e3", orCalls });
+    const named = { extractedIn: first.receipt.runId, terms: REVIEW_JSON.terms };
+    const second = await runGenericPipeline({
+      ...config(reviewsDirWith(named)),
+      runId: "run-test-2",
+      previous: {
+        runId: first.receipt.runId,
+        receipt: first.receipt,
+        sourceTuple: first.sourceTuple,
+      },
+      carrySources: [{ runId: first.receipt.runId, receipt: first.receipt }],
+    });
+
+    expect(second.receipt.status).toBe("reviewable");
+    expect(second.receipt.blockedReasons).toEqual([]);
+    // All four calls carried; nothing asked the model or Jev again.
+    const inc = second.receipt.incremental;
+    expect(inc?.carriedForward).toEqual(
+      expect.arrayContaining([
+        "payment_terms",
+        "term_clause",
+        "term_bounds",
+        "terms_crosscheck",
+      ]),
+    );
+    expect(orCalls).toEqual([]);
+    const outcome = second.receipt.paymentTerms?.outcome;
+    if (outcome?.status === "extracted") {
+      expect(outcome.carriedFrom).toBe(first.receipt.runId);
+      expect(outcome.terms.boundsFrom).toBe("term_bounds");
+    }
+    expect(second.receipt.paymentTerms?.termClause?.carriedFrom).toBe(first.receipt.runId);
+    expect(second.receipt.paymentTerms?.termBounds?.carriedFrom).toBe(first.receipt.runId);
+    expect(second.receipt.paymentTerms?.crosscheck).toHaveLength(3);
+    expect(second.receipt.paymentTerms?.confirmation?.status).toBe("confirmed");
+    // The confirmation matched, so both readings ran on both workers.
+    expect(second.receipt.readings.map((r) => r.id)).toEqual([
+      "partial_months_prorated",
+      "partial_months_not_billed",
+    ]);
+  });
+
+  it("refuses to carry when the named run has a non-review blocker", async () => {
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, clausePick: "e3" });
+    const first = await runGenericPipeline(config(reviewsDirWith(undefined)));
+    const dirty = JSON.parse(JSON.stringify(first.receipt)) as typeof first.receipt;
+    dirty.blockedReasons = [
+      ...dirty.blockedReasons,
+      { reason: "quote_not_verbatim", detail: "terms[2].quote is not verbatim" },
+    ];
+    const named = { extractedIn: first.receipt.runId, terms: REVIEW_JSON.terms };
+    const second = await runGenericPipeline({
+      ...config(reviewsDirWith(named)),
+      runId: "run-test-2",
+      previous: {
+        runId: first.receipt.runId,
+        receipt: dirty,
+        sourceTuple: first.sourceTuple,
+      },
+      carrySources: [{ runId: first.receipt.runId, receipt: dirty }],
+    });
+    expect(second.receipt.status).toBe("needs_review");
+    const block = second.receipt.blockedReasons.find((r) => r.reason === "terms_unconfirmed");
+    expect(block?.detail).toContain("extractedIn");
+    expect(block?.detail).toContain("quote_not_verbatim");
+    expect(second.receipt.incremental?.carriedForward ?? []).not.toContain("payment_terms");
+  });
+
+  it("refuses to carry when a named-run digest does not match", async () => {
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, clausePick: "e3" });
+    const first = await runGenericPipeline(config(reviewsDirWith(undefined)));
+    const dirty = JSON.parse(JSON.stringify(first.receipt)) as typeof first.receipt;
+    if (dirty.typedCallDigests !== undefined) {
+      dirty.typedCallDigests.term_bounds = "0".repeat(64);
+    }
+    const named = { extractedIn: first.receipt.runId, terms: REVIEW_JSON.terms };
+    const second = await runGenericPipeline({
+      ...config(reviewsDirWith(named)),
+      runId: "run-test-2",
+      previous: {
+        runId: first.receipt.runId,
+        receipt: dirty,
+        sourceTuple: first.sourceTuple,
+      },
+      carrySources: [{ runId: first.receipt.runId, receipt: dirty }],
+    });
+    const block = second.receipt.blockedReasons.find((r) => r.reason === "terms_unconfirmed");
+    expect(block?.detail).toContain("term_bounds digest does not match");
+  });
+
+  it("does not carry from a needs_review source when the file names no extractedIn", async () => {
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, clausePick: "e3" });
+    const first = await runGenericPipeline(config(reviewsDirWith(undefined)));
+    const orCalls: { schemaName: string; userPrompt: string }[] = [];
+    stubFetch({ termsJson: MISSING_BOUNDS_TERMS_JSON, clausePick: "e3", orCalls });
+    // Same review entries, but no extractedIn: normal carry rules apply and a
+    // needs_review source lends nothing — the extraction reruns.
+    const second = await runGenericPipeline({
+      ...config(reviewsDirWith(REVIEW_JSON)),
+      runId: "run-test-2",
+      previous: {
+        runId: first.receipt.runId,
+        receipt: first.receipt,
+        sourceTuple: first.sourceTuple,
+      },
+      carrySources: [{ runId: first.receipt.runId, receipt: first.receipt }],
+    });
+    expect(second.receipt.incremental?.carriedForward ?? []).not.toContain("payment_terms");
+    expect(second.receipt.incremental?.reran ?? []).toContain("payment_terms");
+    // The fresh extraction emits the same terms, so confirmation still passes.
+    expect(second.receipt.paymentTerms?.confirmation?.status).toBe("confirmed");
+    expect(second.receipt.status).toBe("reviewable");
+    expect(orCalls.map((c) => c.schemaName)).toContain("payment_terms");
+  });
 });
+
 
 
 // Same fake as stubFetch but returned for composition.
