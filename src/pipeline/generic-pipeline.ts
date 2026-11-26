@@ -287,9 +287,12 @@ export async function runGenericPipeline(config: PipelineConfig): Promise<Pipeli
     termsOutcome = { ...prevTerms, carriedFrom: termsSource.runId };
     carriedForward.push("payment_terms");
   } else {
+    // The free tier's reasoning model can exceed the 60s default on a
+    // full-document extraction; give this call extra headroom.
     const extractor = new OpenRouterPaymentTermsExtractor({
       gatewayBaseUrl: connectors.openrouterConn.gatewayBaseUrl,
       model,
+      timeoutMs: 300_000,
     });
     termsOutcome = await extractor.extract({ id: "payment_terms", excerpts });
     reran.push("payment_terms");
