@@ -6,6 +6,13 @@ deterministic cash-flow model before anyone signs. Every run ends in a
 receipt that a human must approve; the export is a draft counteroffer note —
 never sent, never legal advice.
 
+**Demo video (1 min 52 s):** https://youtu.be/tmyJL_PotMQ
+
+Built for [Fly.io Hacksgiving](https://fly.io/hacksgiving/) (Nov 23–29, 2026).
+It runs on Fly.io Sprites (one coordinator and two isolated worker Sprites) and
+uses five Sprites Connectors: Box, TypeSafeAI (Jev), OpenRouter, and one
+connector per worker.
+
 ## The demo story: Twin Vee escrow
 
 The live evidence is a text rendering of three public SEC EDGAR exhibits from
@@ -196,6 +203,34 @@ of the agreement body and Exhibit A only — Exhibits B and C are omitted.
 - **Self-reported confidence**: model confidence values are self-reported by
   the model, not calibrated — a `1.00` is the model's own claim and is shown
   as such.
+
+## Reference runs
+
+Two live runs on `main` (`83cb9df`) serve as the reference baselines. The
+video is a motion rebuild of the review pages, using figures from these runs
+and from the client-reply run `run-20261126-135456-888a`. Receipts, review
+pages and drafts are kept in the owner's private evidence, not in this repo.
+
+- **Twin Vee**: `run-20261126-194248-5921`. It uses the owner's
+  `my-cash.csv` and the synthetic v2 client reply, which both workers mark
+  safe. Its input and result digests match the earlier verified run
+  `run-20261126-163526-4046`.
+- **Aviat**: `run-20261126-194031-c7fb`. Both partial-month readings run
+  under both scenarios on both workers, using the labeled demo cash.
+
+## Limitations and next
+
+- **No Aviat counteroffer search.** The counteroffer search does not yet
+  cover monthly-fee contracts; shorter payment terms is the planned first
+  lever.
+- **Slow free model.** Extraction and search use a free OpenRouter model,
+  which can be slow and sometimes stops a run for human review. Answers
+  reused from earlier clean runs avoid most repeat calls.
+- **No Box webhook.** The watcher polls Box every 60 s while the
+  coordinator is awake, so it only sees uploads while the coordinator
+  is running.
+- **Read-only.** Caveat never writes to Box and never sends, signs or
+  publishes anything; drafts export only after a human approves them.
 
 ## Requirements
 - Node.js >=24.10 <25 (see `.nvmrc`), npm 11.6.1
